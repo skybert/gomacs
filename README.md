@@ -2,6 +2,8 @@
 
 Simple TTY only Emacs clone written in Go.
 
+<img src="doc/gomacs-screenshot.png" alt="gomacs"/>
+
 # Which features?
 
 - Open and write files.
