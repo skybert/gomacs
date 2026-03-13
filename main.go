@@ -8,12 +8,15 @@
 // first one is shown on startup.  Without arguments the *scratch* buffer is
 // displayed.
 //
+// If data is piped to gomacs it is opened in a *stdin* buffer.
+//
 // gomacs loads ~/.gomacs or ~/.config/gomacs/init.el on startup unless -Q is given.
 package main
 
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/skybert/gomacs/internal/editor"
@@ -23,7 +26,17 @@ func main() {
 	quick := flag.Bool("Q", false, "start with minimum customisation (skip init file)")
 	flag.Parse()
 
-	opts := editor.Options{Quick: *quick}
+	// Drain piped stdin before tcell claims /dev/tty for keyboard input.
+	var stdinData []byte
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+		stdinData, _ = io.ReadAll(os.Stdin)
+		// Reopen /dev/tty as stdin so tcell can read keyboard events.
+		if tty, err := os.Open("/dev/tty"); err == nil {
+			os.Stdin = tty
+		}
+	}
+
+	opts := editor.Options{Quick: *quick, StdinData: stdinData}
 	e, err := editor.New(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gomacs: init error: %v\n", err)

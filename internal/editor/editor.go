@@ -116,6 +116,8 @@ type Editor struct {
 	kbdMacro          []terminal.KeyEvent // last completed macro
 	kbdMacroPlaying   bool
 
+	escPending bool // ESC pressed — next key becomes Meta chord
+
 	// Query replace state.
 	queryReplaceActive bool
 	queryReplaceFrom   string
@@ -138,9 +140,13 @@ type Editor struct {
 type Options struct {
 	// Quick suppresses loading of the user init file, equivalent to emacs -Q.
 	Quick bool
+	// StdinData, if non-nil, is opened as a read-only *stdin* buffer on startup.
+	// The caller must read and close os.Stdin before calling New so that tcell
+	// can claim /dev/tty for keyboard input.
+	StdinData []byte
 }
 
-/// New creates and initialises the editor: terminal, scratch buffer, keymaps,
+// / New creates and initialises the editor: terminal, scratch buffer, keymaps,
 // windows, and the Elisp evaluator.  It also attempts to load the user's init
 // file (~/.gomacs or ~/.config/gomacs/init.el) unless opts.Quick is true.
 func New(opts Options) (*Editor, error) {
@@ -199,6 +205,18 @@ func New(opts Options) (*Editor, error) {
 	// Load user init file (skipped with -Q).
 	if !opts.Quick {
 		e.loadInitFile()
+	}
+
+	// If the caller read piped stdin data, open it as a *stdin* buffer.
+	if len(opts.StdinData) > 0 {
+		if utf8.Valid(opts.StdinData) {
+			stdinBuf := buffer.NewWithContent("*stdin*", string(opts.StdinData))
+			stdinBuf.SetPoint(0)
+			e.buffers = append(e.buffers, stdinBuf)
+			e.activeWin.SetBuf(stdinBuf)
+		} else {
+			e.Message("stdin: not valid UTF-8, ignored")
+		}
 	}
 
 	return e, nil
@@ -658,6 +676,7 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 	} else {
 		b = buffer.New(name)
 	}
+	b.SetPoint(0)
 	b.SetFilename(path)
 
 	// Set mode from extension.
@@ -735,7 +754,39 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 
 	// describe-key mode: intercept the next complete key sequence.
 	if e.describeKeyPending {
+		// If ESC prefix is pending, fold it into the key as ModAlt before describing.
+		if e.escPending {
+			e.escPending = false
+			if ke.Key == tcell.KeyRune {
+				ke.Mod |= tcell.ModAlt
+			}
+		}
 		e.handleDescribeKey(ke)
+		return
+	}
+
+	// ESC-prefix Meta: ESC followed by a key synthesises the Meta chord.
+	// This handles terminals that deliver M-<key> as ESC + <key> rather
+	// than a single event with ModAlt set (e.g. kitty on macOS).
+	if e.escPending {
+		e.escPending = false
+		if ke.Key == tcell.KeyEscape {
+			// ESC ESC → cancel prefix (no-op)
+			e.Message("")
+			return
+		}
+		if ke.Key == tcell.KeyRune {
+			ke.Mod |= tcell.ModAlt
+		}
+		// Re-enter dispatch with the augmented key (no re-recording needed).
+		e.dispatchParsedKey(ke)
+		return
+	}
+
+	// ESC alone (outside special modes) starts the ESC-prefix Meta sequence.
+	if ke.Key == tcell.KeyEscape && ke.Mod == 0 {
+		e.escPending = true
+		e.Message("ESC-")
 		return
 	}
 
@@ -767,6 +818,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	// When in a dired buffer, check the dired keymap first (before prefix maps).
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "dired" {
 		if e.diredDispatch(ke) {
+			return
+		}
+	}
+
+	// When in a *Buffer List* buffer, handle navigation and selection.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "buffer-list" {
+		if e.bufferListDispatch(ke) {
 			return
 		}
 	}

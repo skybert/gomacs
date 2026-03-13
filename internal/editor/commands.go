@@ -981,16 +981,43 @@ func (e *Editor) cmdToggleReadOnly() {
 }
 
 func (e *Editor) cmdSaveBuffersKillTerminal() {
+	// Collect buffers with unsaved changes that have a backing file.
+	var unsaved []*buffer.Buffer
 	for _, b := range e.buffers {
 		if b.Modified() && b.Filename() != "" {
+			unsaved = append(unsaved, b)
+		}
+	}
+	if len(unsaved) == 0 {
+		e.quit = true
+		return
+	}
+	// Ask about each unsaved buffer in turn.
+	e.promptSaveNext(unsaved, 0)
+}
+
+// promptSaveNext iterates through unsaved buffers one at a time, prompting
+// the user whether to save each.  When all are handled it sets e.quit.
+func (e *Editor) promptSaveNext(unsaved []*buffer.Buffer, idx int) {
+	if idx >= len(unsaved) {
+		e.quit = true
+		return
+	}
+	b := unsaved[idx]
+	e.Message("Save buffer %s? (y/n)", b.Name())
+	e.readCharPending = true
+	e.readCharCallback = func(r rune) {
+		switch r {
+		case 'y', 'Y':
 			if err := os.WriteFile(b.Filename(), []byte(b.String()), 0600); err != nil {
 				e.Message("Error saving %s: %v", b.Name(), err)
 				return
 			}
 			b.SetModified(false)
 		}
+		// 'n' or anything else: skip this buffer, continue with the next.
+		e.promptSaveNext(unsaved, idx+1)
 	}
-	e.quit = true
 }
 
 func (e *Editor) cmdSwitchToBuffer() {
@@ -1049,11 +1076,16 @@ func (e *Editor) cmdListBuffers() {
 	listBuf := e.FindBuffer("*Buffer List*")
 	if listBuf == nil {
 		listBuf = buffer.NewWithContent("*Buffer List*", sb.String())
+		listBuf.SetMode("buffer-list")
+		listBuf.SetReadOnly(true)
 		e.buffers = append(e.buffers, listBuf)
 	} else {
+		listBuf.SetReadOnly(false)
 		listBuf.Delete(0, listBuf.Len())
 		listBuf.InsertString(0, sb.String())
+		listBuf.SetReadOnly(true)
 	}
+	listBuf.SetPoint(0)
 	e.activeWin.SetBuf(listBuf)
 }
 
