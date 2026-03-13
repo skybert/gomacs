@@ -3,7 +3,7 @@ MODULE   := github.com/skybert/gomacs
 BUILDDIR := build
 GOFLAGS  :=
 
-.PHONY: all build test lint vulncheck fmt clean
+.PHONY: all build test lint vulncheck fmt clean install
 
 all: fmt lint test vulncheck build
 
@@ -25,3 +25,7 @@ fmt:
 
 clean:
 	rm -rf $(BUILDDIR)
+
+install: build
+	mkdir -p ~/.local/bin
+	cp $(BUILDDIR)/$(BINARY) ~/.local/bin/$(BINARY)

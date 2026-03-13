@@ -212,6 +212,22 @@ func TestParseKeyArrow(t *testing.T) {
 	}
 }
 
+func TestParseKeyCtrlSlashNormalized(t *testing.T) {
+	// Some terminals deliver C-/ as {KeyRune, '/', ModCtrl}.
+	// ParseKey must normalise this to KeyCtrlUnderscore.
+	ev := tcell.NewEventKey(tcell.KeyRune, '/', tcell.ModCtrl)
+	ke := ParseKey(ev)
+	if ke.Key != tcell.KeyCtrlUnderscore {
+		t.Errorf("C-/ normalization: key = %v, want KeyCtrlUnderscore", ke.Key)
+	}
+	if ke.Rune != 0 {
+		t.Errorf("C-/ normalization: rune = %v, want 0", ke.Rune)
+	}
+	if ke.Mod&tcell.ModCtrl != 0 {
+		t.Error("C-/ normalization: ModCtrl should be stripped")
+	}
+}
+
 func TestParseKeyF1(t *testing.T) {
 	ev := tcell.NewEventKey(tcell.KeyF1, 0, 0)
 	ke := ParseKey(ev)

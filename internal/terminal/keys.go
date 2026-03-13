@@ -65,6 +65,15 @@ func ParseKey(ev *tcell.EventKey) KeyEvent {
 		ke.Mod &^= tcell.ModCtrl
 	}
 
+	// Some terminals (xterm modifyOtherKeys, kitty keyboard protocol) deliver
+	// C-/ as {KeyRune, '/', ModCtrl} rather than KeyCtrlUnderscore.
+	// Normalise to the canonical form so bindings and FormatKey work correctly.
+	if ke.Key == tcell.KeyRune && ke.Mod&tcell.ModCtrl != 0 && ke.Rune == '/' {
+		ke.Key = tcell.KeyCtrlUnderscore
+		ke.Rune = 0
+		ke.Mod &^= tcell.ModCtrl
+	}
+
 	// For printable-rune events the rune already encodes any Shift (e.g. '<'
 	// vs ',').  Strip ModShift so Meta+Shift combos such as M-< match the
 	// MetaKey('<') binding, which carries only ModAlt.

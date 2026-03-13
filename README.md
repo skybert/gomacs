@@ -8,9 +8,16 @@ Simple TTY only Emacs clone written in Go.
 - All files are read and written as UTF-8
 - Search, forwards and backwards.
 - Syntax highlighting and indention engine of some languages,
-  including Go, Emacs Lisp and BASH.
+  including Go, Emacs Lisp, Markdown and BASH.
 - Self documenting features, like <kbd>C-h f</kbd> `describe-function`
   and <kbd>C-h k</kbd> `describe-key`
+
+# How to run it?
+
+```perl
+$ make install
+$ ~/.local/bin/gomacs
+```
 
 # Why gomacs?
 

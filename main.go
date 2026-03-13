@@ -8,7 +8,7 @@
 // first one is shown on startup.  Without arguments the *scratch* buffer is
 // displayed.
 //
-// gomacs loads ~/.emacs or ~/.emacs.d/init.el on startup unless -Q is given.
+// gomacs loads ~/.gomacs or ~/.config/gomacs/init.el on startup unless -Q is given.
 package main
 
 import (

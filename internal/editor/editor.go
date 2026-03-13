@@ -140,9 +140,9 @@ type Options struct {
 	Quick bool
 }
 
-// New creates and initialises the editor: terminal, scratch buffer, keymaps,
+/// New creates and initialises the editor: terminal, scratch buffer, keymaps,
 // windows, and the Elisp evaluator.  It also attempts to load the user's init
-// file (~/.emacs or ~/.emacs.d/init.el) unless opts.Quick is true.
+// file (~/.gomacs or ~/.config/gomacs/init.el) unless opts.Quick is true.
 func New(opts Options) (*Editor, error) {
 	term, err := terminal.New()
 	if err != nil {
@@ -354,15 +354,15 @@ func (e *Editor) setupKeymaps() {
 	cx.Bind(keymap.PlainKey('e'), "call-last-kbd-macro")
 }
 
-// loadInitFile tries ~/.emacs and ~/.emacs.d/init.el in that order.
+// loadInitFile tries ~/.gomacs and ~/.config/gomacs/init.el in that order.
 func (e *Editor) loadInitFile() {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
 	candidates := []string{
-		filepath.Join(home, ".emacs"),
-		filepath.Join(home, ".emacs.d", "init.el"),
+		filepath.Join(home, ".gomacs"),
+		filepath.Join(home, ".config", "gomacs", "init.el"),
 	}
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {
@@ -1630,6 +1630,11 @@ func (e *Editor) placeCursor() {
 	pt := w.Point()
 	line, col := buf.LineCol(pt)
 	screenRow := w.Top() + (line - w.ScrollLine())
+	// Clamp to the last text row — never let the cursor land on the modeline.
+	maxTextRow := w.Top() + w.Height() - 2
+	if screenRow > maxTextRow {
+		screenRow = maxTextRow
+	}
 	e.term.ShowCursor(w.Left()+col, screenRow)
 }
 
