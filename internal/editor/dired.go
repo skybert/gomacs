@@ -173,8 +173,29 @@ func (e *Editor) diredDispatch(ke terminal.KeyEvent) bool {
 		return false
 	}
 
-	if ke.Key != tcell.KeyRune {
+	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
 		return false
+	}
+
+	// Enter opens the entry under point, same as 'f'.
+	if ke.Key == tcell.KeyEnter {
+		name, ok := e.diredCurrentFile(buf, ds)
+		if !ok {
+			return true
+		}
+		full := filepath.Join(ds.dir, name)
+		info, err := os.Stat(full)
+		if err == nil && info.IsDir() {
+			e.openDired(full)
+		} else {
+			b, err := e.loadFile(full)
+			if err != nil {
+				e.Message("Error: %v", err)
+			} else {
+				e.activeWin.SetBuf(b)
+			}
+		}
+		return true
 	}
 
 	switch ke.Rune {

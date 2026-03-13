@@ -15,6 +15,10 @@ make fmt          # gofmt -w -s .
 go test ./internal/editor/ -run TestSplitWindowRight
 go test ./internal/syntax/ -run TestElispHighlighter
 
+# Coverage report (artifacts go to build/)
+go test ./... -coverprofile=build/coverage.out
+go tool cover -func=build/coverage.out
+
 # Run the editor (skip init file)
 ./build/gomacs -Q somefile.go
 ```
@@ -69,3 +73,15 @@ The project uses a strict `.golangci.yml`. Common suppressions you may need:
 - Nested `if`/`else if` chains → rewrite as `switch` (gocritic `ifElseChain`).
 - `for i := 0; i < n; i++` over integers → `for range n` (intrange).
 - `if x > max { x = max }` → `x = min(x, max)` (modernize).
+
+### Testing
+
+Every non-trivial Go function must have a corresponding unit test.
+
+**Rules:**
+- All new code must ship with tests in the same PR.
+- Tests live in `_test.go` files in the same package (white-box testing preferred).
+- Use `newTestEditor(content)` (defined in `internal/editor/commands_test.go`) to build a headless editor — no real terminal needed.
+- Build artefacts (coverage profiles, binaries) go under `build/`; never commit them.
+- The `terminal` package wraps tcell's screen directly; test only the pure helpers (`parseColor`, `faceToStyle`, `ParseKey`) — do not try to spin up a real screen in tests.
+- When adding a highlighter to `internal/syntax`, add a `*_test.go` alongside it covering keywords, strings, comments, and numbers.

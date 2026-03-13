@@ -1,10 +1,40 @@
-# gomacs
+# What is gomacs?
+
 Simple TTY only Emacs clone written in Go.
+
+# Which features?
+
+- Open and write files.
+- All files are read and written as UTF-8
+- Search, forwards and backwards.
+- Syntax highlighting and indention engine of some languages,
+  including Go, Emacs Lisp and BASH.
+- Self documenting features, like <kbd>C-h f</kbd> `describe-function`
+  and <kbd>C-h k</kbd> `describe-key`
 
 # Why gomacs?
 
-I use this project for exploring what an LLM can do. This program is not made by me, or coded by me. It's my idea, I've written the spec and instructions to the robot, but from there on, the implementation is done by the LLM. I take no pride in this because I didn't make it myself. I do find it amusing, though, to see how far the LLM technology has come and what it's possible to make it do, granted I can write precise (and terse!) specifications. As input, I haven't used any Emacs source code (although the LLM is probably trained on loads of open source software, Emacs included). Instead, I've fed it the Emacs tutorial and Emacs info manual, among other things.
+I use this project for exploring what an LLM can do. This program is
+not made by me, or coded by me. It's my idea, I've written the spec
+and instructions to the robot, but from there on, the implementation
+is all done by the LLM.
 
-If you don't like this, by all means move along, the real GNU Emacs is infidetely more powerful and usable and is available on all platforms under the sun. The only reason for using `gomacs` would be if you need a simple, self documenting editor with Emacs shorcuts, that can be downloaded and run as a single binary. That's it.
+I take no pride in this because I didn't make it myself. I do find it
+amusing, though, to see how far the LLM technology has come and what
+it's possible to make it do, granted I can write precise (and terse!)
+specifications. As input, I haven't used any Emacs source code
+(although the LLM is probably trained on loads of open source
+software, Emacs included). Instead, I've fed it the Emacs tutorial and
+Emacs info manual, among other things.
+
+If you don't like this, by all means move along, the [real GNU
+Emacs](https://gnu.org/software/emacs) is indefinitely more powerful
+and usable and is available on all platforms under the sun. The only
+reason for using `gomacs` would be if you need a small and simple,
+self documenting editor with Emacs shortcuts, that can be downloaded
+and run as a single binary. That's it. For all other use cases you'll
+be better off using the real thing.
+
+Cheers,
 
 -Torstein

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/skybert/gomacs/internal/buffer"
@@ -638,6 +639,9 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // user-provided path is intentional
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
+	}
+	if len(data) > 0 && !utf8.Valid(data) {
+		return nil, fmt.Errorf("%s: file is not valid UTF-8", path)
 	}
 	name := filepath.Base(path)
 
@@ -1619,13 +1623,14 @@ func (e *Editor) placeCursor() {
 		e.term.ShowCursor(col, row)
 		return
 	}
-	// Cursor in the active window.
+	// Cursor in the active window: use the window-local point so each window
+	// tracks its own cursor independently from the shared buffer point.
 	w := e.activeWin
 	buf := w.Buf()
-	pt := buf.Point()
+	pt := w.Point()
 	line, col := buf.LineCol(pt)
 	screenRow := w.Top() + (line - w.ScrollLine())
-	e.term.ShowCursor(col, screenRow)
+	e.term.ShowCursor(w.Left()+col, screenRow)
 }
 
 // ---------------------------------------------------------------------------

@@ -920,6 +920,11 @@ func (e *Editor) cmdFindFile() {
 				path = home + path[1:]
 			}
 		}
+		// If the path is a directory, open it in dired instead.
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			e.openDired(path)
+			return
+		}
 		b, err := e.loadFile(path)
 		if err != nil {
 			e.Message("Error opening file: %v", err)
@@ -1145,7 +1150,11 @@ func (e *Editor) cmdOtherWindow() {
 	}
 	for i, w := range e.windows {
 		if w == e.activeWin {
-			e.activeWin = e.windows[(i+1)%len(e.windows)]
+			next := e.windows[(i+1)%len(e.windows)]
+			// Restore the incoming window's saved point into the shared buffer
+			// so that syncWindowPoint (called after dispatch) keeps it intact.
+			next.Buf().SetPoint(next.Point())
+			e.activeWin = next
 			return
 		}
 	}

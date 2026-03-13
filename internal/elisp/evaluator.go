@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Env is a linked-list environment (scope chain).
@@ -119,6 +120,9 @@ func (ev *Evaluator) EvalFile(path string) error {
 	data, err := os.ReadFile(path) //nolint:gosec // user-provided path is intentional
 	if err != nil {
 		return err
+	}
+	if !utf8.Valid(data) {
+		return fmt.Errorf("%s: file is not valid UTF-8", path)
 	}
 	_, err = ev.EvalString(string(data))
 	return err

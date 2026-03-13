@@ -41,7 +41,7 @@ func calcIndent(mode string, lines []string, lineIdx int) string {
 	case "go":
 		return calcIndentBraced(lines, lineIdx, "\t", "//")
 	case "java":
-		return calcIndentBraced(lines, lineIdx, "    ", "//")
+		return calcIndentBraced(lines, lineIdx, "  ", "//")
 	case "python":
 		return calcIndentPython(lines, lineIdx)
 	case "bash":
@@ -200,15 +200,15 @@ func calcIndentPython(lines []string, lineIdx int) string {
 
 	// If the previous non-blank line ends with ':', add one level.
 	if strings.HasSuffix(prevTrimmed, ":") && !strings.HasPrefix(prevTrimmed, "#") {
-		indent += "    "
+		indent += "  "
 	}
 
 	// If the current line starts a dedent keyword, strip one level.
 	curTrimmed := strings.TrimSpace(lines[lineIdx])
 	for _, kw := range pythonDedentKeywords {
 		if strings.HasPrefix(curTrimmed, kw) {
-			if len(indent) >= 4 {
-				indent = indent[4:]
+			if len(indent) >= 2 {
+				indent = indent[2:]
 			} else {
 				indent = ""
 			}
@@ -241,7 +241,7 @@ func calcIndentBash(lines []string, lineIdx int) string {
 		}
 	}
 
-	return strings.Repeat("\t", depth)
+	return strings.Repeat("  ", depth)
 }
 
 func bashNetIndent(line string) int {

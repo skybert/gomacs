@@ -1,4 +1,5 @@
 .claude
+coverage.out
+debug.log
 gomacs
 specs
-debug.log
