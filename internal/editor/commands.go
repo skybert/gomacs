@@ -251,6 +251,30 @@ func init() {
 	registerCommand("dired", (*Editor).cmdDired,
 		"Edit a directory. You can visit files, mark for deletion, etc.")
 
+	// ---- language modes ----------------------------------------------------
+	registerCommand("go-mode", (*Editor).cmdGoMode,
+		"Select Go mode for the current buffer.")
+	registerCommand("python-mode", (*Editor).cmdPythonMode,
+		"Select Python mode for the current buffer.")
+	registerCommand("java-mode", (*Editor).cmdJavaMode,
+		"Select Java mode for the current buffer.")
+	registerCommand("bash-mode", (*Editor).cmdBashMode,
+		"Select Bash mode for the current buffer.")
+	registerCommand("markdown-mode", (*Editor).cmdMarkdownMode,
+		"Select Markdown mode for the current buffer.")
+	registerCommand("elisp-mode", (*Editor).cmdElispMode,
+		"Select Emacs Lisp mode for the current buffer.")
+	registerCommand("fundamental-mode", (*Editor).cmdFundamentalMode,
+		"Select Fundamental mode (no syntax highlighting or indentation).")
+
+	// ---- LSP ---------------------------------------------------------------
+	registerCommand("lsp-find-definition", (*Editor).cmdLSPFindDefinition,
+		"Find the definition of the symbol at point using the LSP server.")
+	registerCommand("lsp-pop-definition", (*Editor).cmdLSPPopDefinition,
+		"Pop back to the position before the last lsp-find-definition jump.")
+	registerCommand("lsp-hover", (*Editor).cmdLSPHover,
+		"Show documentation for the symbol at point from the LSP server.")
+
 	// ---- misc stubs --------------------------------------------------------
 	registerCommand("ispell-word", (*Editor).cmdIspellWord,
 		"Check spelling of word at point.")
@@ -495,7 +519,7 @@ func (e *Editor) cmdIndentOrComplete() {
 		indentElispLine(buf)
 		return
 	}
-	indentCurrentLine(buf)
+	indentCurrentLine(buf, e.modeIndentStr(buf.Mode()))
 }
 
 func (e *Editor) cmdSelfInsert() {
@@ -800,6 +824,8 @@ func (e *Editor) cmdSetMarkCommand() {
 }
 
 func (e *Editor) cmdKeyboardQuit() {
+	// Cancel any in-flight LSP operation.
+	e.lspOpCancel()
 	if e.minibufActive {
 		e.cancelMinibuffer()
 		return
@@ -965,6 +991,7 @@ func (e *Editor) writeBuffer(buf *buffer.Buffer) {
 		return
 	}
 	buf.SetModified(false)
+	e.lspDidSave(buf)
 	e.Message("Wrote %s", buf.Filename())
 }
 

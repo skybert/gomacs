@@ -10,7 +10,8 @@ import (
 // the buffer's major mode.  Point is moved past the new indentation.
 // The operation is idempotent: calling it again on an already-correct line
 // is a no-op (point stays at the first non-whitespace character).
-func indentCurrentLine(buf *buffer.Buffer) {
+// unit is the per-level indentation string (e.g. "\t" for Go, "  " for Python).
+func indentCurrentLine(buf *buffer.Buffer, unit string) {
 	text := buf.String()
 	lines := strings.Split(text, "\n")
 	pt := buf.Point()
@@ -31,21 +32,23 @@ func indentCurrentLine(buf *buffer.Buffer) {
 		lineIdx = len(lines) - 1
 	}
 
-	desired := calcIndent(buf.Mode(), lines, lineIdx)
+	desired := calcIndent(buf.Mode(), lines, lineIdx, unit)
 	applyIndent(buf, lines, lineIdx, desired)
 }
 
 // calcIndent returns the desired indentation string for the given line.
-func calcIndent(mode string, lines []string, lineIdx int) string {
+// unit is the per-level indent string used for Python, Bash, and braced
+// languages (overrides the built-in defaults for those modes).
+func calcIndent(mode string, lines []string, lineIdx int, unit string) string {
 	switch mode {
 	case "go":
-		return calcIndentBraced(lines, lineIdx, "\t", "//")
+		return calcIndentBraced(lines, lineIdx, unit, "//")
 	case "java":
-		return calcIndentBraced(lines, lineIdx, "  ", "//")
+		return calcIndentBraced(lines, lineIdx, unit, "//")
 	case "python":
-		return calcIndentPython(lines, lineIdx)
+		return calcIndentPython(lines, lineIdx, unit)
 	case "bash":
-		return calcIndentBash(lines, lineIdx)
+		return calcIndentBash(lines, lineIdx, unit)
 	default:
 		// markdown, fundamental, unknown: copy previous line's indentation
 		return calcIndentCopy(lines, lineIdx)
@@ -182,7 +185,7 @@ func netBraceCount(line, commentPrefix string) int {
 
 var pythonDedentKeywords = []string{"else:", "elif ", "except", "finally:", "except:"}
 
-func calcIndentPython(lines []string, lineIdx int) string {
+func calcIndentPython(lines []string, lineIdx int, unit string) string {
 	if lineIdx == 0 {
 		return ""
 	}
@@ -200,15 +203,15 @@ func calcIndentPython(lines []string, lineIdx int) string {
 
 	// If the previous non-blank line ends with ':', add one level.
 	if strings.HasSuffix(prevTrimmed, ":") && !strings.HasPrefix(prevTrimmed, "#") {
-		indent += "  "
+		indent += unit
 	}
 
 	// If the current line starts a dedent keyword, strip one level.
 	curTrimmed := strings.TrimSpace(lines[lineIdx])
 	for _, kw := range pythonDedentKeywords {
 		if strings.HasPrefix(curTrimmed, kw) {
-			if len(indent) >= 2 {
-				indent = indent[2:]
+			if len(indent) >= len(unit) {
+				indent = indent[len(unit):]
 			} else {
 				indent = ""
 			}
@@ -221,7 +224,7 @@ func calcIndentPython(lines []string, lineIdx int) string {
 
 // ---- Bash indentation -------------------------------------------------------
 
-func calcIndentBash(lines []string, lineIdx int) string {
+func calcIndentBash(lines []string, lineIdx int, unit string) string {
 	depth := 0
 	for i := range lineIdx {
 		depth += bashNetIndent(lines[i])
@@ -241,7 +244,7 @@ func calcIndentBash(lines []string, lineIdx int) string {
 		}
 	}
 
-	return strings.Repeat("  ", depth)
+	return strings.Repeat(unit, depth)
 }
 
 func bashNetIndent(line string) int {

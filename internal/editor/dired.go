@@ -113,6 +113,18 @@ func (e *Editor) diredRefresh(b *buffer.Buffer, ds *diredState) {
 		if entry.IsDir() {
 			name += "/"
 		}
+		// Show '>' in the mark column when a buffer for this file is open.
+		if mark == ' ' {
+			absPath, aerr := filepath.Abs(filepath.Join(ds.dir, entry.Name()))
+			if aerr == nil {
+				for _, ob := range e.buffers {
+					if ob.Filename() == absPath {
+						mark = '>'
+						break
+					}
+				}
+			}
+		}
 		modTime := info.ModTime().Format("Jan _2  2006")
 		if info.ModTime().Year() == time.Now().Year() {
 			modTime = info.ModTime().Format("Jan _2 15:04")

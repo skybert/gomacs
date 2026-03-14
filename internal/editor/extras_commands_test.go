@@ -228,7 +228,7 @@ func TestIndentCurrentLine(t *testing.T) {
 	// Place point on the second line "x := 1" (position 13).
 	buf(e).SetPoint(13)
 	e.activeWin.SetPoint(13)
-	indentCurrentLine(buf(e))
+	indentCurrentLine(buf(e), "\t")
 	got := buf(e).String()
 	if !strings.HasPrefix(strings.SplitN(got, "\n", 3)[1], "\t") {
 		t.Fatalf("indent: second line of Go code should start with a tab; got %q", got)

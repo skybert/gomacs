@@ -1,0 +1,155 @@
+.TH GOMACS 1 "2026-03-14" "f02de65-dirty" "User Commands"
+.SH NAME
+gomacs \- a TTY Emacs clone written in Go
+.SH SYNOPSIS
+.B gomacs
+[\fI\-Q\fR]
+[\fIfile\fR ...]
+.SH DESCRIPTION
+.B gomacs
+is a terminal-only Emacs-compatible editor.
+It supports gap-buffer text storage, unlimited undo, syntax highlighting,
+Emacs Lisp configuration, Language Server Protocol (LSP) integration,
+and a Dired file manager.
+.PP
+Key bindings follow GNU Emacs conventions.  An Emacs Lisp init file is
+loaded at startup from
+.B ~/.gomacs
+or
+.B ~/.config/gomacs/init.el
+(whichever is found first).
+.SH OPTIONS
+.TP
+.B \-Q
+Skip loading the init file.
+.SH KEY BINDINGS
+.SS Movement
+.TS
+l l.
+C\-f / C\-b	Forward / backward character
+C\-n / C\-p	Next / previous line
+M\-f / M\-b	Forward / backward word
+C\-a / C\-e	Beginning / end of line
+M\-< / M\->	Beginning / end of buffer
+C\-v / M\-v	Scroll down / up
+M\-g g	Go to line
+.TE
+.SS Editing
+.TS
+l l.
+C\-d	Delete character forward
+DEL	Delete character backward
+M\-d	Kill word forward
+M\-DEL	Kill word backward
+C\-k	Kill to end of line
+C\-w	Kill region
+M\-w	Copy region
+C\-y	Yank (paste)
+M\-y	Yank pop (cycle kill ring)
+C\-/	Undo
+C\-x C\-u / C\-x C\-l	Upcase / downcase region
+M\-q	Fill paragraph
+M\-t	Transpose words
+M\-^	Join line
+M\-m	Back to indentation
+C\-x C\-o	Delete blank lines
+TAB	Indent line / complete
+.TE
+.SS Search and Replace
+.TS
+l l.
+C\-s	Incremental search forward
+C\-r	Incremental search backward
+M\-%	Query replace
+M\-x replace\-string	Replace string (no prompting)
+.TE
+.SS Windows and Buffers
+.TS
+l l.
+C\-x 2	Split window below
+C\-x 3	Split window right
+C\-x o	Other window
+C\-x 1	Delete other windows
+C\-x b	Switch buffer
+C\-x k	Kill buffer
+C\-x C\-f	Find (open) file
+C\-x C\-s	Save buffer
+C\-x C\-w	Write file (save as)
+.TE
+.SS LSP
+.TS
+l l.
+M\-.	Go to definition
+M\-,	Pop back from definition
+C\-c C\-r	Rename symbol
+.TE
+.SS Dired (C\-x d)
+.TS
+l l.
+n / p	Next / previous file
+f / e / RET	Open file or directory
+o	Open in other window
+d	Mark for deletion
+u	Unmark
+x	Execute deletions
+g	Refresh listing
+^	Go to parent directory
+q	Quit dired
+.TE
+.SS Help
+.TS
+l l.
+C\-h k	Describe key
+C\-h f	Describe function
+C\-h v	Describe variable
+.TE
+.SH CONFIGURATION
+Configuration is written in Emacs Lisp and placed in
+.B ~/.gomacs
+or
+.BR ~/.config/gomacs/init.el .
+.PP
+.SS Configurable variables
+.TP
+.B fill\-column
+Target column for
+.BR M\-q " (fill\-paragraph)."
+Default: 70.
+Example: \fB(setq fill\-column 80)\fR
+.TP
+.B go\-indent
+Per\-level indentation string for Go buffers.
+An integer is expanded to that many spaces; a string is used verbatim.
+Default: a tab character.
+Example: \fB(setq go\-indent "    ")\fR
+.TP
+.B python\-indent
+Per\-level indentation string for Python buffers.
+Default: two spaces.
+Example: \fB(setq python\-indent 4)\fR
+.TP
+.B sh\-indent
+Per\-level indentation string for Bash/sh buffers.
+Default: two spaces.
+Example: \fB(setq sh\-indent 4)\fR
+.TP
+.B java\-indent
+Per\-level indentation string for Java buffers.
+Default: two spaces.
+Example: \fB(setq java\-indent 4)\fR
+.TP
+.B markdown\-indent
+Per\-level indentation string for Markdown buffers.
+Default: two spaces.
+Example: \fB(setq markdown\-indent 4)\fR
+.SH FILES
+.TP
+.B ~/.gomacs
+Primary Emacs Lisp init file.
+.TP
+.B ~/.config/gomacs/init.el
+Alternative init file location (XDG style).
+.SH AUTHORS
+Torstein Krause Johansen <torstein@skybert.net>
+.SH VERSION
+f02de65-dirty

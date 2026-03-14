@@ -87,6 +87,12 @@ func (t *Terminal) PollEvent() tcell.Event {
 	return t.screen.PollEvent()
 }
 
+// PostWakeup injects a synthetic EventInterrupt to unblock PollEvent.
+// Used by background goroutines to notify the main event loop of pending work.
+func (t *Terminal) PostWakeup() {
+	_ = t.screen.PostEvent(tcell.NewEventInterrupt(nil))
+}
+
 // ShowCursor moves the hardware cursor to (col, row).
 func (t *Terminal) ShowCursor(col, row int) {
 	t.screen.ShowCursor(col, row)

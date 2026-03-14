@@ -1,0 +1,534 @@
+package editor
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"github.com/skybert/gomacs/internal/buffer"
+	"github.com/skybert/gomacs/internal/lsp"
+)
+
+// lspConn holds a running LSP server connection for one language mode.
+type lspConn struct {
+	client  *lsp.Client
+	rootURI string
+
+	filesMu   sync.Mutex
+	openFiles map[string]int // uri → last-sent modCount
+
+	diagMu      sync.RWMutex
+	diagnostics map[string][]lsp.Diagnostic // uri → diagnostics
+}
+
+// lspDefPos is one entry on the definition jump stack (for M-,).
+type lspDefPos struct {
+	filename string
+	point    int
+}
+
+// ---- async helper ----------------------------------------------------------
+
+// lspAsync runs work in a goroutine.  When work returns a callback fn (which
+// may be nil), fn is sent to e.lspCbs and the event loop is woken via
+// PostWakeup so the callback runs on the main goroutine.
+func (e *Editor) lspAsync(work func() func()) {
+	go func() {
+		fn := work()
+		if fn != nil {
+			e.lspCbs <- fn
+			e.term.PostWakeup()
+		}
+	}()
+}
+
+// lspNewOpCtx creates a fresh cancellable context for a user-initiated LSP
+// operation, cancelling any previous one.
+func (e *Editor) lspNewOpCtx() context.Context {
+	e.lspOpCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	e.lspOpCancel = cancel
+	return ctx
+}
+
+// ---- lifecycle -------------------------------------------------------------
+
+// lspActivate ensures an LSP server is running for buf's mode, then sends
+// textDocument/didOpen for buf.  The blocking initialize handshake runs in a
+// goroutine so the UI is never frozen.
+func (e *Editor) lspActivate(buf *buffer.Buffer) {
+	info := langModeByName(buf.Mode())
+	if info == nil || len(info.lspCmd) == 0 {
+		return
+	}
+
+	conn := e.lspConns[buf.Mode()]
+	if conn == nil {
+		root := findProjectRoot(buf.Filename(), info.rootMarkers)
+		c, err := lsp.Start(info.lspCmd[0], info.lspCmd[1:]...)
+		if err != nil {
+			e.Message("LSP: cannot start %s: %v", info.lspCmd[0], err)
+			return
+		}
+		conn = &lspConn{
+			client:      c,
+			rootURI:     lsp.FileURI(root),
+			openFiles:   make(map[string]int),
+			diagnostics: make(map[string][]lsp.Diagnostic),
+		}
+		e.lspConns[buf.Mode()] = conn
+
+		conn.client.SetNotifyHandler(func(method string, params json.RawMessage) {
+			// Diagnostics arrive asynchronously; store them and wake the UI.
+			e.lspHandleNotify(conn, method, params)
+			e.term.PostWakeup()
+		})
+
+		// Run the blocking initialize handshake in a goroutine.
+		mode := buf.Mode()
+		filename := buf.Filename()
+		connCopy := conn
+		e.lspAsync(func() func() {
+			if err := lspInitialize(connCopy); err != nil {
+				return func() {
+					e.Message("LSP: initialize failed: %v", err)
+					delete(e.lspConns, mode)
+					connCopy.client.Close()
+				}
+			}
+			// Open the file that triggered activation.
+			return func() {
+				if b := e.findBufferByFilename(filename); b != nil {
+					lspDidOpen(connCopy, b)
+				}
+			}
+		})
+		return
+	}
+
+	lspDidOpen(conn, buf)
+}
+
+// lspClose shuts down all LSP connections.  Called when the editor exits.
+func (e *Editor) lspClose() {
+	for mode, conn := range e.lspConns {
+		conn.client.Close()
+		delete(e.lspConns, mode)
+	}
+}
+
+// lspMaybeDidChange sends textDocument/didChange if buf has been modified
+// since the last send.  Called from Redraw so diagnostics stay fresh.
+func (e *Editor) lspMaybeDidChange(buf *buffer.Buffer) {
+	if buf.Filename() == "" {
+		return
+	}
+	conn := e.lspConns[buf.Mode()]
+	if conn == nil {
+		return
+	}
+	uri := lsp.FileURI(buf.Filename())
+	conn.filesMu.Lock()
+	lastMod, open := conn.openFiles[uri]
+	conn.filesMu.Unlock()
+	if !open || lastMod == buf.ModCount() {
+		return
+	}
+	conn.filesMu.Lock()
+	conn.openFiles[uri] = buf.ModCount()
+	conn.filesMu.Unlock()
+	_ = conn.client.Notify("textDocument/didChange", map[string]any{
+		"textDocument": map[string]any{
+			"uri":     uri,
+			"version": buf.ModCount(),
+		},
+		"contentChanges": []map[string]any{
+			{"text": buf.String()},
+		},
+	})
+}
+
+// lspDidSave sends textDocument/didSave for buf.  Called from cmdSaveBuffer.
+func (e *Editor) lspDidSave(buf *buffer.Buffer) {
+	if buf.Filename() == "" {
+		return
+	}
+	conn := e.lspConns[buf.Mode()]
+	if conn == nil {
+		return
+	}
+	uri := lsp.FileURI(buf.Filename())
+	_ = conn.client.Notify("textDocument/didSave", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"text":         buf.String(),
+	})
+}
+
+// ---- notifications from server --------------------------------------------
+
+func (e *Editor) lspHandleNotify(conn *lspConn, method string, params json.RawMessage) {
+	if method != "textDocument/publishDiagnostics" {
+		return
+	}
+	var p struct {
+		URI         string           `json:"uri"`
+		Diagnostics []lsp.Diagnostic `json:"diagnostics"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return
+	}
+	conn.diagMu.Lock()
+	conn.diagnostics[p.URI] = p.Diagnostics
+	conn.diagMu.Unlock()
+}
+
+// lspDiagnosticsForBuf returns the current diagnostics for buf, or nil.
+func (e *Editor) lspDiagnosticsForBuf(buf *buffer.Buffer) []lsp.Diagnostic {
+	if buf.Filename() == "" {
+		return nil
+	}
+	conn := e.lspConns[buf.Mode()]
+	if conn == nil {
+		return nil
+	}
+	uri := lsp.FileURI(buf.Filename())
+	conn.diagMu.RLock()
+	diags := conn.diagnostics[uri]
+	conn.diagMu.RUnlock()
+	return diags
+}
+
+// lspDiagSummary returns a short modeline tag like "[2E 1W]", or "".
+func (e *Editor) lspDiagSummary(buf *buffer.Buffer) string {
+	diags := e.lspDiagnosticsForBuf(buf)
+	if len(diags) == 0 {
+		return ""
+	}
+	errs, warns := 0, 0
+	for _, d := range diags {
+		switch d.Severity {
+		case lsp.SeverityError:
+			errs++
+		case lsp.SeverityWarning:
+			warns++
+		}
+	}
+	parts := []string{}
+	if errs > 0 {
+		parts = append(parts, fmt.Sprintf("%dE", errs))
+	}
+	if warns > 0 {
+		parts = append(parts, fmt.Sprintf("%dW", warns))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
+// ---- editor commands -------------------------------------------------------
+
+// cmdLSPFindDefinition jumps to the definition of the symbol under point (M-.).
+// The LSP call runs in a goroutine; C-g cancels it.
+func (e *Editor) cmdLSPFindDefinition() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	conn := e.lspConns[buf.Mode()]
+	if conn == nil {
+		e.Message("No LSP server for mode %q", buf.Mode())
+		return
+	}
+	ctx := e.lspNewOpCtx()
+	pos := e.bufPointToLSP(buf)
+	uri := lsp.FileURI(buf.Filename())
+	fromFile := buf.Filename()
+	fromPoint := buf.Point()
+	e.Message("Finding definition…")
+	e.lspAsync(func() func() {
+		result, err := conn.client.CallCtx(ctx, "textDocument/definition", map[string]any{
+			"textDocument": map[string]any{"uri": uri},
+			"position":     pos,
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return func() { e.Message("Cancelled") }
+			}
+			return func() { e.Message("lsp-find-definition: %v", err) }
+		}
+		loc, _ := parseSingleLocation(result)
+		if loc.URI == "" {
+			return func() { e.Message("No definition found") }
+		}
+		return func() {
+			e.lspDefStack = append(e.lspDefStack, lspDefPos{filename: fromFile, point: fromPoint})
+			destPath := lsp.PathFromURI(loc.URI)
+			destBuf, loadErr := e.loadFile(destPath)
+			if loadErr != nil {
+				e.Message("lsp-find-definition: %v", loadErr)
+				return
+			}
+			e.activeWin.SetBuf(destBuf)
+			pt := e.lspPosToPoint(destBuf, loc.Range.Start)
+			destBuf.SetPoint(pt)
+			e.activeWin.SetPoint(pt)
+			e.syncWindowPoint(e.activeWin)
+			e.activeWin.EnsurePointVisible()
+		}
+	})
+}
+
+// cmdLSPPopDefinition pops the definition stack and returns to the previous
+// position (M-,).
+func (e *Editor) cmdLSPPopDefinition() {
+	e.clearArg()
+	if len(e.lspDefStack) == 0 {
+		e.Message("No previous definition position")
+		return
+	}
+	top := e.lspDefStack[len(e.lspDefStack)-1]
+	e.lspDefStack = e.lspDefStack[:len(e.lspDefStack)-1]
+
+	var destBuf *buffer.Buffer
+	for _, b := range e.buffers {
+		if b.Filename() == top.filename {
+			destBuf = b
+			break
+		}
+	}
+	if destBuf == nil {
+		var err error
+		destBuf, err = e.loadFile(top.filename)
+		if err != nil {
+			e.Message("lsp-pop-definition: %v", err)
+			return
+		}
+	}
+	e.activeWin.SetBuf(destBuf)
+	destBuf.SetPoint(top.point)
+	e.activeWin.SetPoint(top.point)
+}
+
+// cmdLSPHover shows documentation for the symbol under point (C-c h).
+// The LSP call runs in a goroutine; C-g cancels it.
+func (e *Editor) cmdLSPHover() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	conn := e.lspConns[buf.Mode()]
+	if conn == nil {
+		e.Message("No LSP server for mode %q", buf.Mode())
+		return
+	}
+	ctx := e.lspNewOpCtx()
+	pos := e.bufPointToLSP(buf)
+	uri := lsp.FileURI(buf.Filename())
+	e.Message("Fetching documentation…")
+	e.lspAsync(func() func() {
+		result, err := conn.client.CallCtx(ctx, "textDocument/hover", map[string]any{
+			"textDocument": map[string]any{"uri": uri},
+			"position":     pos,
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return func() { e.Message("Cancelled") }
+			}
+			return func() { e.Message("lsp-hover: %v", err) }
+		}
+		if result == nil || string(result) == "null" {
+			return func() { e.Message("No documentation found") }
+		}
+		text := extractHoverText(result)
+		if text == "" {
+			return func() { e.Message("No documentation found") }
+		}
+		return func() {
+			if len(text) < 120 && !strings.Contains(text, "\n") {
+				e.Message("%s", text)
+				return
+			}
+			helpBuf := e.FindBuffer("*LSP Help*")
+			if helpBuf == nil {
+				helpBuf = buffer.NewWithContent("*LSP Help*", text+"\n")
+				e.buffers = append(e.buffers, helpBuf)
+			} else {
+				helpBuf.SetReadOnly(false)
+				helpBuf.Delete(0, helpBuf.Len())
+				helpBuf.InsertString(0, text+"\n")
+				helpBuf.SetReadOnly(true)
+			}
+			helpBuf.SetReadOnly(true)
+			helpBuf.SetPoint(0)
+			e.activeWin.SetBuf(helpBuf)
+		}
+	})
+}
+
+// findBufferByFilename returns the first buffer with the given filename, or nil.
+func (e *Editor) findBufferByFilename(filename string) *buffer.Buffer {
+	for _, b := range e.buffers {
+		if b.Filename() == filename {
+			return b
+		}
+	}
+	return nil
+}
+
+// ---- position helpers -------------------------------------------------------
+
+// bufPointToLSP converts the buffer's current point to an LSP Position.
+func (e *Editor) bufPointToLSP(buf *buffer.Buffer) lsp.Position {
+	pt := buf.Point()
+	line, runeCol := buf.LineCol(pt)
+	// LineCol returns 1-based line, 0-based col; LSP needs 0-based line.
+	bol := buf.BeginningOfLine(pt)
+	lineText := buf.Substring(bol, bol+runeCol)
+	return lsp.Position{
+		Line:      line - 1,
+		Character: lsp.UTF16Offset(lineText, runeCol),
+	}
+}
+
+// lspPosToPoint converts an LSP Position to a rune-index buffer point.
+func (e *Editor) lspPosToPoint(buf *buffer.Buffer, pos lsp.Position) int {
+	pt := buf.PosForLineCol(pos.Line+1, 0)
+	// Walk forward pos.Character UTF-16 code units.
+	utf16 := 0
+	for utf16 < pos.Character && pt < buf.Len() {
+		r := buf.RuneAt(pt)
+		if r >= 0x10000 {
+			utf16 += 2
+		} else {
+			utf16++
+		}
+		pt++
+	}
+	return pt
+}
+
+// ---- internal helpers -------------------------------------------------------
+
+func lspInitialize(conn *lspConn) error {
+	result, err := conn.client.Call("initialize", map[string]any{
+		"processId": os.Getpid(),
+		"rootUri":   conn.rootURI,
+		"capabilities": map[string]any{
+			"textDocument": map[string]any{
+				"synchronization": map[string]any{
+					"dynamicRegistration": false,
+					"willSave":            false,
+					"didSave":             true,
+					"willSaveWaitUntil":   false,
+				},
+				"publishDiagnostics": map[string]any{},
+				"hover": map[string]any{
+					"contentFormat": []string{"plaintext", "markdown"},
+				},
+				"definition": map[string]any{},
+				"completion": map[string]any{
+					"completionItem": map[string]any{"snippetSupport": false},
+				},
+			},
+		},
+		"clientInfo": map[string]any{"name": "gomacs", "version": "0.1"},
+	})
+	if err != nil {
+		return err
+	}
+	_ = result // server capabilities (ignored for now)
+	return conn.client.Notify("initialized", map[string]any{})
+}
+
+func lspDidOpen(conn *lspConn, buf *buffer.Buffer) {
+	uri := lsp.FileURI(buf.Filename())
+	conn.filesMu.Lock()
+	if _, already := conn.openFiles[uri]; already {
+		conn.filesMu.Unlock()
+		return
+	}
+	conn.openFiles[uri] = buf.ModCount()
+	conn.filesMu.Unlock()
+
+	langID := buf.Mode()
+	_ = conn.client.Notify("textDocument/didOpen", map[string]any{
+		"textDocument": map[string]any{
+			"uri":        uri,
+			"languageId": langID,
+			"version":    buf.ModCount(),
+			"text":       buf.String(),
+		},
+	})
+}
+
+// findProjectRoot walks upward from dir looking for any of the marker files.
+// Falls back to dir itself if none are found.
+func findProjectRoot(filePath string, markers []string) string {
+	dir := filepath.Dir(filePath)
+	if !filepath.IsAbs(dir) {
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+	}
+	for {
+		for _, m := range markers {
+			if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return filepath.Dir(filePath)
+}
+
+// parseSingleLocation extracts the first Location from a definition response,
+// which may be null, a Location, or a []Location.
+func parseSingleLocation(raw json.RawMessage) (lsp.Location, error) {
+	if raw == nil || string(raw) == "null" {
+		return lsp.Location{}, nil
+	}
+	// Try single Location.
+	var loc lsp.Location
+	if err := json.Unmarshal(raw, &loc); err == nil && loc.URI != "" {
+		return loc, nil
+	}
+	// Try []Location.
+	var locs []lsp.Location
+	if err := json.Unmarshal(raw, &locs); err == nil && len(locs) > 0 {
+		return locs[0], nil
+	}
+	return lsp.Location{}, nil
+}
+
+// extractHoverText pulls plain text out of a hover response, which may
+// contain a MarkupContent or a plain string.
+func extractHoverText(raw json.RawMessage) string {
+	if raw == nil || string(raw) == "null" {
+		return ""
+	}
+	var h struct {
+		Contents json.RawMessage `json:"contents"`
+	}
+	if err := json.Unmarshal(raw, &h); err != nil || h.Contents == nil {
+		return ""
+	}
+	// MarkupContent {"kind":"...", "value":"..."}
+	var mc struct {
+		Kind  string `json:"kind"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(h.Contents, &mc); err == nil && mc.Value != "" {
+		return strings.TrimSpace(mc.Value)
+	}
+	// Plain string
+	var s string
+	if err := json.Unmarshal(h.Contents, &s); err == nil {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}

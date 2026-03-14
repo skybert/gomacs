@@ -26,6 +26,7 @@ type Buffer struct {
 	mark       int // mark position (-1 if not set)
 	markActive bool
 	modified   bool
+	modCount   int // incremented on every mutation; used by LSP change detection
 	readOnly   bool
 	filename   string // associated file path, empty if none
 	undo       *UndoRing
@@ -74,6 +75,7 @@ func (b *Buffer) SetFilename(f string) { b.filename = f }
 func (b *Buffer) Mode() string         { return b.mode }
 func (b *Buffer) Modified() bool       { return b.modified }
 func (b *Buffer) SetModified(v bool)   { b.modified = v }
+func (b *Buffer) ModCount() int        { return b.modCount }
 func (b *Buffer) ReadOnly() bool       { return b.readOnly }
 func (b *Buffer) SetReadOnly(v bool)   { b.readOnly = v }
 
@@ -163,6 +165,7 @@ func (b *Buffer) Insert(pos int, r rune) {
 	b.insertRunes(pos, []rune{r})
 	b.undo.Push(UndoRecord{Pos: pos, Inserted: string(r)})
 	b.modified = true
+	b.modCount++
 }
 
 // InsertString inserts a string at logical position pos, records undo.
@@ -174,6 +177,7 @@ func (b *Buffer) InsertString(pos int, s string) {
 	b.insertRunes(pos, runes)
 	b.undo.Push(UndoRecord{Pos: pos, Inserted: s})
 	b.modified = true
+	b.modCount++
 }
 
 // insertRunes is the raw (no undo) insertion primitive.
@@ -213,6 +217,7 @@ func (b *Buffer) Delete(pos, count int) string {
 	b.deleteRunes(pos, count)
 	b.undo.Push(UndoRecord{Pos: pos, Deleted: deleted})
 	b.modified = true
+	b.modCount++
 	return deleted
 }
 

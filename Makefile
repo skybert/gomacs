@@ -2,10 +2,13 @@ BINARY   := gomacs
 MODULE   := github.com/skybert/gomacs
 BUILDDIR := build
 GOFLAGS  :=
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+AUTHORS  := $(shell awk 'NR>1{printf ", "} {gsub(/[<>]/, "\\\\&"); printf "%s", $$0} END{print ""}' AUTHORS 2>/dev/null)
+DATE     := $(shell date +%Y-%m-%d)
 
-.PHONY: all build test lint vulncheck fmt clean install
+.PHONY: all build test lint vulncheck fmt clean install man
 
-all: fmt lint test vulncheck build
+all: fmt lint test vulncheck build man
 
 build: fmt
 	mkdir -p $(BUILDDIR)
@@ -29,3 +32,11 @@ clean:
 install: build
 	mkdir -p ~/.local/bin
 	cp $(BUILDDIR)/$(BINARY) ~/.local/bin/$(BINARY)
+
+man: doc/gomacs.1
+
+doc/gomacs.1: doc/gomacs.1.in AUTHORS
+	sed -e 's/@VERSION@/$(VERSION)/g' \
+	    -e 's/@AUTHORS@/$(AUTHORS)/g' \
+	    -e 's/@DATE@/$(DATE)/g' \
+	    $< > $@

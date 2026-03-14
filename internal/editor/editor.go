@@ -4,6 +4,7 @@
 package editor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ type Editor struct {
 	ctrlXNKeymap *keymap.Keymap // C-x n (narrowing)
 	ctrlXRKeymap *keymap.Keymap // C-x r (registers)
 	metaGKeymap  *keymap.Keymap // M-g (goto)
+	ctrlCKeymap  *keymap.Keymap // C-c prefix map
 
 	killRing []string // yank ring; [0] is most recent
 	yankIdx  int      // current yank-pop index
@@ -128,6 +130,15 @@ type Editor struct {
 	// Dired state keyed by buffer pointer.
 	diredStates map[*buffer.Buffer]*diredState
 
+	// LSP connections keyed by mode name (e.g. "go").
+	lspConns    map[string]*lspConn
+	lspDefStack []lspDefPos // jump history for M-,
+	// lspOpCancel cancels the in-flight user-initiated LSP operation (M-., C-c h).
+	// C-g resets this to cancel whatever is pending.
+	lspOpCancel context.CancelFunc
+	// lspCbs carries callbacks from async LSP goroutines back to the main loop.
+	lspCbs chan func()
+
 	// fillColumn is the target column for fill-paragraph (default 70).
 	fillColumn int
 }
@@ -155,6 +166,7 @@ func New(opts Options) (*Editor, error) {
 		return nil, fmt.Errorf("editor.New: %w", err)
 	}
 
+	_, nopCancel := context.WithCancel(context.Background())
 	e := &Editor{
 		term:         term,
 		universalArg: 1,
@@ -162,6 +174,9 @@ func New(opts Options) (*Editor, error) {
 		registers:    make(map[rune]register),
 		diredStates:  make(map[*buffer.Buffer]*diredState),
 		fillColumn:   70,
+		lspConns:     make(map[string]*lspConn),
+		lspOpCancel:  nopCancel,
+		lspCbs:       make(chan func(), 16),
 	}
 
 	// Apply the default colour theme.
@@ -231,6 +246,7 @@ func (e *Editor) setupKeymaps() {
 	e.ctrlXNKeymap = keymap.New("C-x n")
 	e.ctrlXRKeymap = keymap.New("C-x r")
 	e.metaGKeymap = keymap.New("M-g")
+	e.ctrlCKeymap = keymap.New("C-c")
 
 	gk := e.globalKeymap
 	cx := e.ctrlXKeymap
@@ -238,9 +254,14 @@ func (e *Editor) setupKeymaps() {
 	cxn := e.ctrlXNKeymap
 	cxr := e.ctrlXRKeymap
 	mg := e.metaGKeymap
+	cc := e.ctrlCKeymap
 
 	// ---- C-x prefix --------------------------------------------------------
 	gk.BindPrefix(keymap.CtrlKey('x'), cx)
+
+	// ---- C-c prefix (mode-specific / LSP) ----------------------------------
+	gk.BindPrefix(keymap.CtrlKey('c'), cc)
+	cc.Bind(keymap.PlainKey('h'), "lsp-hover")
 
 	// ---- C-h prefix (help) -------------------------------------------------
 	gk.BindPrefix(keymap.CtrlKey('h'), ch)
@@ -280,6 +301,8 @@ func (e *Editor) setupKeymaps() {
 	gk.Bind(keymap.MetaKey('b'), "backward-word")
 	gk.Bind(keymap.MetaKey('<'), "beginning-of-buffer")
 	gk.Bind(keymap.MetaKey('>'), "end-of-buffer")
+	gk.Bind(keymap.MetaKey('.'), "lsp-find-definition")
+	gk.Bind(keymap.MetaKey(','), "lsp-pop-definition")
 	gk.Bind(keymap.CtrlKey('v'), "scroll-up")
 	gk.Bind(keymap.MetaKey('v'), "scroll-down")
 	gk.Bind(keymap.CtrlKey('l'), "recenter")
@@ -385,7 +408,19 @@ func (e *Editor) loadInitFile() {
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {
 			_ = e.lisp.EvalFile(path)
+			e.applyElispConfig()
 			return
+		}
+	}
+}
+
+// applyElispConfig reads configurable variables from the Elisp environment and
+// applies them to the editor state.  It is called after loadInitFile so that
+// user settings in ~/.gomacs (or init.el) take effect immediately.
+func (e *Editor) applyElispConfig() {
+	if v, ok := e.lisp.GetGlobalVar("fill-column"); ok {
+		if i, ok := v.(elisp.Int); ok && i.V > 0 {
+			e.fillColumn = int(i.V)
 		}
 	}
 }
@@ -408,6 +443,17 @@ func (e *Editor) Run() {
 			// Sync window-local point from the buffer before scrolling.
 			e.syncWindowPoint(e.activeWin)
 			e.activeWin.EnsurePointVisible()
+		case *tcell.EventInterrupt:
+			// Drain all pending LSP callbacks posted by async goroutines.
+			for {
+				select {
+				case fn := <-e.lspCbs:
+					fn()
+				default:
+					goto drained
+				}
+			}
+		drained:
 		}
 		e.Redraw()
 	}
@@ -698,6 +744,8 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 	}
 
 	e.buffers = append(e.buffers, b)
+	// Start LSP server for this file's mode if one is configured.
+	e.lspActivate(b)
 	return b, nil
 }
 
@@ -1383,6 +1431,8 @@ func (e *Editor) Redraw() {
 	if e.term == nil {
 		return
 	}
+	// Notify LSP of any buffered changes before rendering.
+	e.lspMaybeDidChange(e.ActiveBuffer())
 	e.term.Clear()
 	for _, w := range e.windows {
 		e.renderWindow(w)
@@ -1569,8 +1619,12 @@ func (e *Editor) renderModeline(w *window.Window) {
 	if e.kbdMacroRecording {
 		macro = " Def"
 	}
+	diag := e.lspDiagSummary(buf)
+	if diag != "" {
+		diag = " " + diag
+	}
 
-	label := fmt.Sprintf(" %s  %-20s  (%s%s%s)  L%d C%d ", modifiedMark, name, mode, narrow, macro, line, col)
+	label := fmt.Sprintf(" %s  %-20s  (%s%s%s%s)  L%d C%d ", modifiedMark, name, mode, narrow, macro, diag, line, col)
 	// Pad to window width.
 	for len(label) < winW {
 		label += "-"
@@ -1713,6 +1767,7 @@ func (e *Editor) OpenFile(path string) error {
 
 // Close tears down the terminal.  Safe to call after New() fails.
 func (e *Editor) Close() {
+	e.lspClose()
 	if e.term != nil {
 		e.term.Close()
 	}
