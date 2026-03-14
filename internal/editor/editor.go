@@ -18,6 +18,7 @@ import (
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/elisp"
 	"github.com/skybert/gomacs/internal/keymap"
+	"github.com/skybert/gomacs/internal/lsp"
 	"github.com/skybert/gomacs/internal/syntax"
 	"github.com/skybert/gomacs/internal/terminal"
 	"github.com/skybert/gomacs/internal/window"
@@ -141,6 +142,23 @@ type Editor struct {
 
 	// fillColumn is the target column for fill-paragraph (default 70).
 	fillColumn int
+
+	// isSearchCaseFold enables case-insensitive isearch (default true).
+	isSearchCaseFold bool
+
+	// passive LSP hover state (eldoc-style)
+	lastHoverFile  string
+	lastHoverPoint int
+	hoverInflight  bool
+
+	// LSP inline completion popup state.
+	lspCompActive         bool
+	lspCompItems          []lsp.CompletionItem
+	lspCompSelectedIdx    int
+	lspCompOffset         int
+	lspCompInflight       bool
+	lspCompWordStart      int
+	lspCompletionMinChars int // default lspDefaultCompletionMinChars
 }
 
 // ---------------------------------------------------------------------------
@@ -168,15 +186,16 @@ func New(opts Options) (*Editor, error) {
 
 	_, nopCancel := context.WithCancel(context.Background())
 	e := &Editor{
-		term:         term,
-		universalArg: 1,
-		lisp:         elisp.NewEvaluator(),
-		registers:    make(map[rune]register),
-		diredStates:  make(map[*buffer.Buffer]*diredState),
-		fillColumn:   70,
-		lspConns:     make(map[string]*lspConn),
-		lspOpCancel:  nopCancel,
-		lspCbs:       make(chan func(), 16),
+		term:             term,
+		universalArg:     1,
+		lisp:             elisp.NewEvaluator(),
+		registers:        make(map[rune]register),
+		diredStates:      make(map[*buffer.Buffer]*diredState),
+		fillColumn:       70,
+		isSearchCaseFold: true,
+		lspConns:         make(map[string]*lspConn),
+		lspOpCancel:      nopCancel,
+		lspCbs:           make(chan func(), 16),
 	}
 
 	// Apply the default colour theme.
@@ -262,6 +281,7 @@ func (e *Editor) setupKeymaps() {
 	// ---- C-c prefix (mode-specific / LSP) ----------------------------------
 	gk.BindPrefix(keymap.CtrlKey('c'), cc)
 	cc.Bind(keymap.PlainKey('h'), "lsp-hover")
+	cc.Bind(keymap.PlainKey(','), "imenu")
 
 	// ---- C-h prefix (help) -------------------------------------------------
 	gk.BindPrefix(keymap.CtrlKey('h'), ch)
@@ -423,6 +443,19 @@ func (e *Editor) applyElispConfig() {
 			e.fillColumn = int(i.V)
 		}
 	}
+	if v, ok := e.lisp.GetGlobalVar("isearch-case-insensitive"); ok {
+		switch val := v.(type) {
+		case elisp.Bool:
+			e.isSearchCaseFold = val.V
+		case elisp.Nil:
+			e.isSearchCaseFold = false
+		}
+	}
+	if v, ok := e.lisp.GetGlobalVar("lsp-completion-min-chars"); ok {
+		if i, ok := v.(elisp.Int); ok && i.V > 0 {
+			e.lspCompletionMinChars = int(i.V)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +489,7 @@ func (e *Editor) Run() {
 		drained:
 		}
 		e.Redraw()
+		e.lspMaybeHover()
 	}
 }
 
@@ -635,7 +669,15 @@ func (e *Editor) finishMinibuffer() {
 	if !e.minibufActive {
 		return
 	}
+	// If a candidate is selected in the popup, use it; otherwise use the
+	// raw text the user typed.
 	input := e.minibufBuf.String()
+	if len(e.minibufCandidates) > 0 {
+		idx := e.minibufSelectedIdx
+		if idx >= 0 && idx < len(e.minibufCandidates) {
+			input = e.minibufCandidates[idx]
+		}
+	}
 	e.minibufActive = false
 	e.minibufHint = ""
 	e.minibufCandidates = nil
@@ -739,6 +781,8 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 		b.SetMode("java")
 	case ".sh", ".bash":
 		b.SetMode("bash")
+	case ".json":
+		b.SetMode("json")
 	default:
 		b.SetMode("fundamental")
 	}
@@ -773,6 +817,15 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	if e.minibufActive {
 		e.dispatchMinibufKey(ke)
 		return
+	}
+
+	// LSP completion popup: navigation keys go to the popup; other keys
+	// dismiss the popup and fall through to normal dispatch.
+	if e.lspCompActive {
+		if e.lspCompletionHandleKey(ke) {
+			return
+		}
+		// Key was not consumed — popup is now dismissed; continue dispatch.
 	}
 
 	// Query-replace intercepts keys.
@@ -1262,6 +1315,9 @@ func (e *Editor) selfInsert(r rune) {
 	buf.Insert(pt, r)
 	buf.SetPoint(pt + 1)
 	buf.SetMarkActive(false)
+	// Dismiss any stale completion popup, then maybe trigger a new one.
+	e.lspCompDismiss()
+	e.lspMaybeTriggerCompletion()
 }
 
 // bufReadOnly reports true and shows an error message if the active buffer is
@@ -1356,17 +1412,22 @@ func (e *Editor) isearchFind() {
 		return
 	}
 
+	match := runesMatch
+	if e.isSearchCaseFold {
+		match = runesMatchFold
+	}
+
 	start := e.isearchStart
 	if e.isearchFwd {
 		for i := start; i <= len(runes)-len(needle); i++ {
-			if runesMatch(runes[i:], needle) {
+			if match(runes[i:], needle) {
 				buf.SetPoint(i + len(needle))
 				return
 			}
 		}
 	} else {
 		for i := start; i >= 0; i-- {
-			if i+len(needle) <= len(runes) && runesMatch(runes[i:], needle) {
+			if i+len(needle) <= len(runes) && match(runes[i:], needle) {
 				buf.SetPoint(i)
 				return
 			}
@@ -1386,11 +1447,16 @@ func (e *Editor) isearchFindNext() {
 		return
 	}
 
+	match := runesMatch
+	if e.isSearchCaseFold {
+		match = runesMatchFold
+	}
+
 	cur := buf.Point()
 	if e.isearchFwd {
 		start := cur
 		for i := start; i <= len(runes)-len(needle); i++ {
-			if runesMatch(runes[i:], needle) {
+			if match(runes[i:], needle) {
 				buf.SetPoint(i + len(needle))
 				return
 			}
@@ -1400,7 +1466,7 @@ func (e *Editor) isearchFindNext() {
 		// Search backward from one before current.
 		start := max(cur-len(needle)-1, 0)
 		for i := start; i >= 0; i-- {
-			if i+len(needle) <= len(runes) && runesMatch(runes[i:], needle) {
+			if i+len(needle) <= len(runes) && match(runes[i:], needle) {
 				buf.SetPoint(i)
 				return
 			}
@@ -1416,6 +1482,19 @@ func runesMatch(haystack, needle []rune) bool {
 	}
 	for i, r := range needle {
 		if haystack[i] != r {
+			return false
+		}
+	}
+	return true
+}
+
+// runesMatchFold is like runesMatch but case-insensitive.
+func runesMatchFold(haystack, needle []rune) bool {
+	if len(haystack) < len(needle) {
+		return false
+	}
+	for i, r := range needle {
+		if unicode.ToLower(haystack[i]) != unicode.ToLower(r) {
 			return false
 		}
 	}
@@ -1452,6 +1531,8 @@ func (e *Editor) Redraw() {
 		}
 	}
 	e.renderMinibuffer()
+	// LSP completion popup (rendered over the text, below the cursor).
+	e.renderLSPCompletionPopup()
 	// Position the hardware cursor.
 	e.placeCursor()
 	e.term.Show()
@@ -1472,6 +1553,8 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.JavaHighlighter{}
 	case "bash":
 		return syntax.BashHighlighter{}
+	case "json":
+		return syntax.JSONHighlighter{}
 	default:
 		return syntax.NilHighlighter{}
 	}
@@ -1519,15 +1602,19 @@ func (e *Editor) renderWindow(w *window.Window) {
 	if e.isearching && e.isearchStr != "" {
 		needle := []rune(e.isearchStr)
 		cur := buf.Point()
+		isMatch := runesMatch
+		if e.isSearchCaseFold {
+			isMatch = runesMatchFold
+		}
 		// The most recent match ends at point (forward) or starts at point (backward).
 		if e.isearchFwd {
 			mstart := cur - len(needle)
 			if mstart >= 0 && mstart+len(needle) <= len(runes) &&
-				runesMatch(runes[mstart:], needle) {
+				isMatch(runes[mstart:], needle) {
 				isearchMatchStart = mstart
 				isearchMatchEnd = cur
 			}
-		} else if cur+len(needle) <= len(runes) && runesMatch(runes[cur:], needle) {
+		} else if cur+len(needle) <= len(runes) && isMatch(runes[cur:], needle) {
 			isearchMatchStart = cur
 			isearchMatchEnd = cur + len(needle)
 		}

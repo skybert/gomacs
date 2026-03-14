@@ -17,6 +17,7 @@ func (b *Buffer) ApplyUndo() bool {
 		b.insertRunes(rec.Pos, []rune(rec.Deleted))
 	}
 	b.SetPoint(rec.Pos)
+	b.changeGen--
 	return true
 }
 
@@ -38,5 +39,6 @@ func (b *Buffer) ApplyRedo() bool {
 		b.deleteRunes(rec.Pos, len([]rune(rec.Deleted)))
 		b.SetPoint(rec.Pos)
 	}
+	b.changeGen++
 	return true
 }

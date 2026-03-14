@@ -35,7 +35,7 @@ The project is a TTY-only Emacs clone in Go. The binary is `gomacs`; the module 
 | `internal/keymap` | Layered `ModKey → Binding` maps. A `Binding` is either a command name (string) or a sub-`Keymap` (prefix key). |
 | `internal/terminal` | Thin wrapper around `tcell.Screen`. `SetCell`/`DrawString` take `syntax.Face` values. Hex `#rrggbb` colors are supported. |
 | `internal/window` | Rectangular view into a buffer: screen region, per-window scroll line, goal column for vertical motion, `ViewLines()` for rendering. |
-| `internal/syntax` | Stateless `Highlighter` interface returning `[]Span`. Hand-written scanners for Go, Markdown, Elisp, Python, Java, Bash. Package-level `Face` vars are mutated by `LoadTheme`. |
+| `internal/syntax` | Stateless `Highlighter` interface returning `[]Span`. Hand-written scanners for Go, Markdown, Elisp, Python, Java, Bash, JSON. Package-level `Face` vars are mutated by `LoadTheme`. |
 | `internal/elisp` | Lisp-2 evaluator: `Lexer → Parser (cons cells) → Evaluator`. Go functions are registered via `RegisterGoFn(name, func([]Value, *Env))`. |
 | `internal/editor` | Top-level wiring. `Editor` owns everything; `editor.go` handles the event loop, rendering, minibuffer, and isearch. `commands.go` holds all `cmd*` functions registered in `init()`. `indent.go` holds Elisp auto-indentation logic. |
 
@@ -63,6 +63,30 @@ tcell event → terminal.ParseKey → keymap.Lookup → execCommand(name) → cm
 **Elisp integration** — Go features are exposed to init.el via `e.lisp.RegisterGoFn("name", func([]Value, *Env))`. `(load-theme 'sweet)` and `(global-set-key (kbd "…") 'command-name)` are the primary extension points.
 
 **Colour themes** — `syntax.Face` variables are package-level vars mutated by `syntax.LoadTheme(name)`. The Sweet theme is applied at startup. Theme functions live in `internal/syntax/theme.go`.
+
+**Mode configuration via Elisp** — major-mode settings are read from the Elisp environment by `applyElispConfig()` (called after loading `~/.gomacs` / `init.el`). The following `setq` variables are supported:
+
+| Variable | Type | Default | Effect |
+|---|---|---|---|
+| `fill-column` | integer | `70` | Column target for `fill-paragraph` (M-q) |
+| `isearch-case-insensitive` | bool/nil | `t` | Case-insensitive isearch; set to `nil` for case-sensitive |
+| `python-indent` | integer or string | `"  "` | Per-level indent for Python |
+| `go-indent` | string | `"\t"` | Per-level indent for Go |
+| `java-indent` | integer or string | `"  "` | Per-level indent for Java |
+| `sh-indent` | integer or string | `"  "` | Per-level indent for Bash (`bash-indent` is not the name; use `sh-indent`) |
+| `json-indent` | integer or string | `"  "` | Per-level indent for JSON |
+| `markdown-indent` | integer or string | `"  "` | Per-level indent for Markdown |
+
+Example `~/.gomacs`:
+```elisp
+(setq fill-column 80)
+(setq python-indent 4)
+(setq isearch-case-insensitive nil)  ; restore case-sensitive search
+```
+
+**isearch case folding** — isearch is case-insensitive by default (`isSearchCaseFold = true`).
+Set `(setq isearch-case-insensitive nil)` in `~/.gomacs` to restore case-sensitive search.
+`applyElispConfig()` reads this variable after loading the init file.
 
 ### Lint notes
 

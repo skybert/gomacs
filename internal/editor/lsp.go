@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/lsp"
@@ -17,6 +18,7 @@ import (
 type lspConn struct {
 	client  *lsp.Client
 	rootURI string
+	isReady bool // true after initialize handshake completes
 
 	filesMu   sync.Mutex
 	openFiles map[string]int // uri → last-sent modCount
@@ -102,6 +104,7 @@ func (e *Editor) lspActivate(buf *buffer.Buffer) {
 			}
 			// Open the file that triggered activation.
 			return func() {
+				connCopy.isReady = true
 				if b := e.findBufferByFilename(filename); b != nil {
 					lspDidOpen(connCopy, b)
 				}
@@ -242,6 +245,10 @@ func (e *Editor) cmdLSPFindDefinition() {
 		e.Message("No LSP server for mode %q", buf.Mode())
 		return
 	}
+	if !conn.isReady {
+		e.Message("LSP server is initializing, please wait…")
+		return
+	}
 	ctx := e.lspNewOpCtx()
 	pos := e.bufPointToLSP(buf)
 	uri := lsp.FileURI(buf.Filename())
@@ -322,6 +329,10 @@ func (e *Editor) cmdLSPHover() {
 		e.Message("No LSP server for mode %q", buf.Mode())
 		return
 	}
+	if !conn.isReady {
+		e.Message("LSP server is initializing, please wait…")
+		return
+	}
 	ctx := e.lspNewOpCtx()
 	pos := e.bufPointToLSP(buf)
 	uri := lsp.FileURI(buf.Filename())
@@ -362,6 +373,59 @@ func (e *Editor) cmdLSPHover() {
 			helpBuf.SetReadOnly(true)
 			helpBuf.SetPoint(0)
 			e.activeWin.SetBuf(helpBuf)
+		}
+	})
+}
+
+// lspMaybeHover passively shows the first line of hover documentation in the
+// minibuffer when the cursor sits on a symbol, without requiring an explicit
+// user command.  It is called from Run() after each Redraw().
+func (e *Editor) lspMaybeHover() {
+	buf := e.ActiveBuffer()
+	if buf.Filename() == "" || e.minibufActive || e.isearching {
+		return
+	}
+	conn := e.lspConns[buf.Mode()]
+	if conn == nil || !conn.isReady || e.hoverInflight {
+		return
+	}
+	// Only trigger if cursor moved since last hover.
+	if buf.Filename() == e.lastHoverFile && buf.Point() == e.lastHoverPoint {
+		return
+	}
+	// Don't clobber a fresh user message.
+	if time.Now().UnixNano()-e.messageTime < 2e9 {
+		return
+	}
+	e.lastHoverFile = buf.Filename()
+	e.lastHoverPoint = buf.Point()
+	e.hoverInflight = true
+	pos := e.bufPointToLSP(buf)
+	uri := lsp.FileURI(buf.Filename())
+	ctx := context.Background()
+	e.lspAsync(func() func() {
+		result, err := conn.client.CallCtx(ctx, "textDocument/hover", map[string]any{
+			"textDocument": map[string]any{"uri": uri},
+			"position":     pos,
+		})
+		return func() {
+			e.hoverInflight = false
+			if err != nil || result == nil {
+				return
+			}
+			text := extractHoverText(result)
+			if text == "" {
+				return
+			}
+			// Only show if no newer message was set.
+			if time.Now().UnixNano()-e.messageTime < 2e9 {
+				return
+			}
+			firstLine := strings.SplitN(text, "\n", 2)[0]
+			if len(firstLine) > 120 {
+				firstLine = firstLine[:117] + "..."
+			}
+			e.Message("%s", firstLine)
 		}
 	})
 }
@@ -414,6 +478,9 @@ func lspInitialize(conn *lspConn) error {
 	result, err := conn.client.Call("initialize", map[string]any{
 		"processId": os.Getpid(),
 		"rootUri":   conn.rootURI,
+		"workspaceFolders": []map[string]any{
+			{"uri": conn.rootURI, "name": filepath.Base(lsp.PathFromURI(conn.rootURI))},
+		},
 		"capabilities": map[string]any{
 			"textDocument": map[string]any{
 				"synchronization": map[string]any{

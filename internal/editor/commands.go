@@ -275,6 +275,17 @@ func init() {
 	registerCommand("lsp-hover", (*Editor).cmdLSPHover,
 		"Show documentation for the symbol at point from the LSP server.")
 
+	registerCommand("imenu", (*Editor).cmdImenu,
+		"Navigate to a definition in the current buffer by name.")
+
+	registerCommand("sort-lines", (*Editor).cmdSortLines,
+		"Sort lines in the active region (or whole buffer) lexicographically.")
+	registerCommand("delete-duplicate-lines", (*Editor).cmdDeleteDuplicateLines,
+		"Remove duplicate lines from the active region (or whole buffer).")
+
+	registerCommand("json-mode", (*Editor).cmdJsonMode,
+		"Activate JSON mode on the current buffer.")
+
 	// ---- misc stubs --------------------------------------------------------
 	registerCommand("ispell-word", (*Editor).cmdIspellWord,
 		"Check spelling of word at point.")
@@ -1066,6 +1077,15 @@ func (e *Editor) cmdSwitchToBuffer() {
 			return
 		}
 		e.SwitchToBuffer(name)
+	})
+	e.SetMinibufCompletions(func(prefix string) []string {
+		var names []string
+		for _, b := range e.buffers {
+			if fuzzyMatch(b.Name(), prefix) {
+				names = append(names, b.Name())
+			}
+		}
+		return names
 	})
 }
 

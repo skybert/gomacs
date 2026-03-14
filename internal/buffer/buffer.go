@@ -32,6 +32,12 @@ type Buffer struct {
 	undo       *UndoRing
 	mode       string // modeFundamental, "go", "markdown", etc.
 
+	// changeGen tracks the net number of edits relative to the saved state.
+	// It increments on Insert/Delete and decrements on ApplyUndo, increments
+	// on ApplyRedo.  Modified() compares it to savedChangeGen.
+	changeGen      int
+	savedChangeGen int
+
 	// Mark ring: previous mark positions for C-u C-SPC to cycle through.
 	markRing []int
 
@@ -61,6 +67,8 @@ func NewWithContent(name, content string) *Buffer {
 	if len(content) > 0 {
 		b.InsertString(0, content)
 		b.modified = false // initial load is not a modification
+		b.changeGen = 0
+		b.savedChangeGen = 0
 		b.undo.Reset()
 	}
 	return b
@@ -73,16 +81,29 @@ func (b *Buffer) SetName(name string)  { b.name = name }
 func (b *Buffer) Filename() string     { return b.filename }
 func (b *Buffer) SetFilename(f string) { b.filename = f }
 func (b *Buffer) Mode() string         { return b.mode }
-func (b *Buffer) Modified() bool       { return b.modified }
-func (b *Buffer) SetModified(v bool)   { b.modified = v }
-func (b *Buffer) ModCount() int        { return b.modCount }
-func (b *Buffer) ReadOnly() bool       { return b.readOnly }
-func (b *Buffer) SetReadOnly(v bool)   { b.readOnly = v }
+func (b *Buffer) Modified() bool {
+	return b.changeGen != b.savedChangeGen
+}
+func (b *Buffer) SetModified(v bool) {
+	if !v {
+		// Mark the current generation as clean.
+		b.savedChangeGen = b.changeGen
+	} else {
+		// Force dirty by making changeGen diverge from savedChangeGen.
+		if b.changeGen == b.savedChangeGen {
+			b.changeGen++
+		}
+	}
+	b.modified = v
+}
+func (b *Buffer) ModCount() int      { return b.modCount }
+func (b *Buffer) ReadOnly() bool     { return b.readOnly }
+func (b *Buffer) SetReadOnly(v bool) { b.readOnly = v }
 
 // SetMode sets the buffer's major mode.
 func (b *Buffer) SetMode(mode string) {
 	switch mode {
-	case "go", "markdown", "elisp", "python", "java", "bash", "dired", modeFundamental:
+	case "go", "markdown", "elisp", "python", "java", "bash", "json", "dired", modeFundamental:
 		b.mode = mode
 	default:
 		b.mode = modeFundamental
@@ -166,6 +187,7 @@ func (b *Buffer) Insert(pos int, r rune) {
 	b.undo.Push(UndoRecord{Pos: pos, Inserted: string(r)})
 	b.modified = true
 	b.modCount++
+	b.changeGen++
 }
 
 // InsertString inserts a string at logical position pos, records undo.
@@ -178,6 +200,7 @@ func (b *Buffer) InsertString(pos int, s string) {
 	b.undo.Push(UndoRecord{Pos: pos, Inserted: s})
 	b.modified = true
 	b.modCount++
+	b.changeGen++
 }
 
 // insertRunes is the raw (no undo) insertion primitive.
@@ -218,6 +241,7 @@ func (b *Buffer) Delete(pos, count int) string {
 	b.undo.Push(UndoRecord{Pos: pos, Deleted: deleted})
 	b.modified = true
 	b.modCount++
+	b.changeGen++
 	return deleted
 }
 

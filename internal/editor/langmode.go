@@ -27,6 +27,7 @@ var langModes = []langModeInfo{
 	{modeName: "bash", rootMarkers: []string{}},
 	{modeName: "markdown", rootMarkers: []string{}},
 	{modeName: "elisp", rootMarkers: []string{}},
+	{modeName: "json", rootMarkers: []string{}},
 	{modeName: "fundamental", rootMarkers: []string{}},
 }
 
@@ -96,6 +97,13 @@ func (e *Editor) cmdFundamentalMode() {
 	e.clearArg()
 	e.setLangMode(e.ActiveBuffer(), "fundamental")
 	e.Message("fundamental-mode")
+}
+
+// cmdJsonMode activates JSON mode on the current buffer.
+func (e *Editor) cmdJsonMode() {
+	e.clearArg()
+	e.setLangMode(e.ActiveBuffer(), "json")
+	e.Message("json-mode")
 }
 
 // modeIndentStr returns the per-level indent string for the given major mode.

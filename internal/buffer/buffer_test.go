@@ -456,3 +456,56 @@ func TestUnicode(t *testing.T) {
 	b.Insert(3, '！')
 	mustString(b, "日本語！", t)
 }
+
+// ---- changeGen / Modified --------------------------------------------------
+
+func TestModifiedFalseAfterNewWithContent(t *testing.T) {
+	b := NewWithContent("test", "hello")
+	if b.Modified() {
+		t.Error("NewWithContent buffer should not be Modified()")
+	}
+}
+
+func TestModifiedTrueAfterInsert(t *testing.T) {
+	b := NewWithContent("test", "hello")
+	b.Insert(0, 'X')
+	if !b.Modified() {
+		t.Error("buffer should be Modified() after Insert")
+	}
+}
+
+func TestModifiedClearedAfterUndoToOriginal(t *testing.T) {
+	b := NewWithContent("test", "hello")
+	b.Insert(0, 'X')
+	if !b.Modified() {
+		t.Error("expected Modified() after Insert")
+	}
+	b.ApplyUndo()
+	if b.Modified() {
+		t.Error("Modified() should be false after undoing back to saved state")
+	}
+}
+
+func TestModifiedAfterUndoAndRedo(t *testing.T) {
+	b := NewWithContent("test", "hello")
+	b.Insert(0, 'X')
+	b.ApplyUndo()
+	b.ApplyRedo()
+	if !b.Modified() {
+		t.Error("Modified() should be true after redo")
+	}
+}
+
+func TestSetModifiedFalseSnapshotsGen(t *testing.T) {
+	b := NewWithContent("test", "hello")
+	b.Insert(0, 'X')
+	b.SetModified(false) // simulate save
+	if b.Modified() {
+		t.Error("Modified() should be false after SetModified(false)")
+	}
+	// Further undo should make it modified again.
+	b.ApplyUndo()
+	if !b.Modified() {
+		t.Error("Modified() should be true after undoing past the save point")
+	}
+}

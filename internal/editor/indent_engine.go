@@ -49,6 +49,8 @@ func calcIndent(mode string, lines []string, lineIdx int, unit string) string {
 		return calcIndentPython(lines, lineIdx, unit)
 	case "bash":
 		return calcIndentBash(lines, lineIdx, unit)
+	case "json":
+		return calcIndentJSON(lines, lineIdx, unit)
 	default:
 		// markdown, fundamental, unknown: copy previous line's indentation
 		return calcIndentCopy(lines, lineIdx)
@@ -288,4 +290,60 @@ func leadingWSStr(s string) string {
 		i++
 	}
 	return string(runes[:i])
+}
+
+// ---- JSON indentation -------------------------------------------------------
+
+// netBraceCountJSON returns net opener - closer count for a JSON line,
+// counting both { } and [ ] openers/closers, ignoring string contents.
+func netBraceCountJSON(line string) int {
+	runes := []rune(line)
+	n := len(runes)
+	net := 0
+	inString := false
+
+	for i := 0; i < n; i++ {
+		r := runes[i]
+		if inString {
+			switch r {
+			case '\\':
+				i++ // skip escaped character
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch r {
+		case '"':
+			inString = true
+		case '{', '[':
+			net++
+		case '}', ']':
+			net--
+		}
+	}
+	return net
+}
+
+// calcIndentJSON computes indentation for JSON using { } and [ ] as
+// openers/closers.
+func calcIndentJSON(lines []string, lineIdx int, unit string) string {
+	depth := 0
+	for i := range lineIdx {
+		depth += netBraceCountJSON(lines[i])
+	}
+	if depth < 0 {
+		depth = 0
+	}
+
+	cur := strings.TrimLeft(lines[lineIdx], " \t")
+	// A line opening with } or ] dedents by one.
+	if strings.HasPrefix(cur, "}") || strings.HasPrefix(cur, "]") {
+		depth--
+		if depth < 0 {
+			depth = 0
+		}
+	}
+
+	return strings.Repeat(unit, depth)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -342,6 +343,73 @@ func regionBounds(buf *buffer.Buffer) (start, end int) {
 		return mark, pt
 	}
 	return pt, mark
+}
+
+// cmdSortLines sorts the lines in the active region lexicographically.
+// If no region is active, the entire buffer is sorted.
+func (e *Editor) cmdSortLines() {
+	if e.bufReadOnly() {
+		return
+	}
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	start, end := regionBounds(buf)
+	if start == end {
+		// No region: sort whole buffer.
+		start, end = 0, buf.Len()
+	}
+	text := buf.Substring(start, end)
+	// Preserve a trailing newline if present; sort the rest.
+	trailing := ""
+	if len(text) > 0 && text[len(text)-1] == '\n' {
+		text = text[:len(text)-1]
+		trailing = "\n"
+	}
+	lines := strings.Split(text, "\n")
+	sort.Strings(lines)
+	sorted := strings.Join(lines, "\n") + trailing
+	buf.Delete(start, end-start)
+	buf.InsertString(start, sorted)
+	buf.SetPoint(start)
+	buf.SetMarkActive(false)
+	e.Message("Sorted %d lines", len(lines))
+}
+
+// cmdDeleteDuplicateLines removes duplicate adjacent lines from the active region.
+// Lines are compared exactly (case-sensitive).  If no region is active the
+// entire buffer is processed.
+func (e *Editor) cmdDeleteDuplicateLines() {
+	if e.bufReadOnly() {
+		return
+	}
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	start, end := regionBounds(buf)
+	if start == end {
+		start, end = 0, buf.Len()
+	}
+	text := buf.Substring(start, end)
+	trailing := ""
+	if len(text) > 0 && text[len(text)-1] == '\n' {
+		text = text[:len(text)-1]
+		trailing = "\n"
+	}
+	lines := strings.Split(text, "\n")
+	seen := make(map[string]bool, len(lines))
+	unique := lines[:0]
+	for _, l := range lines {
+		if !seen[l] {
+			seen[l] = true
+			unique = append(unique, l)
+		}
+	}
+	removed := len(lines) - len(unique)
+	deduped := strings.Join(unique, "\n") + trailing
+	buf.Delete(start, end-start)
+	buf.InsertString(start, deduped)
+	buf.SetPoint(start)
+	buf.SetMarkActive(false)
+	e.Message("Deleted %d duplicate line(s)", removed)
 }
 
 // cmdFillParagraph re-flows the current paragraph to fit within fillColumn (M-q).

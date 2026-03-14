@@ -33,6 +33,7 @@ C\-a / C\-e	Beginning / end of line
 M\-< / M\->	Beginning / end of buffer
 C\-v / M\-v	Scroll down / up
 M\-g g	Go to line
+C\-x =	What cursor position (line, col, char)
 .TE
 .SS Editing
 .TS
@@ -54,14 +55,25 @@ M\-^	Join line
 M\-m	Back to indentation
 C\-x C\-o	Delete blank lines
 TAB	Indent line / complete
+C\-M\-\\	Indent region
+C\-x TAB	Indent rigidly
 .TE
 .SS Search and Replace
 .TS
 l l.
-C\-s	Incremental search forward
-C\-r	Incremental search backward
+C\-s	Incremental search forward (case\-insensitive by default)
+C\-r	Incremental search backward (case\-insensitive by default)
 M\-%	Query replace
 M\-x replace\-string	Replace string (no prompting)
+.TE
+.SS Mark and Region
+.TS
+l l.
+C\-SPC	Set mark
+C\-x h	Mark whole buffer
+M\-@	Mark word
+C\-x n n	Narrow to region
+C\-x n w	Widen
 .TE
 .SS Windows and Buffers
 .TS
@@ -70,18 +82,55 @@ C\-x 2	Split window below
 C\-x 3	Split window right
 C\-x o	Other window
 C\-x 1	Delete other windows
-C\-x b	Switch buffer
+C\-x b	Switch buffer (tab\-completion of open buffers)
 C\-x k	Kill buffer
 C\-x C\-f	Find (open) file
 C\-x C\-s	Save buffer
 C\-x C\-w	Write file (save as)
 .TE
-.SS LSP
+.SS Registers
+.TS
+l l.
+C\-x r SPC	Save point to register
+C\-x r j	Jump to register
+C\-x r s	Copy region to register
+C\-x r i	Insert register contents
+.TE
+.SS Keyboard Macros
+.TS
+l l.
+C\-x (	Start recording macro
+C\-x )	Stop recording macro
+C\-x e	Execute last macro
+.TE
+.SS Shell
+.TS
+l l.
+M\-!	Run shell command
+M\-|	Shell command on region
+.TE
+.SS Text Manipulation
+.TS
+l l.
+M\-x sort\-lines	Sort lines in region (or whole buffer)
+M\-x delete\-duplicate\-lines	Remove duplicate lines from region
+M\-x count\-words	Count words in buffer or region
+M\-x fill\-column	Set fill column
+.TE
+.SS LSP (Language Server Protocol)
 .TS
 l l.
 M\-.	Go to definition
 M\-,	Pop back from definition
-C\-c C\-r	Rename symbol
+C\-c h	Show hover documentation
+.TE
+.PP
+LSP hover documentation is also shown passively in the minibuffer whenever
+the cursor rests on a symbol (eldoc\-style).
+.SS Navigation
+.TS
+l l.
+C\-c ,	imenu: jump to function/heading in current buffer (fuzzy completion)
 .TE
 .SS Dired (C\-x d)
 .TS
@@ -96,6 +145,21 @@ g	Refresh listing
 ^	Go to parent directory
 q	Quit dired
 .TE
+.SS Major Modes
+.TS
+l l.
+M\-x go\-mode	Go source
+M\-x python\-mode	Python source
+M\-x java\-mode	Java source
+M\-x bash\-mode	Bash/sh source
+M\-x markdown\-mode	Markdown
+M\-x elisp\-mode	Emacs Lisp
+M\-x json\-mode	JSON
+M\-x fundamental\-mode	No syntax or indentation
+.TE
+.PP
+Modes are set automatically from the file extension
+(.go, .py, .java, .sh/.bash, .md/.markdown, .el, .json).
 .SS Help
 .TS
 l l.
@@ -116,6 +180,14 @@ Target column for
 .BR M\-q " (fill\-paragraph)."
 Default: 70.
 Example: \fB(setq fill\-column 80)\fR
+.TP
+.B isearch\-case\-insensitive
+When non\-nil (the default), incremental search (C\-s / C\-r) is
+case\-insensitive.  Set to
+.B nil
+to restore case\-sensitive search.
+Default: t.
+Example: \fB(setq isearch\-case\-insensitive nil)\fR
 .TP
 .B go\-indent
 Per\-level indentation string for Go buffers.
@@ -138,10 +210,28 @@ Per\-level indentation string for Java buffers.
 Default: two spaces.
 Example: \fB(setq java\-indent 4)\fR
 .TP
+.B json\-indent
+Per\-level indentation string for JSON buffers.
+Default: two spaces.
+Example: \fB(setq json\-indent 4)\fR
+.TP
 .B markdown\-indent
 Per\-level indentation string for Markdown buffers.
 Default: two spaces.
 Example: \fB(setq markdown\-indent 4)\fR
+.SS Key bindings
+Custom key bindings can be set in the init file using
+.BR global\-set\-key :
+.PP
+.nf
+\fB(global\-set\-key (kbd "C\-c C\-c") 'comment\-region)\fR
+.fi
+.SS Themes
+.PP
+.nf
+\fB(load\-theme 'sweet)\fR     ; default warm theme
+\fB(load\-theme 'default)\fR   ; plain terminal colours
+.fi
 .SH FILES
 .TP
 .B ~/.gomacs

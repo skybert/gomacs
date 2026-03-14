@@ -33,9 +33,10 @@ install: build
 	mkdir -p ~/.local/bin
 	cp $(BUILDDIR)/$(BINARY) ~/.local/bin/$(BINARY)
 
-man: doc/gomacs.1
+man: $(BUILDDIR)/gomacs.1
 
-doc/gomacs.1: doc/gomacs.1.in AUTHORS
+$(BUILDDIR)/gomacs.1: doc/gomacs.1.in AUTHORS
+	mkdir -p $(BUILDDIR)
 	sed -e 's/@VERSION@/$(VERSION)/g' \
 	    -e 's/@AUTHORS@/$(AUTHORS)/g' \
 	    -e 's/@DATE@/$(DATE)/g' \

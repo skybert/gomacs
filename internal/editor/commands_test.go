@@ -1061,3 +1061,217 @@ func TestReadOnlyBlocksDeleteChar(t *testing.T) {
 		t.Errorf("read-only buffer was modified: %q", buf.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// sort-lines
+// ---------------------------------------------------------------------------
+
+func TestSortLinesRegion(t *testing.T) {
+	content := "banana\napple\ncherry\n"
+	e := newTestEditor(content)
+	b := buf(e)
+	b.SetMark(0)
+	b.SetMarkActive(true)
+	b.SetPoint(b.Len())
+	e.cmdSortLines()
+	want := "apple\nbanana\ncherry\n"
+	if got := b.String(); got != want {
+		t.Errorf("sort-lines: want %q, got %q", want, got)
+	}
+}
+
+func TestSortLinesNoRegion(t *testing.T) {
+	content := "c\nb\na\n"
+	e := newTestEditor(content)
+	b := buf(e)
+	b.SetMarkActive(false)
+	b.SetPoint(0)
+	e.cmdSortLines()
+	want := "a\nb\nc\n"
+	if got := b.String(); got != want {
+		t.Errorf("sort-lines no-region: want %q, got %q", want, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// delete-duplicate-lines
+// ---------------------------------------------------------------------------
+
+func TestDeleteDuplicateLines(t *testing.T) {
+	content := "foo\nbar\nfoo\nbaz\nbar\n"
+	e := newTestEditor(content)
+	b := buf(e)
+	b.SetMark(0)
+	b.SetMarkActive(true)
+	b.SetPoint(b.Len())
+	e.cmdDeleteDuplicateLines()
+	want := "foo\nbar\nbaz\n"
+	if got := b.String(); got != want {
+		t.Errorf("delete-duplicate-lines: want %q, got %q", want, got)
+	}
+}
+
+func TestDeleteDuplicateLinesNoDups(t *testing.T) {
+	content := "a\nb\nc\n"
+	e := newTestEditor(content)
+	b := buf(e)
+	b.SetMark(0)
+	b.SetMarkActive(true)
+	b.SetPoint(b.Len())
+	e.cmdDeleteDuplicateLines()
+	want := "a\nb\nc\n"
+	if got := b.String(); got != want {
+		t.Errorf("delete-duplicate-lines no-dups: want %q, got %q", want, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// runesMatchFold
+// ---------------------------------------------------------------------------
+
+func TestRunesMatchFoldSameCase(t *testing.T) {
+	if !runesMatchFold([]rune("hello"), []rune("hello")) {
+		t.Error("same-case match failed")
+	}
+}
+
+func TestRunesMatchFoldUpperNeedle(t *testing.T) {
+	if !runesMatchFold([]rune("hello"), []rune("HELLO")) {
+		t.Error("upper needle should match lower haystack")
+	}
+}
+
+func TestRunesMatchFoldMixed(t *testing.T) {
+	if !runesMatchFold([]rune("GoLang"), []rune("golang")) {
+		t.Error("mixed case match failed")
+	}
+}
+
+func TestRunesMatchFoldMismatch(t *testing.T) {
+	if runesMatchFold([]rune("hello"), []rune("world")) {
+		t.Error("different strings should not match")
+	}
+}
+
+func TestRunesMatchFoldTooShort(t *testing.T) {
+	if runesMatchFold([]rune("hi"), []rune("hello")) {
+		t.Error("haystack shorter than needle should not match")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isearch case folding
+// ---------------------------------------------------------------------------
+
+func newTestEditorWithIsearch(content string) *Editor {
+	e := newTestEditor(content)
+	e.isSearchCaseFold = true
+	return e
+}
+
+func TestIsearchFindCaseFold(t *testing.T) {
+	e := newTestEditorWithIsearch("Hello World")
+	b := buf(e)
+	b.SetPoint(0)
+	e.isearching = true
+	e.isearchFwd = true
+	e.isearchStr = "HELLO"
+	e.isearchStart = 0
+	e.isearchFind()
+	// Forward search lands point after the match.
+	if got := b.Point(); got != 5 {
+		t.Errorf("isearchFind case-fold fwd: want point=5, got %d", got)
+	}
+}
+
+func TestIsearchFindCaseFoldBackward(t *testing.T) {
+	e := newTestEditorWithIsearch("Hello World")
+	b := buf(e)
+	b.SetPoint(11)
+	e.isearching = true
+	e.isearchFwd = false
+	e.isearchStr = "world"
+	e.isearchStart = 11
+	e.isearchFind()
+	// Backward search lands point at start of match.
+	if got := b.Point(); got != 6 {
+		t.Errorf("isearchFind case-fold bwd: want point=6, got %d", got)
+	}
+}
+
+func TestIsearchFindNextCaseFold(t *testing.T) {
+	e := newTestEditorWithIsearch("abc ABC abc")
+	b := buf(e)
+	// Start after first match to find second.
+	b.SetPoint(3)
+	e.isearching = true
+	e.isearchFwd = true
+	e.isearchStr = "ABC"
+	e.isearchFindNext()
+	// Second match "ABC" starts at index 4, point lands after it at 7.
+	if got := b.Point(); got != 7 {
+		t.Errorf("isearchFindNext case-fold: want point=7, got %d", got)
+	}
+}
+
+func TestIsearchCaseSensitiveWhenDisabled(t *testing.T) {
+	e := newTestEditor("Hello hello")
+	e.isSearchCaseFold = false
+	b := buf(e)
+	b.SetPoint(0)
+	e.isearching = true
+	e.isearchFwd = true
+	e.isearchStr = "hello"
+	e.isearchStart = 0
+	e.isearchFind()
+	// Case-sensitive: should find lowercase "hello" at index 6, point=11.
+	if got := b.Point(); got != 11 {
+		t.Errorf("isearch case-sensitive: want point=11, got %d", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// applyElispConfig — isearch-case-insensitive
+// ---------------------------------------------------------------------------
+
+func TestApplyElispConfigIsearchCaseFoldOff(t *testing.T) {
+	e := newTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	e.isSearchCaseFold = true
+	// Setting the variable to nil should disable case folding.
+	_, err := e.lisp.EvalString("(setq isearch-case-insensitive nil)")
+	if err != nil {
+		t.Fatalf("EvalString: %v", err)
+	}
+	e.applyElispConfig()
+	if e.isSearchCaseFold {
+		t.Error("isSearchCaseFold should be false after (setq isearch-case-insensitive nil)")
+	}
+}
+
+func TestApplyElispConfigIsearchCaseFoldOn(t *testing.T) {
+	e := newTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	e.isSearchCaseFold = false
+	// Setting to t should enable case folding.
+	_, err := e.lisp.EvalString("(setq isearch-case-insensitive t)")
+	if err != nil {
+		t.Fatalf("EvalString: %v", err)
+	}
+	e.applyElispConfig()
+	if !e.isSearchCaseFold {
+		t.Error("isSearchCaseFold should be true after (setq isearch-case-insensitive t)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cmdJsonMode
+// ---------------------------------------------------------------------------
+
+func TestCmdJsonMode(t *testing.T) {
+	e := newTestEditor("{ \"key\": 1 }")
+	e.cmdJsonMode()
+	if got := buf(e).Mode(); got != "json" {
+		t.Errorf("json-mode: want mode=%q, got %q", "json", got)
+	}
+}
