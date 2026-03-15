@@ -135,6 +135,10 @@ type Editor struct {
 	// vcLogRoots maps *VC Log* buffers to their git repository root dir.
 	vcLogRoots map[*buffer.Buffer]string
 
+	// bufferMRU tracks the most recently displayed buffers (most recent first).
+	// Updated by showBuf; used by vcQuit to return to the right buffer.
+	bufferMRU []*buffer.Buffer
+
 	// commandLRU is the most-recently-used command list.  The first entry is
 	// the most recently executed command.  Capped at commandLRUMax entries.
 	commandLRU []string
@@ -611,6 +615,27 @@ func (e *Editor) FindBuffer(name string) *buffer.Buffer {
 	return nil
 }
 
+// showBuf displays b in the active window and records the previous buffer
+// in bufferMRU so that vcQuit (and future "switch to previous buffer" commands)
+// can return to the right place.
+func (e *Editor) showBuf(b *buffer.Buffer) {
+	prev := e.activeWin.Buf()
+	if prev != nil && prev != b {
+		// Prepend prev to MRU, deduplicating.
+		filtered := e.bufferMRU[:0]
+		for _, entry := range e.bufferMRU {
+			if entry != prev {
+				filtered = append(filtered, entry)
+			}
+		}
+		e.bufferMRU = append([]*buffer.Buffer{prev}, filtered...)
+		if len(e.bufferMRU) > 20 {
+			e.bufferMRU = e.bufferMRU[:20]
+		}
+	}
+	e.activeWin.SetBuf(b)
+}
+
 // SwitchToBuffer displays the buffer with name in the active window,
 // creating it if it does not exist.
 func (e *Editor) SwitchToBuffer(name string) *buffer.Buffer {
@@ -619,7 +644,7 @@ func (e *Editor) SwitchToBuffer(name string) *buffer.Buffer {
 		b = buffer.New(name)
 		e.buffers = append(e.buffers, b)
 	}
-	e.activeWin.SetBuf(b)
+	e.showBuf(b)
 	return b
 }
 
@@ -1330,7 +1355,7 @@ func (e *Editor) minibufSelectNext() {
 	}
 	if e.minibufSelectedIdx < len(e.minibufCandidates)-1 {
 		e.minibufSelectedIdx++
-		if e.minibufSelectedIdx >= e.minibufCandidateOffset+5 {
+		if e.minibufSelectedIdx >= e.minibufCandidateOffset+minibufPopupMaxVisible {
 			e.minibufCandidateOffset++
 		}
 	}
@@ -1848,14 +1873,32 @@ func (e *Editor) renderModeline(w *window.Window) {
 	e.term.DrawString(w.Left(), modeRow, label, syntax.FaceModeline)
 }
 
-// renderMinibuffer draws the minibuffer / message area at the last row.
+// renderMinibuffer draws the minibuffer / message area.
+// When a completion popup is active the prompt shifts up by nVisible rows
+// and the candidates are drawn immediately below it.
 func (e *Editor) renderMinibuffer() {
-	_, row, width, _ := e.minibufWin.Left(), e.minibufWin.Top(), e.minibufWin.Width(), e.minibufWin.Height()
+	baseRow := e.minibufWin.Top() // always the last terminal row
+	width := e.minibufWin.Width()
 
 	var line string
+	promptRow := baseRow
+
 	if e.minibufActive {
 		line = e.minibufPrompt + e.minibufBuf.String()
-		e.renderCandidatePopup(row, width)
+		// Refresh candidates now so nVisible is correct before we draw.
+		if e.minibufCompletions != nil {
+			if e.minibufBuf.String() != e.minibufLastQuery {
+				e.refreshMinibufCandidates()
+			}
+		}
+		nVisible := min(len(e.minibufCandidates), minibufPopupMaxVisible)
+		if nVisible > 0 {
+			promptRow = baseRow - nVisible
+			if promptRow < 0 {
+				promptRow = 0
+			}
+		}
+		e.renderCandidatePopup(promptRow, width)
 	} else if e.message != "" {
 		// Expire messages after 5 seconds.
 		age := time.Now().UnixNano() - e.messageTime
@@ -1866,46 +1909,36 @@ func (e *Editor) renderMinibuffer() {
 		}
 	}
 
-	// Pad/trim to width.
+	// Draw prompt / message at promptRow.
 	runes := []rune(line)
 	for col := range width {
 		ch := ' '
 		if col < len(runes) {
 			ch = runes[col]
 		}
-		e.term.SetCell(col, row, ch, syntax.FaceMinibuffer)
+		e.term.SetCell(col, promptRow, ch, syntax.FaceMinibuffer)
 	}
 }
 
-// renderCandidatePopup draws the fuzzy-completion popup above the minibuffer.
-// Up to 5 candidates are shown; the selected one is highlighted.
-// Scroll indicators (▲/▼) appear in the first/last visible row when needed.
-func (e *Editor) renderCandidatePopup(minibufRow, width int) {
-	// Lazy refresh: recompute if the query changed since last draw.
-	if e.minibufCompletions != nil {
-		query := e.minibufBuf.String()
-		if query != e.minibufLastQuery {
-			e.refreshMinibufCandidates()
-		}
-	}
+// minibufPopupMaxVisible is the maximum number of completion candidates shown
+// at once in the minibuffer popup.
+const minibufPopupMaxVisible = 5
 
+// renderCandidatePopup draws the fuzzy-completion popup below the prompt row.
+// Scroll indicators (▲/▼) appear in the first/last visible row when needed.
+func (e *Editor) renderCandidatePopup(promptRow, width int) {
 	cands := e.minibufCandidates
 	if len(cands) == 0 {
 		return
 	}
 
-	const maxVisible = 5
 	offset := e.minibufCandidateOffset
-	end := min(offset+maxVisible, len(cands))
+	end := min(offset+minibufPopupMaxVisible, len(cands))
 	visible := cands[offset:end]
 	nVisible := len(visible)
 
-	startRow := minibufRow - nVisible
 	for i, cand := range visible {
-		row := startRow + i
-		if row < 0 {
-			continue
-		}
+		row := promptRow + 1 + i
 		face := syntax.FaceCandidate
 		if offset+i == e.minibufSelectedIdx {
 			face = syntax.FaceSelected
@@ -1922,7 +1955,6 @@ func (e *Editor) renderCandidatePopup(minibufRow, width int) {
 		}
 		if indicator != "" {
 			ir := []rune(indicator)
-			// Truncate candidate so indicator fits.
 			maxCand := max(width-len(ir), 0)
 			if len(runes) > maxCand {
 				runes = runes[:maxCand]
@@ -1944,7 +1976,15 @@ func (e *Editor) renderCandidatePopup(minibufRow, width int) {
 func (e *Editor) placeCursor() {
 	if e.minibufActive {
 		col := len([]rune(e.minibufPrompt)) + e.minibufBuf.Point()
-		row := e.minibufWin.Top()
+		baseRow := e.minibufWin.Top()
+		nVisible := min(len(e.minibufCandidates), minibufPopupMaxVisible)
+		row := baseRow
+		if nVisible > 0 {
+			row = baseRow - nVisible
+			if row < 0 {
+				row = 0
+			}
+		}
 		e.term.ShowCursor(col, row)
 		return
 	}

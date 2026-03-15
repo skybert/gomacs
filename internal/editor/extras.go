@@ -985,15 +985,26 @@ func (e *Editor) vcShowOutput(name, text, mode string) {
 	b.SetMode(mode)
 	b.SetReadOnly(true)
 	b.SetPoint(0)
-	e.activeWin.SetBuf(b)
+	e.showBuf(b)
 }
 
-// vcQuit switches away from the current VC output buffer (whose mode is
-// skipMode) to the first other buffer, or to *scratch* as a fallback.
+// vcQuit switches away from the current VC output buffer to the most recently
+// used buffer that isn't a VC output buffer of any kind (using bufferMRU),
+// falling back to *scratch*.
 func (e *Editor) vcQuit(skipMode string) {
+	vcModes := map[string]bool{
+		"vc-log": true, "vc-status": true, "vc-grep": true, "diff": true,
+	}
+	for _, b := range e.bufferMRU {
+		if !vcModes[b.Mode()] {
+			e.activeWin.SetBuf(b)
+			return
+		}
+	}
+	// Fallback: first buffer in e.buffers that isn't the current one.
 	cur := e.ActiveBuffer()
 	for _, b := range e.buffers {
-		if b != cur && b.Mode() != skipMode {
+		if b != cur && !vcModes[b.Mode()] {
 			e.activeWin.SetBuf(b)
 			return
 		}
