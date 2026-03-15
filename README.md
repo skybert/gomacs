@@ -14,6 +14,21 @@ Simple TTY only Emacs clone written in Go.
 - Self documenting features, like <kbd>C-h f</kbd> `describe-function`
   and <kbd>C-h k</kbd> `describe-key`
 
+# LSP support
+
+<img src="doc/gomacs-lsp-auto-complete.png" alt="gomacs lsp"/>
+
+- Show method signature in minibuffer, eldoc style
+- Auto completion
+- Find definition at point
+
+# M-x completion
+
+<img src="doc/gomacs-m-x" alt="gomacs M-x"/>
+
+- LRU (last recently used) sort
+- Fuzzy search
+
 # How to run it?
 
 ```perl
