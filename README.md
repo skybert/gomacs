@@ -67,3 +67,28 @@ Cheers,
 
 - `downcase-word` is very slow
 - `execute-extended-command` doesn't have `C-n` and `C-p`
+- `switch-to-buffer` doesn't use a LRU sorted list of buffers.
+- `dired` doesn't change the dir context, so `C-x C-f` still goes to
+  the dir `gomacs` was started in.
+- `describe-function` doesn't list the registered shortcut(s).
+- Undo works, but not redo, it just creates a mess.
+
+# Missing features
+
+- `delete-trailing-whitespace`. Will delete all trailing white space
+in the buffer, or if the region is active, only in the selected
+region.
+
+- `save-buffer` should delete trailing whitespace. Should be possible
+to turn off with:
+
+```lisp
+(setq save-buffer-delete-trailing-whitespace nil)
+```
+
+- `vc-next-action` which runs `git add` if the file is not added to
+  the repo, or `git commit` if it is. If it runs `git commit`, it
+  should open a buffer in which the user can type the (multiline)
+  message. As comments in this commit buffer should be the changed
+  files. Hitting `C-c C-c` will submit the commit, whereas `C-c C-k`
+  will abort (kill) it .
