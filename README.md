@@ -24,7 +24,7 @@ Simple TTY only Emacs clone written in Go.
 
 # M-x completion
 
-<img src="doc/gomacs-m-x" alt="gomacs M-x"/>
+<img src="doc/gomacs-m-x.png" alt="gomacs M-x"/>
 
 - LRU (last recently used) sort
 - Fuzzy search
