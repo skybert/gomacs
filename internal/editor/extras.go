@@ -3,13 +3,17 @@ package editor
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
+	"github.com/skybert/gomacs/internal/terminal"
 )
 
 // ---------------------------------------------------------------------------
@@ -851,4 +855,296 @@ func shellRun(ctx context.Context, cmd, stdin string) (string, error) {
 	}
 	out, err := sh.CombinedOutput()
 	return string(out), err
+}
+
+// ---------------------------------------------------------------------------
+// Version control (C-x v)
+// ---------------------------------------------------------------------------
+
+// vcGitDir returns the git repository root for the file in buf, or "".
+// It walks upward from the file's directory looking for a ".git" entry.
+func vcGitDir(buf *buffer.Buffer) string {
+	filename := buf.Filename()
+	if filename == "" {
+		return ""
+	}
+	dir := filepath.Dir(filename)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// vcShowOutput opens or reuses a VC output buffer with the given name,
+// sets its content to text, applies the given mode, and makes it current.
+func (e *Editor) vcShowOutput(name, text, mode string) {
+	b := e.FindBuffer(name)
+	if b == nil {
+		b = buffer.NewWithContent(name, text)
+		e.buffers = append(e.buffers, b)
+	} else {
+		b.SetReadOnly(false)
+		b.Delete(0, b.Len())
+		b.InsertString(0, text)
+	}
+	b.SetMode(mode)
+	b.SetReadOnly(true)
+	b.SetPoint(0)
+	e.activeWin.SetBuf(b)
+}
+
+// cmdVcPrintLog shows the git log for the current buffer's file (C-x v l).
+func (e *Editor) cmdVcPrintLog() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	root := vcGitDir(buf)
+	if root == "" {
+		e.Message("vc-print-log: not in a git repository")
+		return
+	}
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "log", "--oneline", "-50") //nolint:gosec
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err != nil && text == "" {
+		text = err.Error()
+	}
+	e.vcShowOutput("*VC Log*", text, "vc-log")
+	// Record the repo root so vcLogDispatch can run git show.
+	e.vcLogRoots[e.ActiveBuffer()] = root
+}
+
+// cmdVcDiff shows uncommitted changes for the current repository (C-x v =).
+func (e *Editor) cmdVcDiff() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	root := vcGitDir(buf)
+	if root == "" {
+		e.Message("vc-diff: not in a git repository")
+		return
+	}
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "diff") //nolint:gosec
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err != nil && text == "" {
+		text = err.Error()
+	}
+	if text == "" {
+		e.Message("vc-diff: no uncommitted changes")
+		return
+	}
+	e.vcShowOutput("*VC Diff*", text, "diff")
+	// Record the repo root so vcDiffDispatch can navigate to source files.
+	e.vcLogRoots[e.ActiveBuffer()] = root
+}
+
+// vcLogDispatch handles keys in a *VC Log* buffer.
+// q quits (switches to a previous buffer); Enter opens the commit under point.
+// Returns true if the key was consumed.
+func (e *Editor) vcLogDispatch(ke terminal.KeyEvent) bool {
+	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
+		return false
+	}
+	if ke.Key == tcell.KeyRune && ke.Rune == 'q' {
+		// Switch to the most recently used non-vc-log buffer.
+		for _, b := range e.buffers {
+			if b != e.ActiveBuffer() && b.Mode() != "vc-log" {
+				e.activeWin.SetBuf(b)
+				return true
+			}
+		}
+		e.SwitchToBuffer("*scratch*")
+		return true
+	}
+	if ke.Key != tcell.KeyEnter {
+		return false
+	}
+
+	// Enter: extract the abbreviated commit hash (first word on the line)
+	// and open a *VC Show* buffer with git show output.
+	buf := e.ActiveBuffer()
+	root := e.vcLogRoots[buf]
+	if root == "" {
+		return true
+	}
+	pt := buf.Point()
+	bol := buf.BeginningOfLine(pt)
+	eol := buf.EndOfLine(pt)
+	line := buf.Substring(bol, eol)
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return true
+	}
+	hash := fields[0]
+
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "show", hash) //nolint:gosec
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err != nil && text == "" {
+		text = err.Error()
+	}
+	e.vcShowOutput("*VC Show*", text, "diff")
+	// Record the root so vcDiffDispatch can navigate to source lines.
+	e.vcLogRoots[e.ActiveBuffer()] = root
+	return true
+}
+
+// vcDiffDispatch handles keys in any "diff" mode buffer (*VC Diff*, *VC Show*).
+// q  – close (switch to a non-diff buffer)
+// n  – jump to the next hunk (@@ header)
+// p  – jump to the previous hunk (@@ header)
+// Enter on a +/- line – open the corresponding source file at that line
+func (e *Editor) vcDiffDispatch(ke terminal.KeyEvent) bool {
+	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
+		return false
+	}
+
+	buf := e.ActiveBuffer()
+
+	switch {
+	case ke.Key == tcell.KeyRune && ke.Rune == 'q':
+		for _, b := range e.buffers {
+			if b != buf && b.Mode() != "diff" {
+				e.activeWin.SetBuf(b)
+				return true
+			}
+		}
+		e.SwitchToBuffer("*scratch*")
+		return true
+
+	case ke.Key == tcell.KeyRune && ke.Rune == 'n':
+		// Jump to the next @@ hunk header.
+		pt := buf.Point()
+		eol := buf.EndOfLine(pt)
+		// Start search after the current line.
+		search := eol + 1
+		n := buf.Len()
+		for search < n {
+			bol := search
+			eol2 := buf.EndOfLine(bol)
+			line := buf.Substring(bol, eol2)
+			if strings.HasPrefix(line, "@@") {
+				buf.SetPoint(bol)
+				return true
+			}
+			search = eol2 + 1
+		}
+		e.Message("No next hunk")
+		return true
+
+	case ke.Key == tcell.KeyRune && ke.Rune == 'p':
+		// Jump to the previous @@ hunk header.
+		pt := buf.Point()
+		bol := buf.BeginningOfLine(pt)
+		// Start search before the current line.
+		search := bol - 1
+		for search > 0 {
+			bol2 := buf.BeginningOfLine(search)
+			eol2 := buf.EndOfLine(bol2)
+			line := buf.Substring(bol2, eol2)
+			if strings.HasPrefix(line, "@@") {
+				buf.SetPoint(bol2)
+				return true
+			}
+			search = bol2 - 1
+		}
+		e.Message("No previous hunk")
+		return true
+
+	case ke.Key == tcell.KeyEnter:
+		return e.vcDiffGotoSource(buf)
+	}
+	return false
+}
+
+// vcDiffGotoSource navigates to the source file line corresponding to the
+// +/- diff line under point.  It parses the unified diff context to find
+// the file path and new-file line number, then opens the file there.
+func (e *Editor) vcDiffGotoSource(buf *buffer.Buffer) bool {
+	pt := buf.Point()
+	bol := buf.BeginningOfLine(pt)
+	eol := buf.EndOfLine(pt)
+	curLine := buf.Substring(bol, eol)
+
+	// Only act on actual diff lines (+/-), not file/hunk headers.
+	if len(curLine) == 0 {
+		return true
+	}
+	first := curLine[0]
+	if first != '+' && first != '-' {
+		return true
+	}
+	if strings.HasPrefix(curLine, "+++") || strings.HasPrefix(curLine, "---") {
+		return true
+	}
+
+	root := e.vcLogRoots[buf]
+	if root == "" {
+		return true
+	}
+
+	// Collect all lines up to and including the current one.
+	allText := buf.Substring(0, eol)
+	lines := strings.Split(allText, "\n")
+	curIdx := len(lines) - 1
+
+	// Scan backward to find the nearest +++ b/<path> and @@ header.
+	filePath := ""
+	newFileLineNum := 0
+
+	for i := curIdx - 1; i >= 0; i-- {
+		l := lines[i]
+		if filePath == "" && strings.HasPrefix(l, "+++ ") {
+			// Strip leading "b/" if present (standard git diff format).
+			rel := strings.TrimPrefix(l[4:], "b/")
+			filePath = filepath.Join(root, rel)
+		}
+		if strings.HasPrefix(l, "@@ ") {
+			// Parse +newStart from "@@ -A,B +C,D @@ ..."
+			fields := strings.Fields(l)
+			if len(fields) >= 3 {
+				newPart := strings.TrimPrefix(fields[2], "+")
+				newPart = strings.Split(newPart, ",")[0]
+				start, _ := strconv.Atoi(newPart)
+				// Count lines between this @@ and curIdx to find the new-file line.
+				newLine := start
+				for j := i + 1; j < curIdx; j++ {
+					if !strings.HasPrefix(lines[j], "-") {
+						newLine++
+					}
+				}
+				// For + lines the cursor is on that new-file line;
+				// for - lines navigate to the surrounding context (same newLine).
+				if strings.HasPrefix(curLine, "+") {
+					newLine++ // the + line itself advances the new-file counter
+				}
+				newFileLineNum = newLine
+			}
+			break
+		}
+	}
+
+	if filePath == "" || newFileLineNum == 0 {
+		e.Message("Cannot determine source location")
+		return true
+	}
+
+	// Open the file and jump to the computed line.
+	b, err := e.loadFile(filePath)
+	if err != nil {
+		e.Message("Cannot open %s: %v", filePath, err)
+		return true
+	}
+	e.activeWin.SetBuf(b)
+	pos := b.LineStart(newFileLineNum)
+	b.SetPoint(pos)
+	return true
 }

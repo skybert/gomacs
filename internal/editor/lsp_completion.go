@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/lsp"
 	"github.com/skybert/gomacs/internal/syntax"
 	"github.com/skybert/gomacs/internal/terminal"
@@ -49,6 +49,8 @@ func lspCompWordPrefix(buf interface {
 // lspMaybeTriggerCompletion is called after each self-insert.  When the
 // prefix before point is at least lspCompletionMinChars characters long and
 // an LSP server is ready, it fires an async textDocument/completion request.
+// It also triggers immediately when the last inserted character is a trigger
+// character (e.g. '.') so that "os." shows os package members.
 func (e *Editor) lspMaybeTriggerCompletion() {
 	if e.lspCompInflight || e.lspCompActive {
 		return
@@ -66,7 +68,18 @@ func (e *Editor) lspMaybeTriggerCompletion() {
 		minChars = lspDefaultCompletionMinChars
 	}
 	prefix, wordStart := lspCompWordPrefix(buf)
-	if len([]rune(prefix)) < minChars {
+
+	// Check whether the character immediately before the word prefix is a
+	// trigger character (e.g. '.').  If so we trigger even with a short prefix.
+	var triggerChar rune
+	if wordStart > 0 {
+		prev := buf.RuneAt(wordStart - 1)
+		if prev == '.' {
+			triggerChar = prev
+		}
+	}
+
+	if len([]rune(prefix)) < minChars && triggerChar == 0 {
 		return
 	}
 	e.lspCompInflight = true
@@ -75,10 +88,17 @@ func (e *Editor) lspMaybeTriggerCompletion() {
 	uri := lsp.FileURI(buf.Filename())
 	ctx := context.Background()
 	e.lspAsync(func() func() {
-		result, err := conn.client.CallCtx(ctx, "textDocument/completion", map[string]any{
+		params := map[string]any{
 			"textDocument": map[string]any{"uri": uri},
 			"position":     pos,
-		})
+		}
+		if triggerChar != 0 {
+			params["context"] = map[string]any{
+				"triggerKind":      2, // TriggerCharacter
+				"triggerCharacter": string(triggerChar),
+			}
+		}
+		result, err := conn.client.CallCtx(ctx, "textDocument/completion", params)
 		return func() {
 			e.lspCompInflight = false
 			if err != nil || result == nil || string(result) == "null" {
@@ -127,6 +147,19 @@ func (e *Editor) lspCompletionHandleKey(ke terminal.KeyEvent) bool {
 	case tcell.KeyBacktab, tcell.KeyUp:
 		e.lspCompPrev()
 		return true
+	case tcell.KeyRune:
+		if ke.Mod == tcell.ModAlt {
+			switch ke.Rune {
+			case 'n':
+				e.lspCompNext()
+				return true
+			case 'p':
+				e.lspCompPrev()
+				return true
+			}
+		}
+		e.lspCompDismiss()
+		return false
 	case tcell.KeyEnter:
 		e.lspCompletionInsert()
 		e.lspCompDismiss()
@@ -138,7 +171,7 @@ func (e *Editor) lspCompletionHandleKey(ke terminal.KeyEvent) bool {
 			e.Message("Quit")
 		}
 		return true
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
+	case tcell.KeyBackspace:
 		// Backspace: dismiss, then let normal dispatch handle it.
 		e.lspCompDismiss()
 		return false

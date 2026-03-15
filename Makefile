@@ -1,3 +1,4 @@
+
 BINARY   := gomacs
 MODULE   := github.com/skybert/gomacs
 BUILDDIR := build

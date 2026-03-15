@@ -9,7 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
+	"github.com/gdamore/tcell/v3/color"
 	"github.com/skybert/gomacs/internal/syntax"
 )
 
@@ -84,13 +85,13 @@ func (t *Terminal) DrawString(col, row int, s string, face syntax.Face) {
 // PollEvent blocks until a tcell event arrives and returns it.
 // Callers should type-switch on (*tcell.EventKey), (*tcell.EventResize), etc.
 func (t *Terminal) PollEvent() tcell.Event {
-	return t.screen.PollEvent()
+	return <-t.screen.EventQ()
 }
 
 // PostWakeup injects a synthetic EventInterrupt to unblock PollEvent.
 // Used by background goroutines to notify the main event loop of pending work.
 func (t *Terminal) PostWakeup() {
-	_ = t.screen.PostEvent(tcell.NewEventInterrupt(nil))
+	t.screen.EventQ() <- tcell.NewEventInterrupt(nil)
 }
 
 // ShowCursor moves the hardware cursor to (col, row).
@@ -98,26 +99,11 @@ func (t *Terminal) ShowCursor(col, row int) {
 	t.screen.ShowCursor(col, row)
 }
 
-// PostEventChannel returns a channel that delivers tcell events.
-// A background goroutine polls the screen and forwards every event;
-// it exits when the channel is closed or the screen is finalised.
-//
-// Callers that prefer a channel-based select loop should use this instead of
-// PollEvent.
+// PostEventChannel returns the screen's event channel directly.
+// Events may be read from the channel in the standard Go fashion, which
+// allows integration with select statements.
 func (t *Terminal) PostEventChannel() chan tcell.Event {
-	ch := make(chan tcell.Event, 16)
-	go func() {
-		defer close(ch)
-		for {
-			ev := t.screen.PollEvent()
-			if ev == nil {
-				// screen has been Fini'd
-				return
-			}
-			ch <- ev
-		}
-	}()
-	return ch
+	return t.screen.EventQ()
 }
 
 // ---------------------------------------------------------------------------
@@ -126,72 +112,72 @@ func (t *Terminal) PostEventChannel() chan tcell.Event {
 
 // namedColors maps lowercase CSS/X11 color names to their tcell equivalents.
 var namedColors = map[string]tcell.Color{
-	"default": tcell.ColorDefault,
-	"black":   tcell.ColorBlack,
-	"maroon":  tcell.ColorMaroon,
-	"green":   tcell.ColorGreen,
-	"olive":   tcell.ColorOlive,
-	"navy":    tcell.ColorNavy,
-	"purple":  tcell.ColorPurple,
-	"teal":    tcell.ColorTeal,
-	"silver":  tcell.ColorSilver,
-	"gray":    tcell.ColorGray,
-	"grey":    tcell.ColorGray,
-	"red":     tcell.ColorRed,
-	"lime":    tcell.ColorLime,
-	"yellow":  tcell.ColorYellow,
-	"blue":    tcell.ColorBlue,
-	"fuchsia": tcell.ColorFuchsia,
-	"magenta": tcell.ColorFuchsia,
-	"aqua":    tcell.ColorAqua,
-	"cyan":    tcell.ColorAqua,
-	"white":   tcell.ColorWhite,
+	"default": color.Default,
+	"black":   color.Black,
+	"maroon":  color.Maroon,
+	"green":   color.Green,
+	"olive":   color.Olive,
+	"navy":    color.Navy,
+	"purple":  color.Purple,
+	"teal":    color.Teal,
+	"silver":  color.Silver,
+	"gray":    color.Gray,
+	"grey":    color.Gray,
+	"red":     color.Red,
+	"lime":    color.Lime,
+	"yellow":  color.Yellow,
+	"blue":    color.Blue,
+	"fuchsia": color.Fuchsia,
+	"magenta": color.Fuchsia,
+	"aqua":    color.Aqua,
+	"cyan":    color.Aqua,
+	"white":   color.White,
 
 	// Bright / high-intensity variants (ANSI 8–15).
-	"darkgray":      tcell.ColorDarkGray,
-	"darkgrey":      tcell.ColorDarkGray,
-	"bright-black":  tcell.ColorDarkGray,
-	"brightblack":   tcell.ColorDarkGray,
-	"brightred":     tcell.ColorOrangeRed,
-	"bright-red":    tcell.ColorOrangeRed,
-	"brightgreen":   tcell.ColorGreenYellow,
-	"bright-green":  tcell.ColorGreenYellow,
-	"brightyellow":  tcell.ColorLightGoldenrodYellow,
-	"bright-yellow": tcell.ColorLightGoldenrodYellow,
-	"brightblue":    tcell.ColorCornflowerBlue,
-	"bright-blue":   tcell.ColorCornflowerBlue,
-	"brightcyan":    tcell.ColorLightCyan,
-	"bright-cyan":   tcell.ColorLightCyan,
-	"brightwhite":   tcell.ColorGhostWhite,
-	"bright-white":  tcell.ColorGhostWhite,
+	"darkgray":      color.DarkGray,
+	"darkgrey":      color.DarkGray,
+	"bright-black":  color.DarkGray,
+	"brightblack":   color.DarkGray,
+	"brightred":     color.OrangeRed,
+	"bright-red":    color.OrangeRed,
+	"brightgreen":   color.GreenYellow,
+	"bright-green":  color.GreenYellow,
+	"brightyellow":  color.LightGoldenrodYellow,
+	"bright-yellow": color.LightGoldenrodYellow,
+	"brightblue":    color.CornflowerBlue,
+	"bright-blue":   color.CornflowerBlue,
+	"brightcyan":    color.LightCyan,
+	"bright-cyan":   color.LightCyan,
+	"brightwhite":   color.GhostWhite,
+	"bright-white":  color.GhostWhite,
 
 	// Commonly used X11/Emacs face colors.
-	"orange":    tcell.ColorOrange,
-	"pink":      tcell.ColorPink,
-	"violet":    tcell.ColorViolet,
-	"brown":     tcell.ColorSaddleBrown,
-	"goldenrod": tcell.ColorGoldenrod,
-	"salmon":    tcell.ColorSalmon,
-	"turquoise": tcell.ColorTurquoise,
-	"tan":       tcell.ColorTan,
-	"khaki":     tcell.ColorKhaki,
-	"coral":     tcell.ColorCoral,
-	"tomato":    tcell.ColorTomato,
-	"sienna":    tcell.ColorSienna,
-	"chocolate": tcell.ColorChocolate,
-	"indigo":    tcell.ColorIndigo,
-	"slateblue": tcell.ColorSlateBlue,
-	"slategray": tcell.ColorSlateGray,
-	"slategrey": tcell.ColorSlateGray,
-	"steelblue": tcell.ColorSteelBlue,
-	"royalblue": tcell.ColorRoyalBlue,
-	"cadetblue": tcell.ColorCadetBlue,
-	"mintcream": tcell.ColorMintCream,
-	"snow":      tcell.ColorSnow,
-	"ivory":     tcell.ColorIvory,
-	"linen":     tcell.ColorLinen,
-	"lavender":  tcell.ColorLavender,
-	"beige":     tcell.ColorBeige,
+	"orange":    color.Orange,
+	"pink":      color.Pink,
+	"violet":    color.Violet,
+	"brown":     color.SaddleBrown,
+	"goldenrod": color.Goldenrod,
+	"salmon":    color.Salmon,
+	"turquoise": color.Turquoise,
+	"tan":       color.Tan,
+	"khaki":     color.Khaki,
+	"coral":     color.Coral,
+	"tomato":    color.Tomato,
+	"sienna":    color.Sienna,
+	"chocolate": color.Chocolate,
+	"indigo":    color.Indigo,
+	"slateblue": color.SlateBlue,
+	"slategray": color.SlateGray,
+	"slategrey": color.SlateGray,
+	"steelblue": color.SteelBlue,
+	"royalblue": color.RoyalBlue,
+	"cadetblue": color.CadetBlue,
+	"mintcream": color.MintCream,
+	"snow":      color.Snow,
+	"ivory":     color.Ivory,
+	"linen":     color.Linen,
+	"lavender":  color.Lavender,
+	"beige":     color.Beige,
 }
 
 // parseColor resolves a color string to a tcell.Color.
@@ -205,7 +191,7 @@ var namedColors = map[string]tcell.Color{
 // Anything unrecognised falls back to tcell.ColorDefault.
 func parseColor(s string) tcell.Color {
 	if s == "" {
-		return tcell.ColorDefault
+		return color.Default
 	}
 	lower := strings.ToLower(strings.TrimSpace(s))
 
@@ -228,14 +214,10 @@ func parseColor(s string) tcell.Color {
 		return tcell.PaletteColor(n)
 	}
 
-	return tcell.ColorDefault
+	return color.Default
 }
 
 // faceToStyle converts a syntax.Face into a tcell.Style.
-//
-// Bold, Italic, and Reverse use the bool-accepting Style methods introduced in
-// tcell v2.  Underline is applied via the AttrMask so that we avoid any
-// ambiguity with the variadic Underline(...interface{}) signature.
 func faceToStyle(face syntax.Face) tcell.Style {
 	style := tcell.StyleDefault.
 		Foreground(parseColor(face.Fg)).
@@ -245,10 +227,7 @@ func faceToStyle(face syntax.Face) tcell.Style {
 		Reverse(face.Reverse)
 
 	if face.Underline {
-		// Apply underline via the attribute mask to avoid calling the
-		// variadic Underline(params ...interface{}) method with a bool.
-		_, _, attrs := style.Decompose()
-		style = style.Attributes(attrs | tcell.AttrUnderline)
+		style = style.Underline(true)
 	}
 	return style
 }

@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
 )
 
 // ---------------------------------------------------------------------------
@@ -121,11 +121,10 @@ func MetaKey(r rune) ModKey {
 
 // CtrlKey creates a ModKey for a Ctrl+letter chord.
 //
-// r must be in the range 'a'–'z', ' ' (space), or '/'.
+// r must be in the range 'a'–'z'.
 // Letters map to tcell.KeyCtrlA … tcell.KeyCtrlZ.
-// Ctrl+Space maps to tcell.KeyCtrlSpace.
-// Ctrl+/ maps to tcell.KeyCtrlUnderscore (terminal convention).
-// Any other rune falls back to KeyRune with ModCtrl set.
+// Any other rune (including Ctrl+Space and Ctrl+/) is represented as
+// KeyRune with ModCtrl set, matching how tcell v3 delivers them.
 func CtrlKey(r rune) ModKey {
 	// Map lowercase (and uppercase, treated equivalently) letters.
 	lr := r
@@ -139,14 +138,9 @@ func CtrlKey(r rune) ModKey {
 		// validated to 'a'–'z', so the offset is always 0–25 (safe for int16).
 		offset := int(lr) - int('a')
 		return ModKey{Key: tcell.KeyCtrlA + tcell.Key(offset)} //nolint:gosec
-	case lr == ' ':
-		return ModKey{Key: tcell.KeyCtrlSpace}
-	case lr == '/':
-		// Most terminals send 0x1f (US) for Ctrl+/, which tcell calls
-		// KeyCtrlUnderscore.
-		return ModKey{Key: tcell.KeyCtrlUnderscore}
 	default:
-		// Fallback: record it as a modified rune.
+		// In tcell v3, Ctrl+Space, Ctrl+/, and Ctrl+\ are delivered as
+		// KeyRune with ModCtrl; represent them consistently that way.
 		return ModKey{Key: tcell.KeyRune, Rune: r, Mod: tcell.ModCtrl}
 	}
 }
@@ -164,21 +158,34 @@ func FormatKey(key ModKey) string {
 	//nolint:exhaustive // external enum; default case handles unknowns
 	switch key.Key {
 	case tcell.KeyRune:
+		// In tcell v3, Ctrl+Space, Ctrl+/, and Ctrl+\ are delivered as
+		// KeyRune with ModCtrl set.
+		if key.Mod&tcell.ModCtrl != 0 {
+			var ctrlBase string
+			switch key.Rune {
+			case ' ':
+				ctrlBase = "C-SPC"
+			case '/':
+				ctrlBase = "C-/"
+			default:
+				ctrlBase = "C-" + string(key.Rune)
+			}
+			if meta {
+				return "M-" + ctrlBase
+			}
+			return ctrlBase
+		}
 		if meta {
 			return "M-" + string(key.Rune)
 		}
 		return string(key.Rune)
-	case tcell.KeyCtrlSpace:
-		base = "C-SPC"
-	case tcell.KeyCtrlUnderscore:
-		base = "C-/"
 	case tcell.KeyEnter, tcell.KeyCtrlM:
 		base = "RET"
 	case tcell.KeyTab, tcell.KeyCtrlI:
 		base = "TAB"
 	case tcell.KeyEscape:
 		base = "ESC"
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
+	case tcell.KeyBackspace:
 		base = "DEL"
 	case tcell.KeyDelete:
 		base = "<delete>"

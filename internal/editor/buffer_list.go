@@ -3,7 +3,7 @@ package editor
 import (
 	"strings"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/terminal"
 )
 
@@ -50,7 +50,7 @@ func (e *Editor) bufferListDispatch(ke terminal.KeyEvent) bool {
 		return true
 	}
 	name := strings.TrimSpace(string(runes[nameStart:nameEnd]))
-	if name == "" || name == "Buffer" || name == "------" {
+	if name == "" || strings.HasPrefix(line, " CRM") || strings.HasPrefix(line, " ---") {
 		return true // header line
 	}
 	target := e.FindBuffer(name)

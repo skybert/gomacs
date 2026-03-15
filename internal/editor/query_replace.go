@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/terminal"
 )
 
@@ -77,7 +77,7 @@ func (e *Editor) queryReplaceHandleKey(ke terminal.KeyEvent) {
 		e.queryReplaceDoReplace()
 
 	case ke.Key == tcell.KeyRune && ke.Rune == 'n',
-		ke.Key == tcell.KeyBackspace, ke.Key == tcell.KeyBackspace2,
+		ke.Key == tcell.KeyBackspace,
 		ke.Key == tcell.KeyDelete:
 		// Skip this occurrence.
 		e.queryReplaceCursor = e.queryReplaceMatch + 1

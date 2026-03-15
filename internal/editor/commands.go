@@ -220,6 +220,10 @@ func init() {
 		"Execute string COMMAND in inferior shell; display output.")
 	registerCommand("shell-command-on-region", (*Editor).cmdShellCommandOnRegion,
 		"Execute string COMMAND in inferior shell with region as input.")
+	registerCommand("vc-print-log", (*Editor).cmdVcPrintLog,
+		"Show git log for the current repository (C-x v l).")
+	registerCommand("vc-diff", (*Editor).cmdVcDiff,
+		"Show uncommitted changes via git diff in diff-mode (C-x v =).")
 
 	// ---- narrowing ---------------------------------------------------------
 	registerCommand("narrow-to-region", (*Editor).cmdNarrowToRegion,
@@ -266,6 +270,8 @@ func init() {
 		"Select Emacs Lisp mode for the current buffer.")
 	registerCommand("fundamental-mode", (*Editor).cmdFundamentalMode,
 		"Select Fundamental mode (no syntax highlighting or indentation).")
+	registerCommand("makefile-mode", (*Editor).cmdMakefileMode,
+		"Select Makefile mode for the current buffer.")
 
 	// ---- LSP ---------------------------------------------------------------
 	registerCommand("lsp-find-definition", (*Editor).cmdLSPFindDefinition,
@@ -1132,7 +1138,13 @@ func (e *Editor) cmdListBuffers() {
 		listBuf.InsertString(0, sb.String())
 		listBuf.SetReadOnly(true)
 	}
-	listBuf.SetPoint(0)
+	// Start on the first actual buffer line (skip 2 header lines).
+	firstLine := listBuf.EndOfLine(0) + 1        // skip header line 1
+	firstLine = listBuf.EndOfLine(firstLine) + 1 // skip header line 2
+	if firstLine > listBuf.Len() {
+		firstLine = 0
+	}
+	listBuf.SetPoint(firstLine)
 	e.activeWin.SetBuf(listBuf)
 }
 

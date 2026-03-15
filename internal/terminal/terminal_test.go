@@ -3,32 +3,33 @@ package terminal
 import (
 	"testing"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
+	"github.com/gdamore/tcell/v3/color"
 	"github.com/skybert/gomacs/internal/syntax"
 )
 
 // ---- parseColor ------------------------------------------------------------
 
 func TestParseColorEmpty(t *testing.T) {
-	if got := parseColor(""); got != tcell.ColorDefault {
+	if got := parseColor(""); got != color.Default {
 		t.Errorf("parseColor(%q) = %v, want ColorDefault", "", got)
 	}
 }
 
 func TestParseColorDefault(t *testing.T) {
-	if got := parseColor("default"); got != tcell.ColorDefault {
+	if got := parseColor("default"); got != color.Default {
 		t.Errorf("parseColor(%q) = %v, want ColorDefault", "default", got)
 	}
 }
 
 func TestParseColorNamedBlack(t *testing.T) {
-	if got := parseColor("black"); got != tcell.ColorBlack {
+	if got := parseColor("black"); got != color.Black {
 		t.Errorf("parseColor(%q) = %v, want ColorBlack", "black", got)
 	}
 }
 
 func TestParseColorNamedCaseInsensitive(t *testing.T) {
-	if got := parseColor("WHITE"); got != tcell.ColorWhite {
+	if got := parseColor("WHITE"); got != color.White {
 		t.Errorf("parseColor(%q) = %v, want ColorWhite", "WHITE", got)
 	}
 }
@@ -82,7 +83,7 @@ func TestParseColorANSIIndex(t *testing.T) {
 }
 
 func TestParseColorUnknownFallback(t *testing.T) {
-	if got := parseColor("notacolor"); got != tcell.ColorDefault {
+	if got := parseColor("notacolor"); got != color.Default {
 		t.Errorf("parseColor(%q) = %v, want ColorDefault", "notacolor", got)
 	}
 }
@@ -92,11 +93,12 @@ func TestParseColorUnknownFallback(t *testing.T) {
 func TestFaceToStyleDefault(t *testing.T) {
 	face := syntax.Face{}
 	style := faceToStyle(face)
-	fg, bg, _ := style.Decompose()
-	if fg != tcell.ColorDefault {
+	fg := style.GetForeground()
+	bg := style.GetBackground()
+	if fg != color.Default {
 		t.Errorf("default face: fg = %v, want ColorDefault", fg)
 	}
-	if bg != tcell.ColorDefault {
+	if bg != color.Default {
 		t.Errorf("default face: bg = %v, want ColorDefault", bg)
 	}
 }
@@ -104,11 +106,12 @@ func TestFaceToStyleDefault(t *testing.T) {
 func TestFaceToStyleColors(t *testing.T) {
 	face := syntax.Face{Fg: "red", Bg: "black"}
 	style := faceToStyle(face)
-	fg, bg, _ := style.Decompose()
-	if fg != tcell.ColorRed {
+	fg := style.GetForeground()
+	bg := style.GetBackground()
+	if fg != color.Red {
 		t.Errorf("fg = %v, want ColorRed", fg)
 	}
-	if bg != tcell.ColorBlack {
+	if bg != color.Black {
 		t.Errorf("bg = %v, want ColorBlack", bg)
 	}
 }
@@ -116,7 +119,7 @@ func TestFaceToStyleColors(t *testing.T) {
 func TestFaceToStyleBold(t *testing.T) {
 	face := syntax.Face{Bold: true}
 	style := faceToStyle(face)
-	_, _, attrs := style.Decompose()
+	attrs := style.GetAttributes()
 	if attrs&tcell.AttrBold == 0 {
 		t.Error("bold face: AttrBold not set")
 	}
@@ -125,7 +128,7 @@ func TestFaceToStyleBold(t *testing.T) {
 func TestFaceToStyleItalic(t *testing.T) {
 	face := syntax.Face{Italic: true}
 	style := faceToStyle(face)
-	_, _, attrs := style.Decompose()
+	attrs := style.GetAttributes()
 	if attrs&tcell.AttrItalic == 0 {
 		t.Error("italic face: AttrItalic not set")
 	}
@@ -134,16 +137,15 @@ func TestFaceToStyleItalic(t *testing.T) {
 func TestFaceToStyleUnderline(t *testing.T) {
 	face := syntax.Face{Underline: true}
 	style := faceToStyle(face)
-	_, _, attrs := style.Decompose()
-	if attrs&tcell.AttrUnderline == 0 {
-		t.Error("underline face: AttrUnderline not set")
+	if style.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+		t.Error("underline face: underline not set")
 	}
 }
 
 // ---- ParseKey --------------------------------------------------------------
 
 func TestParseKeyCtrlA(t *testing.T) {
-	ev := tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl)
+	ev := tcell.NewEventKey(tcell.KeyCtrlA, "a", tcell.ModCtrl)
 	ke := ParseKey(ev)
 	if ke.Key != tcell.KeyCtrlA {
 		t.Errorf("ParseKey CtrlA: key = %v, want KeyCtrlA", ke.Key)
@@ -157,19 +159,23 @@ func TestParseKeyCtrlA(t *testing.T) {
 	}
 }
 
-func TestParseKeyCtrlUnderscore(t *testing.T) {
-	ev := tcell.NewEventKey(tcell.KeyCtrlUnderscore, 0, tcell.ModCtrl)
+func TestParseKeyCtrlSlash(t *testing.T) {
+	// In tcell v3, C-/ is delivered as {KeyRune, "/", ModCtrl}.
+	ev := tcell.NewEventKey(tcell.KeyRune, "/", tcell.ModCtrl)
 	ke := ParseKey(ev)
-	if ke.Key != tcell.KeyCtrlUnderscore {
-		t.Errorf("ParseKey C-/: key = %v, want KeyCtrlUnderscore", ke.Key)
+	if ke.Key != tcell.KeyRune {
+		t.Errorf("ParseKey C-/: key = %v, want KeyRune", ke.Key)
 	}
-	if ke.Mod&tcell.ModCtrl != 0 {
-		t.Error("ParseKey C-/: ModCtrl should be stripped")
+	if ke.Rune != '/' {
+		t.Errorf("ParseKey C-/: rune = %v, want '/'", ke.Rune)
+	}
+	if ke.Mod&tcell.ModCtrl == 0 {
+		t.Error("ParseKey C-/: ModCtrl should be present")
 	}
 }
 
 func TestParseKeyRune(t *testing.T) {
-	ev := tcell.NewEventKey(tcell.KeyRune, 'a', 0)
+	ev := tcell.NewEventKey(tcell.KeyRune, "a", 0)
 	ke := ParseKey(ev)
 	if ke.Key != tcell.KeyRune {
 		t.Errorf("ParseKey 'a': key = %v, want KeyRune", ke.Key)
@@ -180,7 +186,7 @@ func TestParseKeyRune(t *testing.T) {
 }
 
 func TestParseKeyRuneStripsModShift(t *testing.T) {
-	ev := tcell.NewEventKey(tcell.KeyRune, '<', tcell.ModShift|tcell.ModAlt)
+	ev := tcell.NewEventKey(tcell.KeyRune, "<", tcell.ModShift|tcell.ModAlt)
 	ke := ParseKey(ev)
 	if ke.Mod&tcell.ModShift != 0 {
 		t.Error("ParseKey rune with ModShift: ModShift should be stripped")
@@ -191,7 +197,7 @@ func TestParseKeyRuneStripsModShift(t *testing.T) {
 }
 
 func TestParseKeyNormalisesModMeta(t *testing.T) {
-	ev := tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModMeta)
+	ev := tcell.NewEventKey(tcell.KeyRune, "f", tcell.ModMeta)
 	ke := ParseKey(ev)
 	if ke.Mod&tcell.ModAlt == 0 {
 		t.Error("ParseKey ModMeta: should be normalised to ModAlt")
@@ -202,7 +208,7 @@ func TestParseKeyNormalisesModMeta(t *testing.T) {
 }
 
 func TestParseKeyArrow(t *testing.T) {
-	ev := tcell.NewEventKey(tcell.KeyUp, 0, 0)
+	ev := tcell.NewEventKey(tcell.KeyUp, "", 0)
 	ke := ParseKey(ev)
 	if ke.Key != tcell.KeyUp {
 		t.Errorf("ParseKey Up: key = %v, want KeyUp", ke.Key)
@@ -212,24 +218,23 @@ func TestParseKeyArrow(t *testing.T) {
 	}
 }
 
-func TestParseKeyCtrlSlashNormalized(t *testing.T) {
-	// Some terminals deliver C-/ as {KeyRune, '/', ModCtrl}.
-	// ParseKey must normalise this to KeyCtrlUnderscore.
-	ev := tcell.NewEventKey(tcell.KeyRune, '/', tcell.ModCtrl)
+func TestParseKeyCtrlSpace(t *testing.T) {
+	// In tcell v3, C-SPC is delivered as {KeyRune, " ", ModCtrl}.
+	ev := tcell.NewEventKey(tcell.KeyRune, " ", tcell.ModCtrl)
 	ke := ParseKey(ev)
-	if ke.Key != tcell.KeyCtrlUnderscore {
-		t.Errorf("C-/ normalization: key = %v, want KeyCtrlUnderscore", ke.Key)
+	if ke.Key != tcell.KeyRune {
+		t.Errorf("ParseKey C-SPC: key = %v, want KeyRune", ke.Key)
 	}
-	if ke.Rune != 0 {
-		t.Errorf("C-/ normalization: rune = %v, want 0", ke.Rune)
+	if ke.Rune != ' ' {
+		t.Errorf("ParseKey C-SPC: rune = %v, want ' '", ke.Rune)
 	}
-	if ke.Mod&tcell.ModCtrl != 0 {
-		t.Error("C-/ normalization: ModCtrl should be stripped")
+	if ke.Mod&tcell.ModCtrl == 0 {
+		t.Error("ParseKey C-SPC: ModCtrl should be present")
 	}
 }
 
 func TestParseKeyF1(t *testing.T) {
-	ev := tcell.NewEventKey(tcell.KeyF1, 0, 0)
+	ev := tcell.NewEventKey(tcell.KeyF1, "", 0)
 	ke := ParseKey(ev)
 	if ke.Key != tcell.KeyF1 {
 		t.Errorf("ParseKey F1: key = %v, want KeyF1", ke.Key)

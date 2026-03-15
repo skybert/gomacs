@@ -14,7 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/elisp"
 	"github.com/skybert/gomacs/internal/keymap"
@@ -38,6 +38,7 @@ type Editor struct {
 	ctrlHKeymap  *keymap.Keymap // C-h prefix map
 	ctrlXNKeymap *keymap.Keymap // C-x n (narrowing)
 	ctrlXRKeymap *keymap.Keymap // C-x r (registers)
+	ctrlXVKeymap *keymap.Keymap // C-x v (version control)
 	metaGKeymap  *keymap.Keymap // M-g (goto)
 	ctrlCKeymap  *keymap.Keymap // C-c prefix map
 
@@ -131,6 +132,9 @@ type Editor struct {
 	// Dired state keyed by buffer pointer.
 	diredStates map[*buffer.Buffer]*diredState
 
+	// vcLogRoots maps *VC Log* buffers to their git repository root dir.
+	vcLogRoots map[*buffer.Buffer]string
+
 	// LSP connections keyed by mode name (e.g. "go").
 	lspConns    map[string]*lspConn
 	lspDefStack []lspDefPos // jump history for M-,
@@ -159,6 +163,20 @@ type Editor struct {
 	lspCompInflight       bool
 	lspCompWordStart      int
 	lspCompletionMinChars int // default lspDefaultCompletionMinChars
+
+	// spanCaches caches syntax-highlight spans per buffer so that
+	// scrolling (C-n/C-p) does not re-highlight the whole file every frame.
+	spanCaches map[*buffer.Buffer]*spanCache
+}
+
+// spanCache holds pre-computed highlighting data for a buffer.  It is
+// invalidated whenever the buffer content or mode changes.
+type spanCache struct {
+	gen   int
+	mode  string
+	text  string
+	runes []rune
+	spans []syntax.Span
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +209,7 @@ func New(opts Options) (*Editor, error) {
 		lisp:             elisp.NewEvaluator(),
 		registers:        make(map[rune]register),
 		diredStates:      make(map[*buffer.Buffer]*diredState),
+		vcLogRoots:       make(map[*buffer.Buffer]string),
 		fillColumn:       70,
 		isSearchCaseFold: true,
 		lspConns:         make(map[string]*lspConn),
@@ -264,6 +283,7 @@ func (e *Editor) setupKeymaps() {
 	e.ctrlHKeymap = keymap.New("C-h")
 	e.ctrlXNKeymap = keymap.New("C-x n")
 	e.ctrlXRKeymap = keymap.New("C-x r")
+	e.ctrlXVKeymap = keymap.New("C-x v")
 	e.metaGKeymap = keymap.New("M-g")
 	e.ctrlCKeymap = keymap.New("C-c")
 
@@ -272,6 +292,7 @@ func (e *Editor) setupKeymaps() {
 	ch := e.ctrlHKeymap
 	cxn := e.ctrlXNKeymap
 	cxr := e.ctrlXRKeymap
+	cxv := e.ctrlXVKeymap
 	mg := e.metaGKeymap
 	cc := e.ctrlCKeymap
 
@@ -303,7 +324,7 @@ func (e *Editor) setupKeymaps() {
 
 	// ---- C-x r prefix (registers) ------------------------------------------
 	cx.BindPrefix(keymap.PlainKey('r'), cxr)
-	cxr.Bind(keymap.MakeKey(tcell.KeyCtrlSpace, 0, 0), "point-to-register")
+	cxr.Bind(keymap.MakeKey(tcell.KeyRune, ' ', tcell.ModCtrl), "point-to-register")
 	cxr.Bind(keymap.PlainKey(' '), "point-to-register")
 	cxr.Bind(keymap.PlainKey('j'), "jump-to-register")
 	cxr.Bind(keymap.PlainKey('s'), "copy-to-register")
@@ -344,7 +365,6 @@ func (e *Editor) setupKeymaps() {
 	gk.Bind(keymap.CtrlKey('d'), "delete-char")
 	gk.Bind(keymap.MakeKey(tcell.KeyDelete, 0, 0), "delete-char")
 	gk.Bind(keymap.MakeKey(tcell.KeyBackspace, 0, 0), "backward-delete-char")
-	gk.Bind(keymap.MakeKey(tcell.KeyBackspace2, 0, 0), "backward-delete-char")
 	gk.Bind(keymap.CtrlKey('k'), "kill-line")
 	gk.Bind(keymap.CtrlKey('w'), "kill-region")
 	gk.Bind(keymap.MetaKey('w'), "copy-region-as-kill")
@@ -384,7 +404,7 @@ func (e *Editor) setupKeymaps() {
 	gk.Bind(keymap.MetaKey('c'), "capitalize-word")
 
 	// C-M bindings (represented as Meta + Ctrl combos)
-	gk.Bind(keymap.MakeKey(tcell.KeyCtrlBackslash, 0, tcell.ModAlt), "indent-region")
+	gk.Bind(keymap.MakeKey(tcell.KeyRune, '\\', tcell.ModCtrl|tcell.ModAlt), "indent-region")
 
 	// ---- C-x bindings -------------------------------------------------------
 	cx.Bind(keymap.CtrlKey('f'), "find-file")
@@ -413,6 +433,11 @@ func (e *Editor) setupKeymaps() {
 	cx.Bind(keymap.PlainKey('('), "start-kbd-macro")
 	cx.Bind(keymap.PlainKey(')'), "end-kbd-macro")
 	cx.Bind(keymap.PlainKey('e'), "call-last-kbd-macro")
+
+	// ---- C-x v prefix (version control) ------------------------------------
+	cx.BindPrefix(keymap.PlainKey('v'), cxv)
+	cxv.Bind(keymap.PlainKey('l'), "vc-print-log")
+	cxv.Bind(keymap.PlainKey('='), "vc-diff")
 }
 
 // loadInitFile tries ~/.gomacs and ~/.config/gomacs/init.el in that order.
@@ -599,6 +624,8 @@ func (e *Editor) KillBuffer(name string) {
 	for _, b := range e.buffers {
 		if b.Name() != name {
 			remaining = append(remaining, b)
+		} else {
+			delete(e.spanCaches, b)
 		}
 	}
 	e.buffers = remaining
@@ -768,21 +795,25 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 	b.SetFilename(path)
 
 	// Set mode from extension.
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".go":
+	ext := strings.ToLower(filepath.Ext(path))
+	base := strings.ToLower(filepath.Base(path))
+	switch {
+	case ext == ".go":
 		b.SetMode("go")
-	case ".md", ".markdown":
+	case ext == ".md" || ext == ".markdown":
 		b.SetMode("markdown")
-	case ".el":
+	case ext == ".el":
 		b.SetMode(modeElisp)
-	case ".py":
+	case ext == ".py":
 		b.SetMode("python")
-	case ".java":
+	case ext == ".java":
 		b.SetMode("java")
-	case ".sh", ".bash":
+	case ext == ".sh" || ext == ".bash":
 		b.SetMode("bash")
-	case ".json":
+	case ext == ".json":
 		b.SetMode("json")
+	case ext == ".mk" || base == "makefile" || base == "gnumakefile" || base == "bsdmakefile":
+		b.SetMode("makefile")
 	default:
 		b.SetMode("fundamental")
 	}
@@ -930,6 +961,20 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		}
 	}
 
+	// When in a *VC Log* buffer, handle q and Enter.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-log" {
+		if e.vcLogDispatch(ke) {
+			return
+		}
+	}
+
+	// When in a diff-mode buffer (*VC Diff*, *VC Show*), handle q/n/p/Enter.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "diff" {
+		if e.vcDiffDispatch(ke) {
+			return
+		}
+	}
+
 	binding, found := activeMap.Lookup(mk)
 	if !found {
 		// Unrecognised key in a prefix sequence: cancel prefix, beep.
@@ -1060,7 +1105,7 @@ func (e *Editor) dispatchMinibufKey(ke terminal.KeyEvent) {
 	}
 
 	// M-<backspace> / M-DEL → backward-kill-word.
-	if (ke.Key == tcell.KeyBackspace || ke.Key == tcell.KeyBackspace2) && ke.Mod == tcell.ModAlt {
+	if ke.Key == tcell.KeyBackspace && ke.Mod == tcell.ModAlt {
 		e.minibufBackwardKillWord()
 		return
 	}
@@ -1071,7 +1116,7 @@ func (e *Editor) dispatchMinibufKey(ke terminal.KeyEvent) {
 		e.finishMinibuffer()
 	case tcell.KeyCtrlG, tcell.KeyEscape:
 		e.cancelMinibuffer()
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
+	case tcell.KeyBackspace:
 		if pt > 0 {
 			buf.Delete(pt-1, 1)
 			buf.SetPoint(pt - 1)
@@ -1371,7 +1416,7 @@ func (e *Editor) isearchHandleKey(ke terminal.KeyEvent) {
 		// Accept current match position.
 		e.isearching = false
 
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
+	case tcell.KeyBackspace:
 		if len(e.isearchStr) > 0 {
 			runes := []rune(e.isearchStr)
 			e.isearchStr = string(runes[:len(runes)-1])
@@ -1538,6 +1583,27 @@ func (e *Editor) Redraw() {
 	e.term.Show()
 }
 
+// getSpanCache returns the cached syntax spans for buf, recomputing them if
+// the buffer has changed since the last render.
+func (e *Editor) getSpanCache(buf *buffer.Buffer) *spanCache {
+	if e.spanCaches == nil {
+		e.spanCaches = make(map[*buffer.Buffer]*spanCache)
+	}
+	c := e.spanCaches[buf]
+	gen := buf.ChangeGen()
+	mode := buf.Mode()
+	if c != nil && c.gen == gen && c.mode == mode {
+		return c
+	}
+	hl := highlighterFor(buf)
+	text := buf.String()
+	runes := []rune(text)
+	spans := hl.Highlight(text, 0, len(runes))
+	c = &spanCache{gen: gen, mode: mode, text: text, runes: runes, spans: spans}
+	e.spanCaches[buf] = c
+	return c
+}
+
 // highlighterFor returns the appropriate syntax highlighter for buf.
 func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 	switch buf.Mode() {
@@ -1555,6 +1621,10 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.BashHighlighter{}
 	case "json":
 		return syntax.JSONHighlighter{}
+	case "diff":
+		return syntax.DiffHighlighter{}
+	case "makefile":
+		return syntax.MakefileHighlighter{}
 	default:
 		return syntax.NilHighlighter{}
 	}
@@ -1571,14 +1641,15 @@ func faceAtPos(spans []syntax.Span, pos int) syntax.Face {
 	return syntax.FaceDefault
 }
 
+// tabWidth is the number of spaces a tab character expands to when rendered.
+const tabWidth = 2
+
 // renderWindow draws the text content of w.
 func (e *Editor) renderWindow(w *window.Window) {
 	buf := w.Buf()
-	hl := highlighterFor(buf)
-	text := buf.String()
-	runes := []rune(text)
-
-	spans := hl.Highlight(text, 0, len(runes))
+	cache := e.getSpanCache(buf)
+	runes := cache.runes
+	spans := cache.spans
 
 	// Narrow region: restrict displayed area.
 	narrowMin := buf.NarrowMin()
@@ -1654,17 +1725,15 @@ func (e *Editor) renderWindow(w *window.Window) {
 		}
 
 		lineRunes := []rune(vl.Text)
-		for col := range winW {
-			pos := vl.StartPos + col
-			var ch rune
-			if col < len(lineRunes) {
-				ch = lineRunes[col]
-			} else {
-				ch = ' '
+		screenCol := 0
+
+		// Phase 1: render actual line content, expanding tabs.
+		for bufOffset, ch := range lineRunes {
+			if screenCol >= winW {
+				break
 			}
-
+			pos := vl.StartPos + bufOffset
 			face := faceAtPos(spans, pos)
-
 			// Overlay region.
 			if regionActive && pos >= regionStart && pos < regionEnd {
 				face = syntax.FaceRegion
@@ -1677,8 +1746,26 @@ func (e *Editor) renderWindow(w *window.Window) {
 			if qrMatchStart >= 0 && pos >= qrMatchStart && pos < qrMatchEnd {
 				face = syntax.FaceIsearch
 			}
+			if ch == '\t' {
+				for j := 0; j < tabWidth && screenCol < winW; j++ {
+					e.term.SetCell(w.Left()+screenCol, screenRow, ' ', face)
+					screenCol++
+				}
+			} else {
+				e.term.SetCell(w.Left()+screenCol, screenRow, ch, face)
+				screenCol++
+			}
+		}
 
-			e.term.SetCell(w.Left()+col, screenRow, ch, face)
+		// Phase 2: fill the rest of the row with spaces (possibly region-highlighted).
+		eolPos := vl.StartPos + len(lineRunes)
+		for screenCol < winW {
+			face := syntax.FaceDefault
+			if regionActive && eolPos >= regionStart && eolPos < regionEnd {
+				face = syntax.FaceRegion
+			}
+			e.term.SetCell(w.Left()+screenCol, screenRow, ' ', face)
+			screenCol++
 		}
 	}
 }
@@ -1827,14 +1914,29 @@ func (e *Editor) placeCursor() {
 	w := e.activeWin
 	buf := w.Buf()
 	pt := w.Point()
-	line, col := buf.LineCol(pt)
+	line, _ := buf.LineCol(pt)
 	screenRow := w.Top() + (line - w.ScrollLine())
 	// Clamp to the last text row — never let the cursor land on the modeline.
 	maxTextRow := w.Top() + w.Height() - 2
 	if screenRow > maxTextRow {
 		screenRow = maxTextRow
 	}
-	e.term.ShowCursor(w.Left()+col, screenRow)
+	e.term.ShowCursor(w.Left()+screenColForPoint(buf, pt), screenRow)
+}
+
+// screenColForPoint returns the visual screen column for position pt within
+// its line, expanding tab characters to tabWidth spaces.
+func screenColForPoint(buf *buffer.Buffer, pt int) int {
+	bol := buf.BeginningOfLine(pt)
+	col := 0
+	for i := bol; i < pt; i++ {
+		if buf.RuneAt(i) == '\t' {
+			col += tabWidth
+		} else {
+			col++
+		}
+	}
+	return col
 }
 
 // ---------------------------------------------------------------------------

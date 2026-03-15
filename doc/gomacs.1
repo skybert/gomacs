@@ -123,6 +123,26 @@ An integer is expanded to that many spaces; a string is used verbatim.
 Default: a tab character.
 Example: \fB(setq go\-indent "    ")\fR
 .TP
+.B isearch\-case\-insensitive
+When non\-nil (the default), isearch matches case\-insensitively.
+Set to \fBnil\fR to restore case\-sensitive search.
+Example: \fB(setq isearch\-case\-insensitive nil)\fR
+.TP
+.B java\-indent
+Per\-level indentation string for Java buffers.
+Default: two spaces.
+Example: \fB(setq java\-indent 4)\fR
+.TP
+.B json\-indent
+Per\-level indentation string for JSON buffers.
+Default: two spaces.
+Example: \fB(setq json\-indent 4)\fR
+.TP
+.B markdown\-indent
+Per\-level indentation string for Markdown buffers.
+Default: two spaces.
+Example: \fB(setq markdown\-indent 4)\fR
+.TP
 .B python\-indent
 Per\-level indentation string for Python buffers.
 Default: two spaces.
@@ -132,16 +152,6 @@ Example: \fB(setq python\-indent 4)\fR
 Per\-level indentation string for Bash/sh buffers.
 Default: two spaces.
 Example: \fB(setq sh\-indent 4)\fR
-.TP
-.B java\-indent
-Per\-level indentation string for Java buffers.
-Default: two spaces.
-Example: \fB(setq java\-indent 4)\fR
-.TP
-.B markdown\-indent
-Per\-level indentation string for Markdown buffers.
-Default: two spaces.
-Example: \fB(setq markdown\-indent 4)\fR
 .SH FILES
 .TP
 .B ~/.gomacs

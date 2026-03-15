@@ -28,6 +28,7 @@ var langModes = []langModeInfo{
 	{modeName: "markdown", rootMarkers: []string{}},
 	{modeName: "elisp", rootMarkers: []string{}},
 	{modeName: "json", rootMarkers: []string{}},
+	{modeName: "makefile", rootMarkers: []string{}},
 	{modeName: "fundamental", rootMarkers: []string{}},
 }
 
@@ -104,6 +105,13 @@ func (e *Editor) cmdJsonMode() {
 	e.clearArg()
 	e.setLangMode(e.ActiveBuffer(), "json")
 	e.Message("json-mode")
+}
+
+// cmdMakefileMode activates Makefile mode on the current buffer.
+func (e *Editor) cmdMakefileMode() {
+	e.clearArg()
+	e.setLangMode(e.ActiveBuffer(), "makefile")
+	e.Message("makefile-mode")
 }
 
 // modeIndentStr returns the per-level indent string for the given major mode.

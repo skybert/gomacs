@@ -81,6 +81,7 @@ func (b *Buffer) SetName(name string)  { b.name = name }
 func (b *Buffer) Filename() string     { return b.filename }
 func (b *Buffer) SetFilename(f string) { b.filename = f }
 func (b *Buffer) Mode() string         { return b.mode }
+func (b *Buffer) ChangeGen() int       { return b.changeGen }
 func (b *Buffer) Modified() bool {
 	return b.changeGen != b.savedChangeGen
 }
@@ -103,7 +104,7 @@ func (b *Buffer) SetReadOnly(v bool) { b.readOnly = v }
 // SetMode sets the buffer's major mode.
 func (b *Buffer) SetMode(mode string) {
 	switch mode {
-	case "go", "markdown", "elisp", "python", "java", "bash", "json", "dired", modeFundamental:
+	case "go", "markdown", "elisp", "python", "java", "bash", "json", "makefile", "diff", "dired", modeFundamental:
 		b.mode = mode
 	default:
 		b.mode = modeFundamental

@@ -3,7 +3,7 @@ package keymap
 import (
 	"testing"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
 )
 
 func TestFormatKeyRune(t *testing.T) {

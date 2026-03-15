@@ -3,7 +3,7 @@
 // editor never needs to import tcell directly for input handling.
 package terminal
 
-import "github.com/gdamore/tcell/v2"
+import "github.com/gdamore/tcell/v3"
 
 // KeyEvent is our canonical, tcell-independent description of a key chord.
 type KeyEvent struct {
@@ -24,18 +24,20 @@ type KeyEvent struct {
 //     to ModAlt only so that MetaKey() bindings always match.
 //   - KeyRune events: the rune already encodes Shift (e.g. '<' vs ','), so
 //     ModShift is stripped to allow bindings like MetaKey('<') to work.
+//   - In tcell v3, Ctrl+Space, Ctrl+/, and Ctrl+\ are delivered as KeyRune
+//     with ModCtrl; they pass through unchanged so keymap bindings match.
 //   - All other printable runes: Key=tcell.KeyRune, Rune=<char>.
 func ParseKey(ev *tcell.EventKey) KeyEvent {
 	ke := KeyEvent{
 		Key:  ev.Key(),
-		Rune: ev.Rune(),
+		Rune: firstRune(ev.Str()),
 		Mod:  ev.Modifiers(),
 	}
 
 	//nolint:exhaustive // external enum; default case handles unknowns
 	switch ev.Key() {
 	// --- special named keys that carry no rune ---
-	case tcell.KeyBackspace, tcell.KeyBackspace2,
+	case tcell.KeyBackspace,
 		tcell.KeyDelete,
 		tcell.KeyEnter,
 		tcell.KeyTab,
@@ -49,7 +51,7 @@ func ParseKey(ev *tcell.EventKey) KeyEvent {
 		tcell.KeyF9, tcell.KeyF10, tcell.KeyF11, tcell.KeyF12:
 		ke.Rune = 0
 
-	// --- Ctrl+letter (tcell.KeyCtrlA…Z and related) ---
+	// --- Ctrl+letter (tcell.KeyCtrlA…Z) ---
 	// The Key constant already encodes the ctrl modifier, so strip ModCtrl
 	// from the Mod mask to ensure keymap lookups succeed.
 	case tcell.KeyCtrlA, tcell.KeyCtrlB, tcell.KeyCtrlC, tcell.KeyCtrlD,
@@ -58,18 +60,7 @@ func ParseKey(ev *tcell.EventKey) KeyEvent {
 		tcell.KeyCtrlM, tcell.KeyCtrlN, tcell.KeyCtrlO, tcell.KeyCtrlP,
 		tcell.KeyCtrlQ, tcell.KeyCtrlR, tcell.KeyCtrlS, tcell.KeyCtrlT,
 		tcell.KeyCtrlU, tcell.KeyCtrlV, tcell.KeyCtrlW, tcell.KeyCtrlX,
-		tcell.KeyCtrlY, tcell.KeyCtrlZ,
-		tcell.KeyCtrlSpace,
-		tcell.KeyCtrlUnderscore:
-		ke.Rune = 0
-		ke.Mod &^= tcell.ModCtrl
-	}
-
-	// Some terminals (xterm modifyOtherKeys, kitty keyboard protocol) deliver
-	// C-/ as {KeyRune, '/', ModCtrl} rather than KeyCtrlUnderscore.
-	// Normalise to the canonical form so bindings and FormatKey work correctly.
-	if ke.Key == tcell.KeyRune && ke.Mod&tcell.ModCtrl != 0 && ke.Rune == '/' {
-		ke.Key = tcell.KeyCtrlUnderscore
+		tcell.KeyCtrlY, tcell.KeyCtrlZ:
 		ke.Rune = 0
 		ke.Mod &^= tcell.ModCtrl
 	}
@@ -88,4 +79,12 @@ func ParseKey(ev *tcell.EventKey) KeyEvent {
 	}
 
 	return ke
+}
+
+// firstRune returns the first rune in s, or 0 if s is empty.
+func firstRune(s string) rune {
+	for _, r := range s {
+		return r
+	}
+	return 0
 }

@@ -3,7 +3,7 @@ package keymap_test
 import (
 	"testing"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/keymap"
 )
 
@@ -168,15 +168,15 @@ func TestCtrlKeyLetters(t *testing.T) {
 
 func TestCtrlSpace(t *testing.T) {
 	k := keymap.CtrlKey(' ')
-	if k.Key != tcell.KeyCtrlSpace {
-		t.Fatalf("expected KeyCtrlSpace, got %v", k.Key)
+	if k.Key != tcell.KeyRune || k.Rune != ' ' || k.Mod != tcell.ModCtrl {
+		t.Fatalf("expected {KeyRune, ' ', ModCtrl}, got %+v", k)
 	}
 }
 
 func TestCtrlSlash(t *testing.T) {
 	k := keymap.CtrlKey('/')
-	if k.Key != tcell.KeyCtrlUnderscore {
-		t.Fatalf("expected KeyCtrlUnderscore, got %v", k.Key)
+	if k.Key != tcell.KeyRune || k.Rune != '/' || k.Mod != tcell.ModCtrl {
+		t.Fatalf("expected {KeyRune, '/', ModCtrl}, got %+v", k)
 	}
 }
 
