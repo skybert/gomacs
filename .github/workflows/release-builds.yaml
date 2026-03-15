@@ -1,9 +1,14 @@
-name: Build gomacs release binaries
+name: build-gomacs-binaries
 
 on:
   push:
     tags:
       - 'v*'
+
+# Github action needs write permission to create a release from a Git
+# version tag.
+permissions:
+  contents: write
 
 jobs:
   build:
