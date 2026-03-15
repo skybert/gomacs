@@ -224,6 +224,10 @@ func init() {
 		"Show git log for the current repository (C-x v l).")
 	registerCommand("vc-diff", (*Editor).cmdVcDiff,
 		"Show uncommitted changes via git diff in diff-mode (C-x v =).")
+	registerCommand("vc-status", (*Editor).cmdVcStatus,
+		"Show VCS status for the current repository (C-x v s).")
+	registerCommand("vc-grep", (*Editor).cmdVcGrep,
+		"Run VCS grep and navigate results (C-x v g).")
 
 	// ---- narrowing ---------------------------------------------------------
 	registerCommand("narrow-to-region", (*Editor).cmdNarrowToRegion,
@@ -526,6 +530,12 @@ func (e *Editor) cmdNewline() {
 	// Auto-indent for Emacs Lisp buffers.
 	if buf.Mode() == modeElisp {
 		indentElispLine(buf)
+		return
+	}
+	// Auto-indent for programming modes that have an indent engine.
+	switch buf.Mode() {
+	case "go", "java", "python", "bash", "json":
+		indentCurrentLine(buf, e.modeIndentStr(buf.Mode()))
 	}
 }
 
@@ -881,19 +891,29 @@ func (e *Editor) cmdExecuteExtendedCommand() {
 		}
 		if fn, ok := commands[name]; ok {
 			fn(e)
+			e.pushCommandLRU(name)
 		} else {
 			e.Message("No command: %s", name)
 		}
 	})
 	e.SetMinibufCompletions(func(prefix string) []string {
-		var matches []string
-		for name := range commands {
+		// Collect all matching command names.
+		inLRU := make(map[string]bool, len(e.commandLRU))
+		var lruMatches []string
+		for _, name := range e.commandLRU {
 			if fuzzyMatch(name, prefix) {
-				matches = append(matches, name)
+				lruMatches = append(lruMatches, name)
+				inLRU[name] = true
 			}
 		}
-		sort.Strings(matches)
-		return matches
+		var rest []string
+		for name := range commands {
+			if !inLRU[name] && fuzzyMatch(name, prefix) {
+				rest = append(rest, name)
+			}
+		}
+		sort.Strings(rest)
+		return append(lruMatches, rest...)
 	})
 }
 

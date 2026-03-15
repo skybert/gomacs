@@ -135,6 +135,10 @@ type Editor struct {
 	// vcLogRoots maps *VC Log* buffers to their git repository root dir.
 	vcLogRoots map[*buffer.Buffer]string
 
+	// commandLRU is the most-recently-used command list.  The first entry is
+	// the most recently executed command.  Capped at commandLRUMax entries.
+	commandLRU []string
+
 	// LSP connections keyed by mode name (e.g. "go").
 	lspConns    map[string]*lspConn
 	lspDefStack []lspDefPos // jump history for M-,
@@ -438,6 +442,8 @@ func (e *Editor) setupKeymaps() {
 	cx.BindPrefix(keymap.PlainKey('v'), cxv)
 	cxv.Bind(keymap.PlainKey('l'), "vc-print-log")
 	cxv.Bind(keymap.PlainKey('='), "vc-diff")
+	cxv.Bind(keymap.PlainKey('s'), "vc-status")
+	cxv.Bind(keymap.PlainKey('g'), "vc-grep")
 }
 
 // loadInitFile tries ~/.gomacs and ~/.config/gomacs/init.el in that order.
@@ -975,6 +981,20 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		}
 	}
 
+	// When in a *VC Status* buffer, handle q and Enter.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-status" {
+		if e.vcStatusDispatch(ke) {
+			return
+		}
+	}
+
+	// When in a *VC Grep* buffer, handle q and Enter.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-grep" {
+		if e.vcGrepDispatch(ke) {
+			return
+		}
+	}
+
 	binding, found := activeMap.Lookup(mk)
 	if !found {
 		// Unrecognised key in a prefix sequence: cancel prefix, beep.
@@ -1376,6 +1396,8 @@ func (e *Editor) bufReadOnly() bool {
 }
 
 // execCommand looks up and calls a named command.
+const commandLRUMax = 50
+
 func (e *Editor) execCommand(name string) {
 	fn, ok := commands[name]
 	if !ok {
@@ -1385,6 +1407,23 @@ func (e *Editor) execCommand(name string) {
 	// fn reads e.lastCommand (e.g. for C-l cycling) before we overwrite it.
 	fn(e)
 	e.lastCommand = name
+	e.pushCommandLRU(name)
+}
+
+// pushCommandLRU records name as the most recently used command.
+// Duplicates are removed before prepending so each command appears once.
+func (e *Editor) pushCommandLRU(name string) {
+	// Remove existing occurrence (if any).
+	filtered := e.commandLRU[:0]
+	for _, n := range e.commandLRU {
+		if n != name {
+			filtered = append(filtered, n)
+		}
+	}
+	e.commandLRU = append([]string{name}, filtered...)
+	if len(e.commandLRU) > commandLRUMax {
+		e.commandLRU = e.commandLRU[:commandLRUMax]
+	}
 }
 
 // ---------------------------------------------------------------------------

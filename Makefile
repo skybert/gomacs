@@ -15,6 +15,9 @@ build: fmt
 	mkdir -p $(BUILDDIR)
 	go build $(GOFLAGS) -o $(BUILDDIR)/$(BINARY) .
 
+run: build
+	./$(BUILDDIR)/$(BINARY)
+
 test:
 	go test ./...
 

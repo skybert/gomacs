@@ -861,14 +861,64 @@ func shellRun(ctx context.Context, cmd, stdin string) (string, error) {
 // Version control (C-x v)
 // ---------------------------------------------------------------------------
 
-// vcGitDir returns the git repository root for the file in buf, or "".
-// It walks upward from the file's directory looking for a ".git" entry.
-func vcGitDir(buf *buffer.Buffer) string {
-	filename := buf.Filename()
-	if filename == "" {
-		return ""
+// vcBackend is the interface for a version control system backend.
+// Adding support for a new VCS (e.g. Mercurial) means implementing this
+// interface and appending an instance to vcBackends.
+type vcBackend interface {
+	// Name returns the VCS identifier (e.g. "git").
+	Name() string
+	// Root walks upward from dir looking for a repo root; returns "" if not found.
+	Root(dir string) string
+	// Status returns the full status output.
+	Status(root string) (string, error)
+	// Diff returns uncommitted changes, optionally scoped to filePath.
+	Diff(root, filePath string) (string, error)
+	// Log returns a short commit log, optionally scoped to filePath.
+	Log(root, filePath string) (string, error)
+	// Show returns the full content of one commit identified by rev.
+	Show(root, rev string) (string, error)
+	// Grep runs a line-numbered grep for pattern and returns the output.
+	Grep(root, pattern string) (string, error)
+}
+
+// vcBackends lists every supported backend; the first one whose Root()
+// matches wins.  Extend this slice to add new VCS support.
+var vcBackends = []vcBackend{gitBackend{}}
+
+// vcFind returns the first backend that recognises dir as part of a repo,
+// plus the repo root path.  If dir is empty it falls back to os.Getwd().
+func vcFind(dir string) (vcBackend, string) {
+	if dir == "" {
+		dir, _ = os.Getwd()
 	}
-	dir := filepath.Dir(filename)
+	for _, be := range vcBackends {
+		if root := be.Root(dir); root != "" {
+			return be, root
+		}
+	}
+	return nil, ""
+}
+
+// vcDir returns the directory to use as starting point for VCS detection
+// given the active buffer.  Prefers the buffer's file directory; falls back
+// to the process working directory so that commands work from *scratch* too.
+func vcDir(buf *buffer.Buffer) string {
+	if f := buf.Filename(); f != "" {
+		return filepath.Dir(f)
+	}
+	dir, _ := os.Getwd()
+	return dir
+}
+
+// ---------------------------------------------------------------------------
+// gitBackend — Git implementation of vcBackend
+// ---------------------------------------------------------------------------
+
+type gitBackend struct{}
+
+func (gitBackend) Name() string { return "git" }
+
+func (gitBackend) Root(dir string) string {
 	for {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			return dir
@@ -880,6 +930,45 @@ func vcGitDir(buf *buffer.Buffer) string {
 		dir = parent
 	}
 }
+
+func (gitBackend) Status(root string) (string, error) {
+	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "status").CombinedOutput() //nolint:gosec
+	return string(out), err
+}
+
+func (gitBackend) Diff(root, filePath string) (string, error) {
+	var cmd *exec.Cmd
+	if filePath != "" {
+		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "diff", "--", filePath) //nolint:gosec
+	} else {
+		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "diff") //nolint:gosec
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (gitBackend) Log(root, filePath string) (string, error) {
+	args := []string{"-C", root, "log", "--oneline", "-50"}
+	if filePath != "" {
+		args = append(args, "--", filePath)
+	}
+	out, err := exec.CommandContext(context.Background(), "git", args...).CombinedOutput() //nolint:gosec
+	return string(out), err
+}
+
+func (gitBackend) Show(root, rev string) (string, error) {
+	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "show", rev).CombinedOutput() //nolint:gosec
+	return string(out), err
+}
+
+func (gitBackend) Grep(root, pattern string) (string, error) {
+	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "grep", "-n", pattern).CombinedOutput() //nolint:gosec
+	return string(out), err
+}
+
+// ---------------------------------------------------------------------------
+// Shared VC helpers
+// ---------------------------------------------------------------------------
 
 // vcShowOutput opens or reuses a VC output buffer with the given name,
 // sets its content to text, applies the given mode, and makes it current.
@@ -899,40 +988,51 @@ func (e *Editor) vcShowOutput(name, text, mode string) {
 	e.activeWin.SetBuf(b)
 }
 
-// cmdVcPrintLog shows the git log for the current buffer's file (C-x v l).
+// vcQuit switches away from the current VC output buffer (whose mode is
+// skipMode) to the first other buffer, or to *scratch* as a fallback.
+func (e *Editor) vcQuit(skipMode string) {
+	cur := e.ActiveBuffer()
+	for _, b := range e.buffers {
+		if b != cur && b.Mode() != skipMode {
+			e.activeWin.SetBuf(b)
+			return
+		}
+	}
+	e.SwitchToBuffer("*scratch*")
+}
+
+// ---------------------------------------------------------------------------
+// VC commands
+// ---------------------------------------------------------------------------
+
+// cmdVcPrintLog shows the VCS log (C-x v l).
+// When the active buffer visits a file, the log is scoped to that file.
 func (e *Editor) cmdVcPrintLog() {
 	e.clearArg()
 	buf := e.ActiveBuffer()
-	root := vcGitDir(buf)
-	if root == "" {
-		e.Message("vc-print-log: not in a git repository")
+	be, root := vcFind(vcDir(buf))
+	if be == nil {
+		e.Message("vc-print-log: not in a version control repository")
 		return
 	}
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "log", "--oneline", "-50") //nolint:gosec
-	out, err := cmd.CombinedOutput()
-	text := string(out)
+	text, err := be.Log(root, buf.Filename())
 	if err != nil && text == "" {
 		text = err.Error()
 	}
 	e.vcShowOutput("*VC Log*", text, "vc-log")
-	// Record the repo root so vcLogDispatch can run git show.
 	e.vcLogRoots[e.ActiveBuffer()] = root
 }
 
-// cmdVcDiff shows uncommitted changes for the current repository (C-x v =).
+// cmdVcDiff shows uncommitted changes for the current file (C-x v =).
 func (e *Editor) cmdVcDiff() {
 	e.clearArg()
 	buf := e.ActiveBuffer()
-	root := vcGitDir(buf)
-	if root == "" {
-		e.Message("vc-diff: not in a git repository")
+	be, root := vcFind(vcDir(buf))
+	if be == nil {
+		e.Message("vc-diff: not in a version control repository")
 		return
 	}
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "diff") //nolint:gosec
-	out, err := cmd.CombinedOutput()
-	text := string(out)
+	text, err := be.Diff(root, buf.Filename())
 	if err != nil && text == "" {
 		text = err.Error()
 	}
@@ -941,34 +1041,67 @@ func (e *Editor) cmdVcDiff() {
 		return
 	}
 	e.vcShowOutput("*VC Diff*", text, "diff")
-	// Record the repo root so vcDiffDispatch can navigate to source files.
 	e.vcLogRoots[e.ActiveBuffer()] = root
 }
 
+// cmdVcStatus runs the VCS status command (C-x v s).
+func (e *Editor) cmdVcStatus() {
+	e.clearArg()
+	be, root := vcFind(vcDir(e.ActiveBuffer()))
+	if be == nil {
+		e.Message("vc-status: not in a version control repository")
+		return
+	}
+	text, err := be.Status(root)
+	if err != nil && text == "" {
+		text = err.Error()
+	}
+	e.vcShowOutput("*VC Status*", text, "vc-status")
+	e.vcLogRoots[e.ActiveBuffer()] = root
+}
+
+// cmdVcGrep prompts for a pattern and shows grep results (C-x v g).
+func (e *Editor) cmdVcGrep() {
+	e.clearArg()
+	be, root := vcFind(vcDir(e.ActiveBuffer()))
+	if be == nil {
+		e.Message("vc-grep: not in a version control repository")
+		return
+	}
+	e.ReadMinibuffer(be.Name()+" grep: ", func(pattern string) {
+		if pattern == "" {
+			return
+		}
+		text, err := be.Grep(root, pattern)
+		if err != nil && text == "" {
+			text = "No matches found."
+		}
+		if text == "" {
+			text = "No matches found."
+		}
+		e.vcShowOutput("*VC Grep*", text, "vc-grep")
+		e.vcLogRoots[e.ActiveBuffer()] = root
+	})
+}
+
+// ---------------------------------------------------------------------------
+// VC key dispatch functions
+// ---------------------------------------------------------------------------
+
 // vcLogDispatch handles keys in a *VC Log* buffer.
-// q quits (switches to a previous buffer); Enter opens the commit under point.
-// Returns true if the key was consumed.
+// q quits; Enter opens the commit under point.
 func (e *Editor) vcLogDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
 		return false
 	}
 	if ke.Key == tcell.KeyRune && ke.Rune == 'q' {
-		// Switch to the most recently used non-vc-log buffer.
-		for _, b := range e.buffers {
-			if b != e.ActiveBuffer() && b.Mode() != "vc-log" {
-				e.activeWin.SetBuf(b)
-				return true
-			}
-		}
-		e.SwitchToBuffer("*scratch*")
+		e.vcQuit("vc-log")
 		return true
 	}
 	if ke.Key != tcell.KeyEnter {
 		return false
 	}
 
-	// Enter: extract the abbreviated commit hash (first word on the line)
-	// and open a *VC Show* buffer with git show output.
 	buf := e.ActiveBuffer()
 	root := e.vcLogRoots[buf]
 	if root == "" {
@@ -984,24 +1117,22 @@ func (e *Editor) vcLogDispatch(ke terminal.KeyEvent) bool {
 	}
 	hash := fields[0]
 
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "show", hash) //nolint:gosec
-	out, err := cmd.CombinedOutput()
-	text := string(out)
+	// Find the backend for this root.
+	be, _ := vcFind(root)
+	if be == nil {
+		return true
+	}
+	text, err := be.Show(root, hash)
 	if err != nil && text == "" {
 		text = err.Error()
 	}
 	e.vcShowOutput("*VC Show*", text, "diff")
-	// Record the root so vcDiffDispatch can navigate to source lines.
 	e.vcLogRoots[e.ActiveBuffer()] = root
 	return true
 }
 
 // vcDiffDispatch handles keys in any "diff" mode buffer (*VC Diff*, *VC Show*).
-// q  – close (switch to a non-diff buffer)
-// n  – jump to the next hunk (@@ header)
-// p  – jump to the previous hunk (@@ header)
-// Enter on a +/- line – open the corresponding source file at that line
+// q  – close; n/p – next/previous hunk; Enter – goto source line.
 func (e *Editor) vcDiffDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
 		return false
@@ -1011,20 +1142,12 @@ func (e *Editor) vcDiffDispatch(ke terminal.KeyEvent) bool {
 
 	switch {
 	case ke.Key == tcell.KeyRune && ke.Rune == 'q':
-		for _, b := range e.buffers {
-			if b != buf && b.Mode() != "diff" {
-				e.activeWin.SetBuf(b)
-				return true
-			}
-		}
-		e.SwitchToBuffer("*scratch*")
+		e.vcQuit("diff")
 		return true
 
 	case ke.Key == tcell.KeyRune && ke.Rune == 'n':
-		// Jump to the next @@ hunk header.
 		pt := buf.Point()
 		eol := buf.EndOfLine(pt)
-		// Start search after the current line.
 		search := eol + 1
 		n := buf.Len()
 		for search < n {
@@ -1041,10 +1164,8 @@ func (e *Editor) vcDiffDispatch(ke terminal.KeyEvent) bool {
 		return true
 
 	case ke.Key == tcell.KeyRune && ke.Rune == 'p':
-		// Jump to the previous @@ hunk header.
 		pt := buf.Point()
 		bol := buf.BeginningOfLine(pt)
-		// Start search before the current line.
 		search := bol - 1
 		for search > 0 {
 			bol2 := buf.BeginningOfLine(search)
@@ -1066,15 +1187,13 @@ func (e *Editor) vcDiffDispatch(ke terminal.KeyEvent) bool {
 }
 
 // vcDiffGotoSource navigates to the source file line corresponding to the
-// +/- diff line under point.  It parses the unified diff context to find
-// the file path and new-file line number, then opens the file there.
+// +/- diff line under point.
 func (e *Editor) vcDiffGotoSource(buf *buffer.Buffer) bool {
 	pt := buf.Point()
 	bol := buf.BeginningOfLine(pt)
 	eol := buf.EndOfLine(pt)
 	curLine := buf.Substring(bol, eol)
 
-	// Only act on actual diff lines (+/-), not file/hunk headers.
 	if len(curLine) == 0 {
 		return true
 	}
@@ -1091,40 +1210,33 @@ func (e *Editor) vcDiffGotoSource(buf *buffer.Buffer) bool {
 		return true
 	}
 
-	// Collect all lines up to and including the current one.
 	allText := buf.Substring(0, eol)
 	lines := strings.Split(allText, "\n")
 	curIdx := len(lines) - 1
 
-	// Scan backward to find the nearest +++ b/<path> and @@ header.
 	filePath := ""
 	newFileLineNum := 0
 
 	for i := curIdx - 1; i >= 0; i-- {
 		l := lines[i]
 		if filePath == "" && strings.HasPrefix(l, "+++ ") {
-			// Strip leading "b/" if present (standard git diff format).
 			rel := strings.TrimPrefix(l[4:], "b/")
 			filePath = filepath.Join(root, rel)
 		}
 		if strings.HasPrefix(l, "@@ ") {
-			// Parse +newStart from "@@ -A,B +C,D @@ ..."
 			fields := strings.Fields(l)
 			if len(fields) >= 3 {
 				newPart := strings.TrimPrefix(fields[2], "+")
 				newPart = strings.Split(newPart, ",")[0]
 				start, _ := strconv.Atoi(newPart)
-				// Count lines between this @@ and curIdx to find the new-file line.
 				newLine := start
 				for j := i + 1; j < curIdx; j++ {
 					if !strings.HasPrefix(lines[j], "-") {
 						newLine++
 					}
 				}
-				// For + lines the cursor is on that new-file line;
-				// for - lines navigate to the surrounding context (same newLine).
 				if strings.HasPrefix(curLine, "+") {
-					newLine++ // the + line itself advances the new-file counter
+					newLine++
 				}
 				newFileLineNum = newLine
 			}
@@ -1137,7 +1249,6 @@ func (e *Editor) vcDiffGotoSource(buf *buffer.Buffer) bool {
 		return true
 	}
 
-	// Open the file and jump to the computed line.
 	b, err := e.loadFile(filePath)
 	if err != nil {
 		e.Message("Cannot open %s: %v", filePath, err)
@@ -1145,6 +1256,109 @@ func (e *Editor) vcDiffGotoSource(buf *buffer.Buffer) bool {
 	}
 	e.activeWin.SetBuf(b)
 	pos := b.LineStart(newFileLineNum)
+	b.SetPoint(pos)
+	return true
+}
+
+// vcStatusDispatch handles keys in a *VC Status* buffer.
+// q quits; Enter opens the file under point.
+func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
+	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
+		return false
+	}
+
+	buf := e.ActiveBuffer()
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'q' {
+		e.vcQuit("vc-status")
+		return true
+	}
+
+	if ke.Key != tcell.KeyEnter {
+		return false
+	}
+
+	pt := buf.Point()
+	bol := buf.BeginningOfLine(pt)
+	eol := buf.EndOfLine(pt)
+	line := buf.Substring(bol, eol)
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return true
+	}
+
+	// The file path is the last whitespace-separated token on the line.
+	// git status lines: "\tmodified:   path/to/file" or "\tpath/to/file"
+	fields := strings.Fields(trimmed)
+	filePath := strings.TrimSuffix(fields[len(fields)-1], ":")
+
+	root := e.vcLogRoots[buf]
+	if root == "" {
+		return true
+	}
+	abs := filepath.Join(root, filePath)
+	if _, err := os.Stat(abs); err != nil {
+		e.Message("vc-status: cannot find file: %s", filePath)
+		return true
+	}
+	b, err := e.loadFile(abs)
+	if err != nil {
+		e.Message("Cannot open %s: %v", abs, err)
+		return true
+	}
+	e.activeWin.SetBuf(b)
+	return true
+}
+
+// vcGrepDispatch handles keys in a *VC Grep* buffer.
+// q quits; Enter navigates to file:line.
+func (e *Editor) vcGrepDispatch(ke terminal.KeyEvent) bool {
+	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
+		return false
+	}
+
+	buf := e.ActiveBuffer()
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'q' {
+		e.vcQuit("vc-grep")
+		return true
+	}
+
+	if ke.Key != tcell.KeyEnter {
+		return false
+	}
+
+	// Output format: "filename:linenum:content"
+	pt := buf.Point()
+	bol := buf.BeginningOfLine(pt)
+	eol := buf.EndOfLine(pt)
+	line := buf.Substring(bol, eol)
+	if line == "" {
+		return true
+	}
+
+	parts := strings.SplitN(line, ":", 3)
+	if len(parts) < 2 {
+		return true
+	}
+	relPath := parts[0]
+	lineNum, err := strconv.Atoi(parts[1])
+	if err != nil || lineNum < 1 {
+		return true
+	}
+
+	root := e.vcLogRoots[buf]
+	if root == "" {
+		return true
+	}
+	abs := filepath.Join(root, relPath)
+	b, loadErr := e.loadFile(abs)
+	if loadErr != nil {
+		e.Message("Cannot open %s: %v", abs, loadErr)
+		return true
+	}
+	e.activeWin.SetBuf(b)
+	pos := b.LineStart(lineNum)
 	b.SetPoint(pos)
 	return true
 }
