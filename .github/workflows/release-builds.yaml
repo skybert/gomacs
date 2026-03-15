@@ -1,0 +1,36 @@
+name: Build gomacs release binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - os: macos
+            runner: macos-latest
+          - os: linux
+            runner: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Build gomacs dist
+        run: make dist
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*

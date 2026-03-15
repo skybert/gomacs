@@ -1,6 +1,7 @@
 .claude
+build
 coverage.out
 debug.log
+dist
 gomacs
 specs
-build
