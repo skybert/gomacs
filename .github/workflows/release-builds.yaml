@@ -11,10 +11,21 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos
+          - os: darwin
             runner: macos-latest
+            arch: amd64
+          - os: darwin
+            runner: macos-latest
+            arch: arm64
           - os: linux
             runner: ubuntu-latest
+            arch: amd64
+          - os: linux
+            runner: ubuntu-latest
+            arch: arm64
+          - os: openbsd
+            runner: ubuntu-latest
+            arch: amd64
 
     steps:
       - uses: actions/checkout@v5
