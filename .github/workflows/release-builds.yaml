@@ -1,4 +1,4 @@
-name: build-gomacs-binaries
+name: gomacs-build-binaries
 
 on:
   push:
@@ -35,18 +35,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: setup-go
+      - name: gomacs-setup-go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24.x'
 
-      - name: build-gomacs-dist
+      - name: gomacs-build-dist
         run: make dist
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
 
-      - name: upload-to-release
+      - name: gomacs-create-release-and-upload-binaries
         uses: softprops/action-gh-release@v1
         with:
           files: dist/*
