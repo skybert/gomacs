@@ -1051,7 +1051,7 @@ func (e *Editor) cmdVcDiff() {
 		e.Message("vc-diff: no uncommitted changes")
 		return
 	}
-	e.vcShowOutput("*VC Diff*", text, "diff")
+	e.vcShowOutput("*vc diff*", text, "diff")
 	e.vcLogRoots[e.ActiveBuffer()] = root
 }
 
@@ -1067,7 +1067,7 @@ func (e *Editor) cmdVcStatus() {
 	if err != nil && text == "" {
 		text = err.Error()
 	}
-	e.vcShowOutput("*VC Status*", text, "vc-status")
+	e.vcShowOutput("*vc status*", text, "vc-status")
 	e.vcLogRoots[e.ActiveBuffer()] = root
 }
 
@@ -1090,7 +1090,7 @@ func (e *Editor) cmdVcGrep() {
 		if text == "" {
 			text = "No matches found."
 		}
-		e.vcShowOutput("*VC Grep*", text, "vc-grep")
+		e.vcShowOutput("*vc grep*", text, "vc-grep")
 		e.vcLogRoots[e.ActiveBuffer()] = root
 	})
 }
@@ -1321,7 +1321,7 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 	return true
 }
 
-// vcGrepDispatch handles keys in a *VC Grep* buffer.
+// vcGrepDispatch handles keys in a *vc grep* buffer.
 // q quits; Enter navigates to file:line.
 func (e *Editor) vcGrepDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {

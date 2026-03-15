@@ -62,3 +62,8 @@ be better off using the real thing.
 Cheers,
 
 -Torstein
+
+# Known issues
+
+- `downcase-word` is very slow
+- `execute-extended-command` doesn't have `C-n` and `C-p`

@@ -999,21 +999,21 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		}
 	}
 
-	// When in a diff-mode buffer (*VC Diff*, *VC Show*), handle q/n/p/Enter.
+	// When in a diff-mode buffer (*vc diff*, *vc show*), handle q/n/p/Enter.
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "diff" {
 		if e.vcDiffDispatch(ke) {
 			return
 		}
 	}
 
-	// When in a *VC Status* buffer, handle q and Enter.
+	// When in a *vc status* buffer, handle q and Enter.
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-status" {
 		if e.vcStatusDispatch(ke) {
 			return
 		}
 	}
 
-	// When in a *VC Grep* buffer, handle q and Enter.
+	// When in a *vc grep* buffer, handle q and Enter.
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-grep" {
 		if e.vcGrepDispatch(ke) {
 			return
