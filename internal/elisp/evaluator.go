@@ -59,7 +59,8 @@ func (e *Env) SetGlobal(name string, val Value) {
 type Evaluator struct {
 	global      *Env
 	goFns       map[string]func(args []Value, env *Env) (Value, error)
-	keyBindings map[string]string // key description → command name
+	keyBindings map[string]string      // key description → command name
+	setqHooks   map[string]func(Value) // variable name → hook called on setq
 }
 
 // NewEvaluator creates an Evaluator with all built-ins registered.
@@ -68,9 +69,17 @@ func NewEvaluator() *Evaluator {
 		global:      NewEnv(),
 		goFns:       make(map[string]func(args []Value, env *Env) (Value, error)),
 		keyBindings: make(map[string]string),
+		setqHooks:   make(map[string]func(Value)),
 	}
 	ev.registerBuiltins()
 	return ev
+}
+
+// SetSetqHook registers a Go callback that is invoked immediately after
+// the named variable is assigned via setq. This lets Go code react
+// to Elisp variable changes at the time they happen (e.g. theme loading).
+func (ev *Evaluator) SetSetqHook(name string, fn func(Value)) {
+	ev.setqHooks[name] = fn
 }
 
 // RegisterGoFn registers a Go function callable from Elisp.
@@ -169,6 +178,10 @@ func (ev *Evaluator) Eval(v Value, env *Env) (Value, error) {
 }
 
 func (ev *Evaluator) evalSymbol(s Symbol, env *Env) (Value, error) {
+	// Keyword symbols (:foreground, :bold, …) are self-quoting in Emacs Lisp.
+	if strings.HasPrefix(s.Name, ":") {
+		return s, nil
+	}
 	v, ok := env.Get(s.Name)
 	if !ok {
 		// Check registered go functions
@@ -334,6 +347,9 @@ func (ev *Evaluator) evalSetq(args Value, env *Env) (Value, error) {
 			return nil, err
 		}
 		env.SetGlobal(sym.Name, val)
+		if hook, ok := ev.setqHooks[sym.Name]; ok {
+			hook(val)
+		}
 		result = val
 	}
 	return result, nil

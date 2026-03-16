@@ -251,6 +251,119 @@ func New(opts Options) (*Editor, error) {
 		return elisp.Nil{}, nil
 	})
 
+	// (setq theme 'sweet) is an alternative to (load-theme 'sweet).
+	// The hook fires immediately when the variable is assigned.
+	e.lisp.SetSetqHook("theme", func(v elisp.Value) {
+		name := strings.Trim(v.String(), `'"`)
+		syntax.LoadTheme(name) // silently ignore unknown themes
+	})
+
+	// set-face-attribute lets users tweak individual face colours from ~/.gomacs.
+	// Usage: (set-face-attribute 'keyword :foreground "#e17df3" :bold t)
+	// Emacs-style frame argument (nil) is accepted and ignored.
+	e.lisp.RegisterGoFn("set-face-attribute", func(args []elisp.Value, _ *elisp.Env) (elisp.Value, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("set-face-attribute: expected face name")
+		}
+		faceName := strings.Trim(args[0].String(), `'"`)
+		facePtr, ok := syntax.GetFacePtr(faceName)
+		if !ok {
+			return nil, fmt.Errorf("set-face-attribute: unknown face %q", faceName)
+		}
+		i := 1
+		// Skip optional nil frame argument (Emacs compatibility).
+		if i < len(args) && elisp.IsNil(args[i]) {
+			i++
+		}
+		for i+1 < len(args) {
+			kw := args[i].String()
+			val := args[i+1]
+			i += 2
+			switch kw {
+			case ":foreground":
+				facePtr.Fg = strings.Trim(val.String(), `'"`)
+			case ":background":
+				facePtr.Bg = strings.Trim(val.String(), `'"`)
+			case ":bold":
+				facePtr.Bold = !elisp.IsNil(val)
+			case ":italic":
+				facePtr.Italic = !elisp.IsNil(val)
+			case ":underline":
+				facePtr.Underline = !elisp.IsNil(val)
+			case ":reverse":
+				facePtr.Reverse = !elisp.IsNil(val)
+			default:
+				return nil, fmt.Errorf("set-face-attribute: unknown attribute %q", kw)
+			}
+		}
+		return elisp.Nil{}, nil
+	})
+
+	// define-gomacs-theme registers a named theme built from face specs.
+	// Usage:
+	//   (define-gomacs-theme "my-theme"
+	//     '((keyword :foreground "#e17df3" :bold t)
+	//       (string  :foreground "#06c993")))
+	//   (setq theme "my-theme")   ; or (load-theme "my-theme")
+	e.lisp.RegisterGoFn("define-gomacs-theme", func(args []elisp.Value, _ *elisp.Env) (elisp.Value, error) {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("define-gomacs-theme: expected name and face-spec list")
+		}
+		name := strings.Trim(args[0].String(), `'"`)
+		faceSpecs, ok := elisp.ToSlice(args[1])
+		if !ok {
+			return nil, fmt.Errorf("define-gomacs-theme: second argument must be a list")
+		}
+
+		type faceOverride struct {
+			name string
+			face syntax.Face
+		}
+		overrides := make([]faceOverride, 0, len(faceSpecs))
+
+		for _, spec := range faceSpecs {
+			fields, ok2 := elisp.ToSlice(spec)
+			if !ok2 || len(fields) < 1 {
+				return nil, fmt.Errorf("define-gomacs-theme: invalid face spec %s", spec.String())
+			}
+			faceName := strings.Trim(fields[0].String(), `'"`)
+			facePtr, ok2 := syntax.GetFacePtr(faceName)
+			if !ok2 {
+				return nil, fmt.Errorf("define-gomacs-theme: unknown face %q", faceName)
+			}
+			// Start from the current face value so unset attrs keep their value.
+			f := *facePtr
+			for j := 1; j+1 < len(fields); j += 2 {
+				kw := fields[j].String()
+				val := fields[j+1]
+				switch kw {
+				case ":foreground":
+					f.Fg = strings.Trim(val.String(), `'"`)
+				case ":background":
+					f.Bg = strings.Trim(val.String(), `'"`)
+				case ":bold":
+					f.Bold = !elisp.IsNil(val)
+				case ":italic":
+					f.Italic = !elisp.IsNil(val)
+				case ":underline":
+					f.Underline = !elisp.IsNil(val)
+				case ":reverse":
+					f.Reverse = !elisp.IsNil(val)
+				default:
+					return nil, fmt.Errorf("define-gomacs-theme: unknown attribute %q in face %q", kw, faceName)
+				}
+			}
+			overrides = append(overrides, faceOverride{name: faceName, face: f})
+		}
+
+		syntax.RegisterTheme(name, func() {
+			for _, o := range overrides {
+				syntax.SetFaceByName(o.name, o.face)
+			}
+		})
+		return elisp.Nil{}, nil
+	})
+
 	// Create the *scratch* buffer with Emacs Lisp mode.
 	scratch := buffer.NewWithContent("*scratch*",
 		";; This buffer is for text that is not saved, and for Lisp evaluation.\n")

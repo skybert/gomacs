@@ -229,8 +229,45 @@ Custom key bindings can be set in the init file using
 .SS Themes
 .PP
 .nf
-\fB(load\-theme 'sweet)\fR     ; default warm theme
-\fB(load\-theme 'default)\fR   ; plain terminal colours
+\fB(setq theme 'sweet)\fR       ; select the Sweet theme (default)
+\fB(setq theme 'default)\fR     ; plain terminal colours
+\fB(load-theme 'sweet)\fR       ; alternative: load theme immediately
+.fi
+.PP
+Individual face colours can be overridden from
+.B ~/.gomacs
+using
+.BR set-face-attribute :
+.PP
+.nf
+\fB(set-face-attribute 'keyword   :foreground "#e17df3" :bold t)\fR
+\fB(set-face-attribute 'string    :foreground "#06c993")\fR
+\fB(set-face-attribute 'comment   :foreground "#808693" :italic t)\fR
+\fB(set-face-attribute 'modeline  :foreground "#b8c0d4" :background "#292235")\fR
+.fi
+.PP
+Recognised face names:
+.BR default ", " keyword ", " string ", " comment ", " type ", " function ,
+.BR number ", " operator ", " header1 ", " header2 ", " header3 ,
+.BR bold ", " italic ", " code ", " link ", " blockquote ,
+.BR modeline ", " minibuffer ", " region ", " isearch ", " candidate ", " selected .
+.PP
+Recognised attributes:
+.BR :foreground ", " :background ", " :bold ", " :italic ", " :underline ", " :reverse .
+.PP
+Custom themes are registered with
+.B define-gomacs-theme
+and can be loaded with
+.B setq
+or
+.BR load-theme :
+.PP
+.nf
+\fB(define-gomacs-theme "my-theme"\fR
+\fB  '((keyword  :foreground "#ff0000" :bold t)\fR
+\fB    (string   :foreground "#00ff00")\fR
+\fB    (default  :foreground "#eeeeee" :background "#1a1a2e")))\fR
+\fB(setq theme "my-theme")\fR
 .fi
 .SH FILES
 .TP

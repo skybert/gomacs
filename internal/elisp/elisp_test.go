@@ -628,3 +628,75 @@ func TestEval_Defvar(t *testing.T) {
 		t.Fatalf("defvar should not overwrite: expected 100, got %v", val)
 	}
 }
+
+func TestEval_KeywordSymbolSelfQuoting(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString(":foreground")
+	if err != nil {
+		t.Fatalf("keyword symbol error: %v", err)
+	}
+	sym, ok := val.(Symbol)
+	if !ok {
+		t.Fatalf("expected Symbol, got %T", val)
+	}
+	if sym.Name != ":foreground" {
+		t.Errorf("Name = %q, want %q", sym.Name, ":foreground")
+	}
+}
+
+func TestEval_KeywordSymbolInList(t *testing.T) {
+	ev := newEval()
+	// Simulate what set-face-attribute receives: (:foreground "#abc")
+	var captured []Value
+	ev.RegisterGoFn("my-fn", func(args []Value, _ *Env) (Value, error) {
+		captured = args
+		return Nil{}, nil
+	})
+	_, err := ev.EvalString(`(my-fn :foreground "#abc" :bold t)`)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(captured) != 4 {
+		t.Fatalf("expected 4 args, got %d", len(captured))
+	}
+	kw, ok := captured[0].(Symbol)
+	if !ok || kw.Name != ":foreground" {
+		t.Errorf("arg[0] = %v, want :foreground", captured[0])
+	}
+	s, ok := captured[1].(StringVal)
+	if !ok || s.V != "#abc" {
+		t.Errorf("arg[1] = %v, want \"#abc\"", captured[1])
+	}
+}
+
+func TestEval_SetqHook(t *testing.T) {
+	ev := newEval()
+	var hooked Value
+	ev.SetSetqHook("theme", func(v Value) { hooked = v })
+
+	_, err := ev.EvalString("(setq theme 'sweet)")
+	if err != nil {
+		t.Fatalf("setq error: %v", err)
+	}
+	if hooked == nil {
+		t.Fatal("hook was not called")
+	}
+	sym, ok := hooked.(Symbol)
+	if !ok || sym.Name != "sweet" {
+		t.Errorf("hooked value = %v (%T), want Symbol{sweet}", hooked, hooked)
+	}
+}
+
+func TestEval_SetqHookNotCalledForOtherVars(t *testing.T) {
+	ev := newEval()
+	called := false
+	ev.SetSetqHook("theme", func(_ Value) { called = true })
+
+	_, err := ev.EvalString("(setq other-var 42)")
+	if err != nil {
+		t.Fatalf("setq error: %v", err)
+	}
+	if called {
+		t.Error("hook called for unrelated variable")
+	}
+}
