@@ -88,6 +88,16 @@ Example `~/.gomacs`:
 Set `(setq isearch-case-insensitive nil)` in `~/.gomacs` to restore case-sensitive search.
 `applyElispConfig()` reads this variable after loading the init file.
 
+## Configuration
+
+All configuration variables are documented in the man page in
+`doc/gomacs.1.in`. The configuration keys are on the form
+`<mode>-<var>`, so for `go-mode`, the indent setting is set using:
+
+```lisp
+(setq go-indent 2)
+```
+
 ### Lint notes
 
 The project uses a strict `.golangci.yml`. Common suppressions you may need:
