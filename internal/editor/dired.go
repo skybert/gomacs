@@ -22,7 +22,7 @@ type diredState struct {
 // cmdDired opens or refreshes a Dired buffer for a directory (C-x d).
 func (e *Editor) cmdDired() {
 	e.clearArg()
-	defaultDir := bufferDir(e.ActiveBuffer())
+	defaultDir := e.bufferDir(e.ActiveBuffer())
 	e.ReadMinibuffer("Dired (directory): ", func(path string) {
 		path = strings.TrimSpace(path)
 		if path == "" {

@@ -108,6 +108,8 @@ func init() {
 		"Insert a newline and leave point before it.")
 	registerCommand("undo", (*Editor).cmdUndo,
 		"Undo some previous changes. Repeat to undo more.")
+	registerCommand("redo", (*Editor).cmdRedo,
+		"Redo the most recently undone change.")
 
 	// ---- marks / search / misc ---------------------------------------------
 	registerCommand("set-mark-command", (*Editor).cmdSetMarkCommand,
@@ -192,6 +194,8 @@ func init() {
 		"Interchange words around point, moving forward.")
 	registerCommand("delete-blank-lines", (*Editor).cmdDeleteBlankLines,
 		"Delete blank lines around point.")
+	registerCommand("delete-trailing-whitespace", (*Editor).cmdDeleteTrailingWhitespace,
+		"Delete trailing whitespace in the buffer or the active region.")
 	registerCommand("join-line", (*Editor).cmdJoinLine,
 		"Join this line to the previous one.")
 	registerCommand("back-to-indentation", (*Editor).cmdBackToIndentation,
@@ -228,6 +232,8 @@ func init() {
 		"Show VCS status for the current repository (C-x v s).")
 	registerCommand("vc-grep", (*Editor).cmdVcGrep,
 		"Run VCS grep and navigate results (C-x v g).")
+	registerCommand("vc-next-action", (*Editor).cmdVcNextAction,
+		"Stage the file or open a commit buffer if changes are already staged (C-x v v).")
 
 	// ---- narrowing ---------------------------------------------------------
 	registerCommand("narrow-to-region", (*Editor).cmdNarrowToRegion,
@@ -822,6 +828,17 @@ func (e *Editor) cmdUndo() {
 	}
 }
 
+func (e *Editor) cmdRedo() {
+	if e.bufReadOnly() {
+		return
+	}
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	if !buf.ApplyRedo() {
+		e.Message("No further redo information")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Marks, search, misc
 // ---------------------------------------------------------------------------
@@ -969,7 +986,7 @@ func (e *Editor) cmdExchangePointAndMark() {
 
 func (e *Editor) cmdFindFile() {
 	// Pre-populate with the directory of the current buffer (or cwd).
-	defaultDir := bufferDir(e.ActiveBuffer())
+	defaultDir := e.bufferDir(e.ActiveBuffer())
 
 	e.ReadMinibuffer("Find file: ", func(path string) {
 		path = strings.TrimSpace(path)
@@ -1022,6 +1039,9 @@ func (e *Editor) cmdSaveBuffer() {
 }
 
 func (e *Editor) writeBuffer(buf *buffer.Buffer) {
+	if e.saveBufferDeleteTrailingWS {
+		e.deleteTrailingWhitespace(buf, 0, buf.Len())
+	}
 	err := os.WriteFile(buf.Filename(), []byte(buf.String()), 0600)
 	if err != nil {
 		e.Message("Write error: %v", err)
@@ -1085,12 +1105,20 @@ func (e *Editor) promptSaveNext(unsaved []*buffer.Buffer, idx int) {
 }
 
 func (e *Editor) cmdSwitchToBuffer() {
-	// Build a default suggestion: the most recently used other buffer.
+	// Build a default suggestion: the most recently visited other buffer.
 	defaultName := ""
-	for _, b := range e.buffers {
+	for _, b := range e.bufferMRU {
 		if b != e.ActiveBuffer() {
 			defaultName = b.Name()
 			break
+		}
+	}
+	if defaultName == "" {
+		for _, b := range e.buffers {
+			if b != e.ActiveBuffer() {
+				defaultName = b.Name()
+				break
+			}
 		}
 	}
 	prompt := fmt.Sprintf("Switch to buffer (default %s): ", defaultName)
@@ -1105,13 +1133,23 @@ func (e *Editor) cmdSwitchToBuffer() {
 		e.SwitchToBuffer(name)
 	})
 	e.SetMinibufCompletions(func(prefix string) []string {
-		var names []string
-		for _, b := range e.buffers {
+		// Show MRU buffers first, then remaining buffers alphabetically.
+		inMRU := make(map[string]bool, len(e.bufferMRU))
+		var mruMatches []string
+		for _, b := range e.bufferMRU {
 			if fuzzyMatch(b.Name(), prefix) {
-				names = append(names, b.Name())
+				mruMatches = append(mruMatches, b.Name())
+				inMRU[b.Name()] = true
 			}
 		}
-		return names
+		var rest []string
+		for _, b := range e.buffers {
+			if !inMRU[b.Name()] && fuzzyMatch(b.Name(), prefix) {
+				rest = append(rest, b.Name())
+			}
+		}
+		sort.Strings(rest)
+		return append(mruMatches, rest...)
 	})
 }
 
@@ -1385,9 +1423,7 @@ func (e *Editor) cmdUpcaseWord() {
 			pt++
 		}
 		if pt > start {
-			word := strings.ToUpper(buf.Substring(start, pt))
-			buf.Delete(start, pt-start)
-			buf.InsertString(start, word)
+			buf.ReplaceString(start, pt-start, strings.ToUpper(buf.Substring(start, pt)))
 		}
 	}
 	buf.SetPoint(pt)
@@ -1408,9 +1444,7 @@ func (e *Editor) cmdDowncaseWord() {
 			pt++
 		}
 		if pt > start {
-			word := strings.ToLower(buf.Substring(start, pt))
-			buf.Delete(start, pt-start)
-			buf.InsertString(start, word)
+			buf.ReplaceString(start, pt-start, strings.ToLower(buf.Substring(start, pt)))
 		}
 	}
 	buf.SetPoint(pt)
@@ -1437,8 +1471,7 @@ func (e *Editor) cmdCapitalizeWord() {
 			for j := 1; j < len(runes); j++ {
 				runes[j] = unicode.ToLower(runes[j])
 			}
-			buf.Delete(start, pt-start)
-			buf.InsertString(start, string(runes))
+			buf.ReplaceString(start, pt-start, string(runes))
 		}
 	}
 	buf.SetPoint(pt)
@@ -1529,7 +1562,13 @@ func lastSexp(text string) string {
 
 // bufferDir returns the directory of buf's associated file, or the process
 // working directory if the buffer has no file.  Always ends with "/".
-func bufferDir(buf *buffer.Buffer) string {
+// For dired buffers, returns the dired directory.
+func (e *Editor) bufferDir(buf *buffer.Buffer) string {
+	if buf.Mode() == "dired" {
+		if ds := e.diredStates[buf]; ds != nil && ds.dir != "" {
+			return ds.dir + "/"
+		}
+	}
 	if f := buf.Filename(); f != "" {
 		dir := filepath.Dir(f)
 		if dir != "" && dir != "." {

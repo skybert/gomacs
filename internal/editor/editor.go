@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -135,6 +136,9 @@ type Editor struct {
 	// vcLogRoots maps *VC Log* buffers to their git repository root dir.
 	vcLogRoots map[*buffer.Buffer]string
 
+	// vcCommitRoots maps *VC Commit* buffers to their git repository root dir.
+	vcCommitRoots map[*buffer.Buffer]string
+
 	// bufferMRU tracks the most recently displayed buffers (most recent first).
 	// Updated by showBuf; used by vcQuit to return to the right buffer.
 	bufferMRU []*buffer.Buffer
@@ -157,6 +161,10 @@ type Editor struct {
 
 	// isSearchCaseFold enables case-insensitive isearch (default true).
 	isSearchCaseFold bool
+
+	// saveBufferDeleteTrailingWS enables deleting trailing whitespace on save (default true).
+	// Set to false via (setq save-buffer-delete-trailing-whitespace nil).
+	saveBufferDeleteTrailingWS bool
 
 	// passive LSP hover state (eldoc-style)
 	lastHoverFile  string
@@ -212,17 +220,19 @@ func New(opts Options) (*Editor, error) {
 
 	_, nopCancel := context.WithCancel(context.Background())
 	e := &Editor{
-		term:             term,
-		universalArg:     1,
-		lisp:             elisp.NewEvaluator(),
-		registers:        make(map[rune]register),
-		diredStates:      make(map[*buffer.Buffer]*diredState),
-		vcLogRoots:       make(map[*buffer.Buffer]string),
-		fillColumn:       70,
-		isSearchCaseFold: true,
-		lspConns:         make(map[string]*lspConn),
-		lspOpCancel:      nopCancel,
-		lspCbs:           make(chan func(), 16),
+		term:                       term,
+		universalArg:               1,
+		lisp:                       elisp.NewEvaluator(),
+		registers:                  make(map[rune]register),
+		diredStates:                make(map[*buffer.Buffer]*diredState),
+		vcLogRoots:                 make(map[*buffer.Buffer]string),
+		vcCommitRoots:              make(map[*buffer.Buffer]string),
+		fillColumn:                 70,
+		isSearchCaseFold:           true,
+		saveBufferDeleteTrailingWS: true,
+		lspConns:                   make(map[string]*lspConn),
+		lspOpCancel:                nopCancel,
+		lspCbs:                     make(chan func(), 16),
 	}
 
 	// Apply the default colour theme.
@@ -448,6 +458,7 @@ func (e *Editor) setupKeymaps() {
 	cxv.Bind(keymap.PlainKey('='), "vc-diff")
 	cxv.Bind(keymap.PlainKey('s'), "vc-status")
 	cxv.Bind(keymap.PlainKey('g'), "vc-grep")
+	cxv.Bind(keymap.PlainKey('v'), "vc-next-action")
 }
 
 // loadInitFile tries ~/.gomacs and ~/.config/gomacs/init.el in that order.
@@ -489,6 +500,14 @@ func (e *Editor) applyElispConfig() {
 	if v, ok := e.lisp.GetGlobalVar("lsp-completion-min-chars"); ok {
 		if i, ok := v.(elisp.Int); ok && i.V > 0 {
 			e.lspCompletionMinChars = int(i.V)
+		}
+	}
+	if v, ok := e.lisp.GetGlobalVar("save-buffer-delete-trailing-whitespace"); ok {
+		switch val := v.(type) {
+		case elisp.Bool:
+			e.saveBufferDeleteTrailingWS = val.V
+		case elisp.Nil:
+			e.saveBufferDeleteTrailingWS = false
 		}
 	}
 }
@@ -1020,6 +1039,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		}
 	}
 
+	// When in a *VC Commit* buffer, C-c C-c submits and C-c C-k aborts.
+	if e.ActiveBuffer().Mode() == "vc-commit" {
+		if e.vcCommitDispatch(ke) {
+			return
+		}
+	}
+
 	binding, found := activeMap.Lookup(mk)
 	if !found {
 		// Unrecognised key in a prefix sequence: cancel prefix, beep.
@@ -1086,6 +1112,28 @@ func (e *Editor) handleDescribeKey(ke terminal.KeyEvent) {
 	e.showCommandHelp(name, binding.Command)
 }
 
+// keysForCommand returns all key sequences (as human-readable strings) that
+// are bound to cmdName in the global keymap tree.
+func (e *Editor) keysForCommand(cmdName string) []string {
+	var results []string
+	var walk func(km *keymap.Keymap, prefix string)
+	walk = func(km *keymap.Keymap, prefix string) {
+		for key, binding := range km.Bindings() {
+			keyStr := keymap.FormatKey(key)
+			seq := prefix + keyStr
+			switch {
+			case binding.Command == cmdName:
+				results = append(results, seq)
+			case binding.Prefix != nil:
+				walk(binding.Prefix, seq+" ")
+			}
+		}
+	}
+	walk(e.globalKeymap, "")
+	sort.Strings(results)
+	return results
+}
+
 // showCommandHelp displays help for command in the *Help* buffer and
 // switches the active window to it.  keySeq is the key sequence that invokes
 // it (empty when called from describe-function).
@@ -1095,6 +1143,10 @@ func (e *Editor) showCommandHelp(keySeq, cmdName string) {
 		sb.WriteString(keySeq + " runs the command " + cmdName + "\n\n")
 	} else {
 		sb.WriteString(cmdName + "\n\n")
+		// Look up all key bindings for this command.
+		if keys := e.keysForCommand(cmdName); len(keys) > 0 {
+			sb.WriteString("Bound to: " + strings.Join(keys, ", ") + "\n\n")
+		}
 	}
 	doc, ok := commandDocs[cmdName]
 	if ok {
@@ -1187,6 +1239,10 @@ func (e *Editor) dispatchMinibufKey(ke terminal.KeyEvent) {
 	case tcell.KeyDown:
 		e.minibufSelectNext()
 	case tcell.KeyUp:
+		e.minibufSelectPrev()
+	case tcell.KeyCtrlN:
+		e.minibufSelectNext()
+	case tcell.KeyCtrlP:
 		e.minibufSelectPrev()
 	case tcell.KeyLeft:
 		if pt > 0 {

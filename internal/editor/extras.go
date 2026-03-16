@@ -250,6 +250,55 @@ func (e *Editor) cmdDeleteBlankLines() {
 	}
 }
 
+// deleteTrailingWhitespace removes trailing whitespace from every line in
+// [regionStart, regionEnd).  It works backward through the buffer so that
+// deletions do not shift the positions of lines yet to be processed.
+func (e *Editor) deleteTrailingWhitespace(buf *buffer.Buffer, regionStart, regionEnd int) {
+	// Collect (eol, trailingCount) pairs working backward.
+	type span struct{ end, count int }
+	var spans []span
+	pos := regionStart
+	for pos < regionEnd {
+		eol := buf.EndOfLine(pos)
+		// Count trailing horizontal whitespace (space / tab) before eol.
+		count := 0
+		for eol-count-1 >= pos {
+			r := buf.RuneAt(eol - count - 1)
+			if r != ' ' && r != '\t' {
+				break
+			}
+			count++
+		}
+		if count > 0 {
+			spans = append(spans, span{eol, count})
+		}
+		pos = eol + 1 // advance past newline
+	}
+	// Delete from the end so positions remain valid.
+	for i := len(spans) - 1; i >= 0; i-- {
+		buf.Delete(spans[i].end-spans[i].count, spans[i].count)
+	}
+}
+
+// cmdDeleteTrailingWhitespace removes trailing whitespace from the buffer or
+// the active region (M-x delete-trailing-whitespace).
+func (e *Editor) cmdDeleteTrailingWhitespace() {
+	if e.bufReadOnly() {
+		return
+	}
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	start, end := 0, buf.Len()
+	if buf.MarkActive() && buf.Mark() >= 0 {
+		start = buf.Mark()
+		end = buf.Point()
+		if start > end {
+			start, end = end, start
+		}
+	}
+	e.deleteTrailingWhitespace(buf, start, end)
+}
+
 // cmdJoinLine merges the current line with the previous one (M-^).
 func (e *Editor) cmdJoinLine() {
 	if e.bufReadOnly() {
@@ -993,7 +1042,7 @@ func (e *Editor) vcShowOutput(name, text, mode string) {
 // falling back to *scratch*.
 func (e *Editor) vcQuit(skipMode string) {
 	vcModes := map[string]bool{
-		"vc-log": true, "vc-status": true, "vc-grep": true, "diff": true,
+		"vc-log": true, "vc-status": true, "vc-grep": true, "diff": true, "vc-commit": true,
 	}
 	for _, b := range e.bufferMRU {
 		if !vcModes[b.Mode()] {
@@ -1093,6 +1142,192 @@ func (e *Editor) cmdVcGrep() {
 		e.vcShowOutput("*vc grep*", text, "vc-grep")
 		e.vcLogRoots[e.ActiveBuffer()] = root
 	})
+}
+
+// ---------------------------------------------------------------------------
+// VC next-action (C-x v v)
+// ---------------------------------------------------------------------------
+
+// cmdVcNextAction is the primary VC command.  It advances the file through
+// the version control state machine:
+//   - Untracked → git add (stage the file)
+//   - Modified but not staged → git add (stage the file)
+//   - Staged → open a *VC Commit* buffer for the commit message
+//   - Nothing to do → inform the user
+func (e *Editor) cmdVcNextAction() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	filePath := buf.Filename()
+
+	be, root := vcFind(vcDir(buf))
+	if be == nil {
+		e.Message("vc-next-action: not in a version control repository")
+		return
+	}
+
+	// git status --porcelain <file> produces one line:
+	//   XY filename
+	// where X = index status, Y = working tree status.
+	// For untracked files the line is "?? filename".
+	var args []string
+	if filePath != "" {
+		args = []string{"-C", root, "status", "--porcelain", filePath}
+	} else {
+		args = []string{"-C", root, "status", "--porcelain"}
+	}
+	out, err := exec.CommandContext(context.Background(), "git", args...).Output() //nolint:gosec
+	if err != nil {
+		e.Message("vc-next-action: git status failed: %v", err)
+		return
+	}
+	status := strings.TrimSpace(string(out))
+
+	if status == "" {
+		e.Message("vc-next-action: nothing to commit for %s", filepath.Base(filePath))
+		return
+	}
+
+	// Interpret the XY status code.
+	xy := ""
+	if len(status) >= 2 {
+		xy = status[:2]
+	}
+	x := ""
+	if len(xy) >= 1 {
+		x = string(xy[0])
+	}
+
+	switch {
+	case xy == "??":
+		// Untracked file: stage it.
+		e.vcGitAdd(root, filePath)
+	case x == " " || x == "!":
+		// Modified in working tree but not staged: stage it.
+		e.vcGitAdd(root, filePath)
+	default:
+		// Something is staged: open commit buffer.
+		e.vcOpenCommitBuffer(root, filePath)
+	}
+}
+
+// vcGitAdd runs git add on filePath and reports the result.
+func (e *Editor) vcGitAdd(root, filePath string) {
+	var args []string
+	if filePath != "" {
+		args = []string{"-C", root, "add", filePath}
+	} else {
+		args = []string{"-C", root, "add", "."}
+	}
+	if out, err := exec.CommandContext(context.Background(), "git", args...).CombinedOutput(); err != nil { //nolint:gosec
+		e.Message("git add failed: %s", strings.TrimSpace(string(out)))
+		return
+	}
+	if filePath != "" {
+		e.Message("Staged %s", filepath.Base(filePath))
+	} else {
+		e.Message("Staged all changes")
+	}
+}
+
+// vcOpenCommitBuffer opens (or reuses) a *VC Commit* buffer pre-populated
+// with a comment block showing staged changes.  The user types the commit
+// message above the comments, then presses C-c C-c to submit or C-c C-k to
+// abort.
+func (e *Editor) vcOpenCommitBuffer(root, filePath string) {
+	// Build the comment section from `git diff --cached --stat`.
+	var statArgs []string
+	if filePath != "" {
+		statArgs = []string{"-C", root, "diff", "--cached", "--stat", "--", filePath}
+	} else {
+		statArgs = []string{"-C", root, "diff", "--cached", "--stat"}
+	}
+	stat, _ := exec.CommandContext(context.Background(), "git", statArgs...).Output() //nolint:gosec
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString("# Changes to be committed:\n")
+	for _, line := range strings.Split(strings.TrimRight(string(stat), "\n"), "\n") {
+		if line != "" {
+			sb.WriteString("# " + line + "\n")
+		}
+	}
+	sb.WriteString("#\n")
+	sb.WriteString("# C-c C-c  commit    C-c C-k  abort\n")
+
+	b := e.FindBuffer("*VC Commit*")
+	if b == nil {
+		b = buffer.NewWithContent("*VC Commit*", sb.String())
+		e.buffers = append(e.buffers, b)
+	} else {
+		b.SetReadOnly(false)
+		b.Delete(0, b.Len())
+		b.InsertString(0, sb.String())
+	}
+	b.SetMode("vc-commit")
+	b.SetReadOnly(false)
+	b.SetPoint(0) // place cursor at the very top so the user types there
+	e.vcCommitRoots[b] = root
+	e.activeWin.SetBuf(b)
+}
+
+// vcCommitDispatch intercepts C-c C-c (submit) and C-c C-k (abort) when the
+// active buffer is a *VC Commit* buffer.  It must be checked both when the
+// prefix is active (second key of C-c C-x) and when it is not.
+func (e *Editor) vcCommitDispatch(ke terminal.KeyEvent) bool {
+	if e.prefixKeymap != e.ctrlCKeymap {
+		return false
+	}
+	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyCtrlC {
+		return false
+	}
+	if ke.Key == tcell.KeyCtrlC {
+		e.vcCommitSubmit()
+		e.prefixKeymap = nil
+		return true
+	}
+	if ke.Key == tcell.KeyRune && ke.Rune == 'k' {
+		e.vcCommitAbort()
+		e.prefixKeymap = nil
+		return true
+	}
+	return false
+}
+
+// vcCommitSubmit reads the commit message from the *VC Commit* buffer (lines
+// not starting with '#') and runs git commit.
+func (e *Editor) vcCommitSubmit() {
+	buf := e.ActiveBuffer()
+	root := e.vcCommitRoots[buf]
+	if root == "" {
+		e.Message("vc-commit: no repository root found")
+		return
+	}
+	// Collect non-comment lines as the commit message.
+	full := buf.String()
+	var msgLines []string
+	for _, line := range strings.Split(full, "\n") {
+		if !strings.HasPrefix(line, "#") {
+			msgLines = append(msgLines, line)
+		}
+	}
+	msg := strings.TrimSpace(strings.Join(msgLines, "\n"))
+	if msg == "" {
+		e.Message("Aborting commit: empty commit message")
+		return
+	}
+	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "commit", "-m", msg).CombinedOutput() //nolint:gosec
+	if err != nil {
+		e.Message("git commit failed: %s", strings.TrimSpace(string(out)))
+		return
+	}
+	e.Message("Committed: %s", strings.TrimSpace(string(out)))
+	e.vcQuit("vc-commit")
+}
+
+// vcCommitAbort kills the *VC Commit* buffer and returns to the previous buffer.
+func (e *Editor) vcCommitAbort() {
+	e.Message("Commit aborted")
+	e.vcQuit("vc-commit")
 }
 
 // ---------------------------------------------------------------------------

@@ -104,7 +104,7 @@ func (b *Buffer) SetReadOnly(v bool) { b.readOnly = v }
 // SetMode sets the buffer's major mode.
 func (b *Buffer) SetMode(mode string) {
 	switch mode {
-	case "go", "markdown", "elisp", "python", "java", "bash", "json", "makefile", "diff", "dired", "vc-log", "vc-status", "vc-grep", "buffer-list", modeFundamental:
+	case "go", "markdown", "elisp", "python", "java", "bash", "json", "makefile", "diff", "dired", "vc-log", "vc-status", "vc-grep", "vc-commit", "buffer-list", modeFundamental:
 		b.mode = mode
 	default:
 		b.mode = modeFundamental
@@ -199,6 +199,29 @@ func (b *Buffer) InsertString(pos int, s string) {
 	runes := []rune(s)
 	b.insertRunes(pos, runes)
 	b.undo.Push(UndoRecord{Pos: pos, Inserted: s})
+	b.modified = true
+	b.modCount++
+	b.changeGen++
+}
+
+// ReplaceString replaces count runes at pos with s.  It performs both the
+// deletion and insertion with a single gap movement (faster than Delete +
+// InsertString) and records them as one combined undo record.
+func (b *Buffer) ReplaceString(pos, count int, s string) {
+	length := b.Len()
+	if pos < 0 {
+		pos = 0
+	}
+	if pos >= length || count <= 0 {
+		return
+	}
+	if pos+count > length {
+		count = length - pos
+	}
+	deleted := b.Substring(pos, pos+count)
+	b.deleteRunes(pos, count)
+	b.insertRunes(pos, []rune(s))
+	b.undo.Push(UndoRecord{Pos: pos, Deleted: deleted, Inserted: s})
 	b.modified = true
 	b.modCount++
 	b.changeGen++

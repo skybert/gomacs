@@ -29,12 +29,16 @@ func (b *Buffer) ApplyRedo() bool {
 		return false
 	}
 	// Redo is the inverse of undo: re-apply the original operation.
-	if rec.Inserted != "" {
+	if rec.Inserted != "" && rec.Deleted != "" {
+		// Combined replace: delete old text then insert new text.
+		b.deleteRunes(rec.Pos, len([]rune(rec.Deleted)))
+		b.insertRunes(rec.Pos, []rune(rec.Inserted))
+		b.SetPoint(rec.Pos + len([]rune(rec.Inserted)))
+	} else if rec.Inserted != "" {
 		// The original operation was an insertion; re-insert.
 		b.insertRunes(rec.Pos, []rune(rec.Inserted))
 		b.SetPoint(rec.Pos + len([]rune(rec.Inserted)))
-	}
-	if rec.Deleted != "" {
+	} else if rec.Deleted != "" {
 		// The original operation was a deletion; re-delete.
 		b.deleteRunes(rec.Pos, len([]rune(rec.Deleted)))
 		b.SetPoint(rec.Pos)

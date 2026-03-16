@@ -1275,3 +1275,70 @@ func TestCmdJsonMode(t *testing.T) {
 		t.Errorf("json-mode: want mode=%q, got %q", "json", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// delete-trailing-whitespace
+// ---------------------------------------------------------------------------
+
+func TestDeleteTrailingWhitespaceWholeBuf(t *testing.T) {
+	e := newTestEditor("hello   \nworld  \nno-trail\n")
+	e.cmdDeleteTrailingWhitespace()
+	want := "hello\nworld\nno-trail\n"
+	if got := buf(e).String(); got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+func TestDeleteTrailingWhitespaceRegion(t *testing.T) {
+	// Only the selected region (first line) should have trailing WS removed.
+	e := newTestEditor("hello   \nworld  \n")
+	b := buf(e)
+	b.SetMark(0)
+	b.SetMarkActive(true)
+	b.SetPoint(8) // end of "hello   "
+	e.cmdDeleteTrailingWhitespace()
+	want := "hello\nworld  \n"
+	if got := b.String(); got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// redo
+// ---------------------------------------------------------------------------
+
+func TestRedo(t *testing.T) {
+	e := newTestEditor("hello")
+	b := buf(e)
+	b.InsertString(5, " world")
+	e.cmdUndo()
+	if got := b.String(); got != "hello" {
+		t.Fatalf("after undo: want %q, got %q", "hello", got)
+	}
+	e.cmdRedo()
+	if got := b.String(); got != "hello world" {
+		t.Fatalf("after redo: want %q, got %q", "hello world", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// downcase-word / upcase-word performance (ReplaceString)
+// ---------------------------------------------------------------------------
+
+func TestDowncaseWordUsesOneUndoStep(t *testing.T) {
+	e := newTestEditor("Hello World")
+	b := buf(e)
+	b.SetPoint(0)
+	e.cmdDowncaseWord()
+	if got := b.String(); got != "hello World" {
+		t.Fatalf("downcase: want %q, got %q", "hello World", got)
+	}
+	e.cmdUndo()
+	if got := b.String(); got != "Hello World" {
+		t.Fatalf("after undo: want %q, got %q", "Hello World", got)
+	}
+	// Must be exactly one undo step (ReplaceString produces one record).
+	if b.ApplyUndo() {
+		t.Fatal("expected only one undo record for downcase-word")
+	}
+}
