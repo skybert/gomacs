@@ -65,30 +65,31 @@ Cheers,
 
 # Known issues
 
-- `downcase-word` is very slow
-- `execute-extended-command` doesn't have `C-n` and `C-p`
-- `switch-to-buffer` doesn't use a LRU sorted list of buffers.
-- `dired` doesn't change the dir context, so `C-x C-f` still goes to
-  the dir `gomacs` was started in.
-- `describe-function` doesn't list the registered shortcut(s).
-- Undo works, but not redo, it just creates a mess.
+## vc-log
+
+VC log is without any syntax highlighting. The commit SHAs should be
+coloured.
+
+## vc-next-action
+
+The `*VC commit*` buffer should be called `*vc-commit*` and it should
+list the file names that will be included in this change list. Also,
+it should have syntax highlighting.
+
+Also, it doesn't `git add` the files that are changed, making the
+later `git commit` fail.
 
 # Missing features
 
-- `delete-trailing-whitespace`. Will delete all trailing white space
-in the buffer, or if the region is active, only in the selected
-region.
+## Version Control Annotate
+`vc-annotate` bound to `C-x v g` should run `git blame <file>` when
+the repo is Git. The annotation format in a new buffer `*vc-annotate*`
+should be like:
 
-- `save-buffer` should delete trailing whitespace. Should be possible
-to turn off with:
-
-```lisp
-(setq save-buffer-delete-trailing-whitespace nil)
+```go
+7e12ad49 (Torstein Krause Johansen 2026-03-15 11) // this comment is from the source code
 ```
 
-- `vc-next-action` which runs `git add` if the file is not added to
-  the repo, or `git commit` if it is. If it runs `git commit`, it
-  should open a buffer in which the user can type the (multiline)
-  message. As comments in this commit buffer should be the changed
-  files. Hitting `C-c C-c` will submit the commit, whereas `C-c C-k`
-  will abort (kill) it .
+Hitting `l` on the commit should open a new buffer showing that commit
+commit message and headers. `d` should show the commit diff in a
+buffer called `*vc-diff*`.
