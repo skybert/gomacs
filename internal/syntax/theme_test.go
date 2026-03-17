@@ -29,7 +29,7 @@ func TestApplySweetTheme_Colors(t *testing.T) {
 		{"minibuffer", &FaceMinibuffer, "#b8c0d4", "#13131e"},
 		{"region", &FaceRegion, "#13131e", "#e17df3"},
 		{"isearch", &FaceIsearch, "#13131e", "#f6ce55"},
-		{"selected", &FaceSelected, "#13131e", "#fc1c5b"},
+		{"selected", &FaceSelected, "#13131e", "#06c993"},
 	}
 
 	for _, tt := range tests {

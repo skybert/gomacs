@@ -231,9 +231,13 @@ func init() {
 	registerCommand("vc-status", (*Editor).cmdVcStatus,
 		"Show VCS status for the current repository (C-x v s).")
 	registerCommand("vc-grep", (*Editor).cmdVcGrep,
-		"Run VCS grep and navigate results (C-x v g).")
+		"Run VCS grep and navigate results (C-x v G).")
 	registerCommand("vc-next-action", (*Editor).cmdVcNextAction,
 		"Stage the file or open a commit buffer if changes are already staged (C-x v v).")
+	registerCommand("vc-annotate", (*Editor).cmdVcAnnotate,
+		"Show git blame annotation for the current file (C-x v g).")
+	registerCommand("messages", (*Editor).cmdMessages,
+		"Switch to the *messages* buffer showing recent editor messages.")
 
 	// ---- narrowing ---------------------------------------------------------
 	registerCommand("narrow-to-region", (*Editor).cmdNarrowToRegion,

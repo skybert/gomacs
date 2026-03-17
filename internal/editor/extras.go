@@ -928,6 +928,8 @@ type vcBackend interface {
 	Show(root, rev string) (string, error)
 	// Grep runs a line-numbered grep for pattern and returns the output.
 	Grep(root, pattern string) (string, error)
+	// Blame returns annotated file content (git blame --date=short).
+	Blame(root, filePath string) (string, error)
 }
 
 // vcBackends lists every supported backend; the first one whose Root()
@@ -1015,6 +1017,11 @@ func (gitBackend) Grep(root, pattern string) (string, error) {
 	return string(out), err
 }
 
+func (gitBackend) Blame(root, filePath string) (string, error) {
+	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "blame", "--date=short", "--abbrev=8", filePath).CombinedOutput() //nolint:gosec
+	return string(out), err
+}
+
 // ---------------------------------------------------------------------------
 // Shared VC helpers
 // ---------------------------------------------------------------------------
@@ -1042,7 +1049,7 @@ func (e *Editor) vcShowOutput(name, text, mode string) {
 // falling back to *scratch*.
 func (e *Editor) vcQuit(skipMode string) {
 	vcModes := map[string]bool{
-		"vc-log": true, "vc-status": true, "vc-grep": true, "diff": true, "vc-commit": true,
+		"vc-log": true, "vc-status": true, "vc-grep": true, "diff": true, "vc-commit": true, "vc-annotate": true,
 	}
 	for _, b := range e.bufferMRU {
 		if !vcModes[b.Mode()] {
@@ -1152,7 +1159,7 @@ func (e *Editor) cmdVcGrep() {
 // the version control state machine:
 //   - Untracked → git add (stage the file)
 //   - Modified but not staged → git add (stage the file)
-//   - Staged → open a *VC Commit* buffer for the commit message
+//   - Staged → open a *vc-commit* buffer for the commit message
 //   - Nothing to do → inform the user
 func (e *Editor) cmdVcNextAction() {
 	e.clearArg()
@@ -1229,34 +1236,62 @@ func (e *Editor) vcGitAdd(root, filePath string) {
 	}
 }
 
-// vcOpenCommitBuffer opens (or reuses) a *VC Commit* buffer pre-populated
-// with a comment block showing staged changes.  The user types the commit
-// message above the comments, then presses C-c C-c to submit or C-c C-k to
-// abort.
+// vcOpenCommitBuffer opens (or reuses) a *vc-commit* buffer pre-populated
+// with a comment block listing staged files and their changes.  The user types
+// the commit message above the comments, then presses C-c C-c to submit or
+// C-c C-k to abort.
 func (e *Editor) vcOpenCommitBuffer(root, filePath string) {
-	// Build the comment section from `git diff --cached --stat`.
-	var statArgs []string
+	// Stage the file if a specific file was given (ensures it's included).
 	if filePath != "" {
-		statArgs = []string{"-C", root, "diff", "--cached", "--stat", "--", filePath}
-	} else {
-		statArgs = []string{"-C", root, "diff", "--cached", "--stat"}
+		_ = exec.CommandContext(context.Background(), "git", "-C", root, "add", filePath).Run() //nolint:gosec
 	}
-	stat, _ := exec.CommandContext(context.Background(), "git", statArgs...).Output() //nolint:gosec
+
+	// List all staged files via `git diff --cached --name-status`.
+	nameOut, _ := exec.CommandContext(context.Background(), "git", "-C", root, "diff", "--cached", "--name-status").Output() //nolint:gosec
+
+	// Also get the summary stat for the overall change count.
+	statOut, _ := exec.CommandContext(context.Background(), "git", "-C", root, "diff", "--cached", "--stat").Output() //nolint:gosec
 
 	var sb strings.Builder
 	sb.WriteString("\n")
 	sb.WriteString("# Changes to be committed:\n")
-	for _, line := range strings.Split(strings.TrimRight(string(stat), "\n"), "\n") {
-		if line != "" {
-			sb.WriteString("# " + line + "\n")
+	for _, line := range strings.Split(strings.TrimRight(string(nameOut), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		// name-status format: "M\tpath/to/file" or "A\tnewfile"
+		parts := strings.SplitN(line, "\t", 2)
+		statusCode := ""
+		path := line
+		if len(parts) == 2 {
+			switch parts[0] {
+			case "M":
+				statusCode = "modified:   "
+			case "A":
+				statusCode = "new file:   "
+			case "D":
+				statusCode = "deleted:    "
+			case "R":
+				statusCode = "renamed:    "
+			default:
+				statusCode = parts[0] + ":         "
+			}
+			path = parts[1]
+		}
+		sb.WriteString("#\t" + statusCode + path + "\n")
+	}
+	// Append the overall stat summary.
+	for _, line := range strings.Split(strings.TrimRight(string(statOut), "\n"), "\n") {
+		if line != "" && strings.Contains(line, "changed") {
+			sb.WriteString("# " + strings.TrimSpace(line) + "\n")
 		}
 	}
 	sb.WriteString("#\n")
 	sb.WriteString("# C-c C-c  commit    C-c C-k  abort\n")
 
-	b := e.FindBuffer("*VC Commit*")
+	b := e.FindBuffer("*vc-commit*")
 	if b == nil {
-		b = buffer.NewWithContent("*VC Commit*", sb.String())
+		b = buffer.NewWithContent("*vc-commit*", sb.String())
 		e.buffers = append(e.buffers, b)
 	} else {
 		b.SetReadOnly(false)
@@ -1607,4 +1642,113 @@ func (e *Editor) vcGrepDispatch(ke terminal.KeyEvent) bool {
 	pos := b.LineStart(lineNum)
 	b.SetPoint(pos)
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// Messages buffer
+// ---------------------------------------------------------------------------
+
+// cmdMessages switches to the *messages* buffer, creating it if needed.
+func (e *Editor) cmdMessages() {
+	b := e.FindBuffer("*messages*")
+	if b == nil {
+		b = buffer.NewWithContent("*messages*", "")
+		e.buffers = append(e.buffers, b)
+		b.SetReadOnly(true)
+	}
+	e.activeWin.SetBuf(b)
+}
+
+// ---------------------------------------------------------------------------
+// VC annotate (git blame)
+// ---------------------------------------------------------------------------
+
+// cmdVcAnnotate runs git blame on the current file and displays the output in
+// a *vc-annotate* buffer (C-x v g).
+func (e *Editor) cmdVcAnnotate() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	filePath := buf.Filename()
+	if filePath == "" {
+		e.Message("vc-annotate: buffer is not visiting a file")
+		return
+	}
+	be, root := vcFind(vcDir(buf))
+	if be == nil {
+		e.Message("vc-annotate: not in a version control repository")
+		return
+	}
+	text, err := be.Blame(root, filePath)
+	if err != nil && text == "" {
+		text = err.Error()
+	}
+	e.vcShowOutput("*vc-annotate*", text, "vc-annotate")
+	e.vcLogRoots[e.ActiveBuffer()] = root
+}
+
+// vcAnnotateHashAtPoint extracts the commit hash from the current line of a
+// *vc-annotate* buffer.  Git blame lines start with an optional '^' followed
+// by the abbreviated hash.
+func (e *Editor) vcAnnotateHashAtPoint(buf *buffer.Buffer) string {
+	pt := buf.Point()
+	bol := buf.BeginningOfLine(pt)
+	eol := buf.EndOfLine(pt)
+	line := buf.Substring(bol, eol)
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(fields[0], "^")
+}
+
+// vcAnnotateDispatch handles key events in a *vc-annotate* buffer.
+// l – show commit log/details; d – show commit diff; q – quit.
+func (e *Editor) vcAnnotateDispatch(ke terminal.KeyEvent) bool {
+	if ke.Key != tcell.KeyRune {
+		return false
+	}
+
+	buf := e.ActiveBuffer()
+	root := e.vcLogRoots[buf]
+
+	switch ke.Rune {
+	case 'q':
+		e.vcQuit("vc-annotate")
+		return true
+
+	case 'l':
+		hash := e.vcAnnotateHashAtPoint(buf)
+		if hash == "" {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		text, err := be.Show(root, hash)
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		e.vcShowOutput("*VC Show*", text, "diff")
+		e.vcLogRoots[e.ActiveBuffer()] = root
+		return true
+
+	case 'd':
+		hash := e.vcAnnotateHashAtPoint(buf)
+		if hash == "" {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		text, err := be.Show(root, hash)
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		e.vcShowOutput("*vc-diff*", text, "diff")
+		e.vcLogRoots[e.ActiveBuffer()] = root
+		return true
+	}
+	return false
 }

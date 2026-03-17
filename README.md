@@ -13,6 +13,8 @@ Simple TTY only Emacs clone written in Go.
   including Go, Emacs Lisp, Markdown and BASH.
 - Self documenting features, like <kbd>C-h f</kbd> `describe-function`
   and <kbd>C-h k</kbd> `describe-key`
+- `visual-line-mode` enabled by default: lines longer than 80 characters
+  wrap visually (file content unchanged). Disable with `(setq visual-lines nil)`.
 
 # LSP support
 
@@ -63,33 +65,38 @@ Cheers,
 
 -Torstein
 
-# Known issues
+# Missing features
 
 ## vc-log
 
-VC log is without any syntax highlighting. The commit SHAs should be
-coloured.
+Typing `l` on a commit SHA shows the commit log message (no diff).
+Typing `d` shows the full diff.
 
-## vc-next-action
+## vc-annotate
 
-The `*VC commit*` buffer should be called `*vc-commit*` and it should
-list the file names that will be included in this change list. Also,
-it should have syntax highlighting.
+Syntax highlighting of SHAs, metadata and source code on the right-hand side.
+Typing `q` closes `vc-annotate`. Typing `l` shows the commit log message;
+typing `d` shows the diff.
 
-Also, it doesn't `git add` the files that are changed, making the
-later `git commit` fail.
+## gomacs-version
 
-# Missing features
+There should be an `gomacs-version` command which lists the version,
+and build info of `gomacs` as well as the uptime (since it was
+started). The version string itself should come from the [VERSION
+variable in the Makefile](Makefile).
 
-## Version Control Annotate
-`vc-annotate` bound to `C-x v g` should run `git blame <file>` when
-the repo is Git. The annotation format in a new buffer `*vc-annotate*`
-should be like:
+# Known issues
 
-```go
-7e12ad49 (Torstein Krause Johansen 2026-03-15 11) // this comment is from the source code
-```
+*Help* buffers should be read only. Hitting `q` should close them.
 
-Hitting `l` on the commit should open a new buffer showing that commit
-commit message and headers. `d` should show the commit diff in a
-buffer called `*vc-diff*`.
+*vc grep* should have syntax lightning. Both the `grep` hits, showing
+the file path and line number in different colours. The source code in
+the search hit should also have some colour, just use `perl-mode` for
+these, regardless of what language the file are using.
+
+When pressing `l` in *vc log* to view the particular commit, pressing
+`q` on that commit screen should take the user back to `*vc log*`.
+Same goes for when viewing the diff.
+
+*vc show* doesn't have syntax highlighting on the commit message part,
+only the diff.

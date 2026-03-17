@@ -159,5 +159,5 @@ func applySweetTheme() {
 	FaceRegion = Face{Fg: sweetBlack, Bg: sweetPurple}
 	FaceIsearch = Face{Fg: sweetBlack, Bg: sweetOrange1}
 	FaceCandidate = Face{Fg: sweetFg, Bg: sweetBg}
-	FaceSelected = Face{Fg: sweetBlack, Bg: sweetAccent}
+	FaceSelected = Face{Fg: sweetBlack, Bg: sweetGreen}
 }

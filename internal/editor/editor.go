@@ -570,7 +570,8 @@ func (e *Editor) setupKeymaps() {
 	cxv.Bind(keymap.PlainKey('l'), "vc-print-log")
 	cxv.Bind(keymap.PlainKey('='), "vc-diff")
 	cxv.Bind(keymap.PlainKey('s'), "vc-status")
-	cxv.Bind(keymap.PlainKey('g'), "vc-grep")
+	cxv.Bind(keymap.PlainKey('g'), "vc-annotate")
+	cxv.Bind(keymap.PlainKey('G'), "vc-grep")
 	cxv.Bind(keymap.PlainKey('v'), "vc-next-action")
 }
 
@@ -805,8 +806,24 @@ func (e *Editor) KillBuffer(name string) {
 
 // Message formats a status message displayed in the minibuffer area.
 func (e *Editor) Message(format string, args ...any) {
-	e.message = fmt.Sprintf(format, args...)
+	msg := fmt.Sprintf(format, args...)
+	e.message = msg
 	e.messageTime = time.Now().UnixNano()
+	e.appendToMessagesBuffer(msg)
+}
+
+// appendToMessagesBuffer appends msg to the *messages* buffer, creating it if
+// needed.  The buffer is kept read-only between appends.
+func (e *Editor) appendToMessagesBuffer(msg string) {
+	b := e.FindBuffer("*messages*")
+	if b == nil {
+		b = buffer.NewWithContent("*messages*", "")
+		e.buffers = append(e.buffers, b)
+	}
+	b.SetReadOnly(false)
+	pos := b.Len()
+	b.InsertString(pos, msg+"\n")
+	b.SetReadOnly(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,6 +1165,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	// When in a *vc grep* buffer, handle q and Enter.
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-grep" {
 		if e.vcGrepDispatch(ke) {
+			return
+		}
+	}
+
+	// When in a *vc-annotate* buffer, handle l/d/q.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-annotate" {
+		if e.vcAnnotateDispatch(ke) {
 			return
 		}
 	}
@@ -1856,6 +1880,12 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.JSONHighlighter{}
 	case "diff":
 		return syntax.DiffHighlighter{}
+	case "vc-log":
+		return syntax.VcLogHighlighter{}
+	case "vc-annotate":
+		return syntax.VcAnnotateHighlighter{}
+	case "vc-commit":
+		return syntax.VcCommitHighlighter{}
 	case "makefile":
 		return syntax.MakefileHighlighter{}
 	default:
