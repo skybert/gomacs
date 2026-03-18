@@ -61,6 +61,29 @@ func TestEnsurePointVisibleAboveWindow(t *testing.T) {
 	}
 }
 
+// TestEnsurePointVisibleLastLine checks that when the point would fall on the
+// modeline row (scrollLine+height-1), EnsurePointVisible scrolls it into the
+// text area.  This exercises the "last line invisible" bug where
+// EnsurePointVisible previously used the full window height instead of the
+// text height (height-1).
+func TestEnsurePointVisibleLastLine(t *testing.T) {
+	// height=4: rows 0,1,2 are text; row 3 is the modeline.
+	// With scrollLine=1 the text shows buffer lines 1,2,3.
+	// Buffer line 4 falls on the modeline row — not rendered by renderWindow.
+	w, buf := newFiveLineWindow(4)
+	buf.SetPoint(buf.LineStart(4))
+	w.SetPoint(buf.Point())
+
+	w.EnsurePointVisible()
+
+	textH := w.Height() - 1 // 3
+	sl := w.ScrollLine()
+	pointLine, _ := buf.LineCol(w.Point())
+	if pointLine < sl || pointLine >= sl+textH {
+		t.Errorf("point line %d not in text area [%d, %d)", pointLine, sl, sl+textH)
+	}
+}
+
 // TestVisibleLinesRange checks that VisibleLines returns [scrollLine,
 // scrollLine+height).
 func TestVisibleLinesRange(t *testing.T) {
@@ -209,5 +232,65 @@ func TestRecenterBottomPutsPointNearLastRow(t *testing.T) {
 	// scrollLine should be less than pointLine (point is scrolled toward the bottom).
 	if w.ScrollLine() >= pointLine {
 		t.Errorf("RecenterBottom: expected scrollLine < pointLine (%d), got %d", pointLine, w.ScrollLine())
+	}
+}
+
+// TestViewLinesWrapped verifies that ViewLines splits a long line into
+// multiple entries when wrapCol is set.
+func TestViewLinesWrapped(t *testing.T) {
+	// One 20-rune line wrapped at 8 cols → 3 entries (8+8+4).
+	content := "12345678901234567890"
+	buf := buffer.NewWithContent("test", content)
+	w := New(buf, 0, 0, 80, 5)
+	w.SetWrapCol(8)
+
+	vl := w.ViewLines()
+	if len(vl) != 5 {
+		t.Fatalf("expected 5 ViewLines (height), got %d", len(vl))
+	}
+	expected := []string{"12345678", "90123456", "7890"}
+	for i, want := range expected {
+		if vl[i].Line != 1 {
+			t.Errorf("row %d: expected Line=1, got %d", i, vl[i].Line)
+		}
+		if vl[i].Text != want {
+			t.Errorf("row %d: expected Text=%q, got %q", i, want, vl[i].Text)
+		}
+	}
+	for i := 3; i < 5; i++ {
+		if vl[i].Line != 0 {
+			t.Errorf("row %d: expected past-end (Line=0), got %d", i, vl[i].Line)
+		}
+	}
+}
+
+// TestVisualRowForPoint verifies VisualRowForPoint with wrapping enabled.
+func TestVisualRowForPoint(t *testing.T) {
+	// Line 1: 20 runes, wrap at 8; line 2: 5 runes.
+	content := "12345678901234567890\nHello"
+	buf := buffer.NewWithContent("test", content)
+	w := New(buf, 0, 0, 80, 10)
+	w.SetWrapCol(8)
+
+	// col 0 on line 1 → visual row 0.
+	buf.SetPoint(0)
+	w.SetPoint(0)
+	if row := w.VisualRowForPoint(); row != 0 {
+		t.Errorf("expected visual row 0, got %d", row)
+	}
+
+	// col 8 on line 1 → second segment → visual row 1.
+	buf.SetPoint(8)
+	w.SetPoint(8)
+	if row := w.VisualRowForPoint(); row != 1 {
+		t.Errorf("expected visual row 1, got %d", row)
+	}
+
+	// start of line 2 → after 3 visual rows of line 1 → visual row 3.
+	line2Start := buf.LineStart(2)
+	buf.SetPoint(line2Start)
+	w.SetPoint(line2Start)
+	if row := w.VisualRowForPoint(); row != 3 {
+		t.Errorf("expected visual row 3 for line 2, got %d", row)
 	}
 }

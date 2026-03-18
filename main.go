@@ -22,6 +22,9 @@ import (
 	"github.com/skybert/gomacs/internal/editor"
 )
 
+// Version is set at build time via: -ldflags "-X main.Version=<version>"
+var Version = "dev"
+
 func main() {
 	quick := flag.Bool("Q", false, "start with minimum customisation (skip init file)")
 	flag.Parse()
@@ -36,7 +39,7 @@ func main() {
 		}
 	}
 
-	opts := editor.Options{Quick: *quick, StdinData: stdinData}
+	opts := editor.Options{Quick: *quick, StdinData: stdinData, Version: Version}
 	e, err := editor.New(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gomacs: init error: %v\n", err)

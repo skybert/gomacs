@@ -23,6 +23,10 @@ type Window struct {
 	goalCol int
 	// Window-local overlay for isearch highlights etc.
 	isMinibuffer bool
+	// wrapCol, when > 0, enables visual line wrapping: buffer lines longer
+	// than wrapCol runes are split into multiple view rows.  The file
+	// content is never changed.  0 means no wrapping.
+	wrapCol int
 }
 
 // ViewLine describes the content of one rendered row.
@@ -133,6 +137,12 @@ func (w *Window) SetScrollLine(l int) {
 	w.scrollLine = l
 }
 
+// WrapCol returns the visual wrap column (0 = disabled).
+func (w *Window) WrapCol() int { return w.wrapCol }
+
+// SetWrapCol sets the visual wrap column.  0 disables wrapping.
+func (w *Window) SetWrapCol(col int) { w.wrapCol = col }
+
 // ScrollUp scrolls the view down by n lines (scrollLine increases), revealing
 // later content.
 func (w *Window) ScrollUp(n int) {
@@ -145,15 +155,84 @@ func (w *Window) ScrollDown(n int) {
 	w.SetScrollLine(w.scrollLine - n)
 }
 
+// textRows returns the number of rows available for buffer text content.
+// For non-minibuffer windows the last row is reserved for the modeline, so
+// textRows() == height-1 (minimum 1).  For the minibuffer window the full
+// height is usable.
+func (w *Window) textRows() int {
+	if w.isMinibuffer || w.height <= 1 {
+		return w.height
+	}
+	return w.height - 1
+}
+
+// visualRowsForLine returns how many visual rows buffer line bufLine occupies
+// given the current wrapCol.  Returns 1 when wrapCol <= 0.
+func (w *Window) visualRowsForLine(bufLine int) int {
+	if w.wrapCol <= 0 {
+		return 1
+	}
+	startPos := w.buf.LineStart(bufLine)
+	endPos := w.buf.EndOfLine(startPos)
+	lineLen := endPos - startPos // rune count (positions are rune indices)
+	if lineLen == 0 {
+		return 1
+	}
+	rows := lineLen / w.wrapCol
+	if lineLen%w.wrapCol != 0 {
+		rows++
+	}
+	return rows
+}
+
+// VisualRowForPoint returns the 0-based visual row (measured from the window
+// top) of the current window point.  When wrapCol is 0 this equals
+// pointLine − scrollLine.
+func (w *Window) VisualRowForPoint() int {
+	pointLine, _ := w.buf.LineCol(w.point)
+	if w.wrapCol <= 0 {
+		return pointLine - w.scrollLine
+	}
+	// Count visual rows from scrollLine up to (but not including) pointLine.
+	visualRow := 0
+	for bufLine := w.scrollLine; bufLine < pointLine; bufLine++ {
+		visualRow += w.visualRowsForLine(bufLine)
+	}
+	// Add the visual segment offset within the cursor's own line.
+	_, cursorCol := w.buf.LineCol(w.point)
+	visualRow += cursorCol / w.wrapCol
+	return visualRow
+}
+
 // EnsurePointVisible adjusts scrollLine so that the line containing Point is
-// within the visible area [scrollLine, scrollLine+height).
+// within the visible text area [scrollLine, scrollLine+textRows()).
+// For non-minibuffer windows the last row is the modeline and is excluded
+// from the text area, which fixes the "last line invisible" bug.
+// When visual wrapping is enabled the check is performed in visual rows.
 func (w *Window) EnsurePointVisible() {
 	pointLine, _ := w.buf.LineCol(w.point)
-	start, end := w.VisibleLines()
-	if pointLine < start {
+	textH := w.textRows()
+
+	if pointLine < w.scrollLine {
 		w.SetScrollLine(pointLine)
-	} else if pointLine >= end {
-		w.SetScrollLine(pointLine - w.height + 1)
+		return
+	}
+
+	if w.wrapCol <= 0 {
+		// No visual wrapping: simple line-count check.
+		if pointLine >= w.scrollLine+textH {
+			w.SetScrollLine(pointLine - textH + 1)
+		}
+		return
+	}
+
+	// Visual wrapping: count visual rows from scrollLine to the cursor.
+	visualRow := w.VisualRowForPoint()
+	if visualRow >= textH {
+		// Cursor is past the bottom of the text area.  Set scrollLine to
+		// pointLine so the cursor appears at the top of the window.
+		// This is a safe, simple approach; future work could scroll minimally.
+		w.SetScrollLine(pointLine)
 	}
 }
 
@@ -185,7 +264,17 @@ func (w *Window) RecenterBottom() {
 
 // ViewLines computes the ViewLine descriptor for every row in the window.
 // Rows that fall beyond the last buffer line have Line == 0 and empty Text.
+// When wrapCol > 0, buffer lines longer than wrapCol runes are split across
+// multiple consecutive ViewLine entries (each with the same Line number).
 func (w *Window) ViewLines() []ViewLine {
+	if w.wrapCol > 0 {
+		return w.viewLinesWrapped()
+	}
+	return w.viewLinesNoWrap()
+}
+
+// viewLinesNoWrap is the original ViewLines implementation.
+func (w *Window) viewLinesNoWrap() []ViewLine {
 	totalLines := w.buf.LineCount()
 	rows := make([]ViewLine, w.height)
 	for i := range w.height {
@@ -205,6 +294,55 @@ func (w *Window) ViewLines() []ViewLine {
 			EndPos:   endPos,
 			Text:     text,
 		}
+	}
+	return rows
+}
+
+// viewLinesWrapped produces ViewLine entries with long lines split into
+// segments of at most wrapCol runes each.
+func (w *Window) viewLinesWrapped() []ViewLine {
+	totalLines := w.buf.LineCount()
+	rows := make([]ViewLine, w.height)
+	rowIdx := 0
+	bufLine := w.scrollLine
+	for rowIdx < w.height && bufLine <= totalLines {
+		startPos := w.buf.LineStart(bufLine)
+		endPos := w.buf.EndOfLine(startPos)
+		text := w.buf.Substring(startPos, endPos)
+		lineRunes := []rune(text)
+		lineLen := len(lineRunes)
+
+		if lineLen <= w.wrapCol {
+			rows[rowIdx] = ViewLine{
+				Row:      w.top + rowIdx,
+				Line:     bufLine,
+				StartPos: startPos,
+				EndPos:   endPos,
+				Text:     text,
+			}
+			rowIdx++
+		} else {
+			segStart := 0
+			for rowIdx < w.height && segStart < lineLen {
+				segEnd := segStart + w.wrapCol
+				if segEnd > lineLen {
+					segEnd = lineLen
+				}
+				rows[rowIdx] = ViewLine{
+					Row:      w.top + rowIdx,
+					Line:     bufLine,
+					StartPos: startPos + segStart,
+					EndPos:   startPos + segEnd,
+					Text:     string(lineRunes[segStart:segEnd]),
+				}
+				rowIdx++
+				segStart = segEnd
+			}
+		}
+		bufLine++
+	}
+	for ; rowIdx < w.height; rowIdx++ {
+		rows[rowIdx] = ViewLine{Row: w.top + rowIdx, Line: 0}
 	}
 	return rows
 }

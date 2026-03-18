@@ -51,6 +51,10 @@ func (e *Editor) cmdDired() {
 		e.minibufBuf.SetPoint(e.minibufBuf.Len())
 	}
 	e.SetMinibufCompletions(filePathCompletions)
+	e.SetMinibufPreferTyped(func(s string) bool {
+		_, err := os.Stat(s)
+		return err == nil
+	})
 }
 
 // openDired creates (or reuses) a dired buffer for dir and makes it active.

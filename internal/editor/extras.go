@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/gdamore/tcell/v3"
@@ -926,6 +928,8 @@ type vcBackend interface {
 	Log(root, filePath string) (string, error)
 	// Show returns the full content of one commit identified by rev.
 	Show(root, rev string) (string, error)
+	// ShowLog returns the commit metadata and message for rev without the diff.
+	ShowLog(root, rev string) (string, error)
 	// Grep runs a line-numbered grep for pattern and returns the output.
 	Grep(root, pattern string) (string, error)
 	// Blame returns annotated file content (git blame --date=short).
@@ -1012,6 +1016,11 @@ func (gitBackend) Show(root, rev string) (string, error) {
 	return string(out), err
 }
 
+func (gitBackend) ShowLog(root, rev string) (string, error) {
+	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "show", "--no-patch", "--format=fuller", rev).CombinedOutput() //nolint:gosec
+	return string(out), err
+}
+
 func (gitBackend) Grep(root, pattern string) (string, error) {
 	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "grep", "-n", pattern).CombinedOutput() //nolint:gosec
 	return string(out), err
@@ -1049,7 +1058,7 @@ func (e *Editor) vcShowOutput(name, text, mode string) {
 // falling back to *scratch*.
 func (e *Editor) vcQuit(skipMode string) {
 	vcModes := map[string]bool{
-		"vc-log": true, "vc-status": true, "vc-grep": true, "diff": true, "vc-commit": true, "vc-annotate": true,
+		"vc-log": true, "vc-status": true, "vc-grep": true, "diff": true, "vc-commit": true, "vc-annotate": true, "vc-show": true,
 	}
 	for _, b := range e.bufferMRU {
 		if !vcModes[b.Mode()] {
@@ -1370,46 +1379,77 @@ func (e *Editor) vcCommitAbort() {
 // ---------------------------------------------------------------------------
 
 // vcLogDispatch handles keys in a *VC Log* buffer.
-// q quits; Enter opens the commit under point.
+// q quits; l shows the commit log message; d and Enter show the full diff.
 func (e *Editor) vcLogDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
-		return false
-	}
-	if ke.Key == tcell.KeyRune && ke.Rune == 'q' {
-		e.vcQuit("vc-log")
-		return true
-	}
-	if ke.Key != tcell.KeyEnter {
 		return false
 	}
 
 	buf := e.ActiveBuffer()
 	root := e.vcLogRoots[buf]
-	if root == "" {
-		return true
-	}
-	pt := buf.Point()
-	bol := buf.BeginningOfLine(pt)
-	eol := buf.EndOfLine(pt)
-	line := buf.Substring(bol, eol)
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return true
-	}
-	hash := fields[0]
 
-	// Find the backend for this root.
-	be, _ := vcFind(root)
-	if be == nil {
+	switch {
+	case ke.Key == tcell.KeyRune && ke.Rune == 'q':
+		if parent, ok := e.vcParent[buf]; ok {
+			e.activeWin.SetBuf(parent)
+			return true
+		}
+		e.vcQuit("vc-log")
+		return true
+
+	case ke.Key == tcell.KeyRune && ke.Rune == 'l':
+		// Show commit log message (no diff).
+		if root == "" {
+			return true
+		}
+		pt := buf.Point()
+		bol := buf.BeginningOfLine(pt)
+		eol := buf.EndOfLine(pt)
+		line := buf.Substring(bol, eol)
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		text, err := be.ShowLog(root, fields[0])
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		e.vcShowOutput("*VC Log Message*", text, "vc-show")
+		e.vcLogRoots[e.ActiveBuffer()] = root
+		e.vcParent[e.ActiveBuffer()] = buf
+		return true
+
+	case ke.Key == tcell.KeyRune && ke.Rune == 'd', ke.Key == tcell.KeyEnter:
+		// Show full commit diff.
+		if root == "" {
+			return true
+		}
+		pt := buf.Point()
+		bol := buf.BeginningOfLine(pt)
+		eol := buf.EndOfLine(pt)
+		line := buf.Substring(bol, eol)
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		text, err := be.Show(root, fields[0])
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		e.vcShowOutput("*VC Show*", text, "vc-show")
+		e.vcLogRoots[e.ActiveBuffer()] = root
+		e.vcParent[e.ActiveBuffer()] = buf
 		return true
 	}
-	text, err := be.Show(root, hash)
-	if err != nil && text == "" {
-		text = err.Error()
-	}
-	e.vcShowOutput("*VC Show*", text, "diff")
-	e.vcLogRoots[e.ActiveBuffer()] = root
-	return true
+	return false
 }
 
 // vcDiffDispatch handles keys in any "diff" mode buffer (*VC Diff*, *VC Show*).
@@ -1423,6 +1463,10 @@ func (e *Editor) vcDiffDispatch(ke terminal.KeyEvent) bool {
 
 	switch {
 	case ke.Key == tcell.KeyRune && ke.Rune == 'q':
+		if parent, ok := e.vcParent[buf]; ok {
+			e.activeWin.SetBuf(parent)
+			return true
+		}
 		e.vcQuit("diff")
 		return true
 
@@ -1660,8 +1704,48 @@ func (e *Editor) cmdMessages() {
 }
 
 // ---------------------------------------------------------------------------
+// Version
+// ---------------------------------------------------------------------------
+
+// cmdGomacsVersion displays the gomacs version, Go runtime version, and uptime
+// in the minibuffer (and appends to *messages*).
+func (e *Editor) cmdGomacsVersion() {
+	v := e.version
+	if v == "" {
+		v = "dev"
+	}
+	uptime := time.Since(e.startTime).Round(time.Second)
+	e.Message("gomacs %s  Go: %s  Uptime: %v", v, runtime.Version(), uptime)
+}
+
+// ---------------------------------------------------------------------------
 // VC annotate (git blame)
 // ---------------------------------------------------------------------------
+
+// langForExt maps a file extension (including the dot, e.g. ".go") to a
+// language mode name understood by syntax.LangToHighlighter.
+func langForExt(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".go":
+		return "go"
+	case ".md", ".markdown":
+		return "markdown"
+	case ".el":
+		return "elisp"
+	case ".py":
+		return "python"
+	case ".java":
+		return "java"
+	case ".sh", ".bash":
+		return "bash"
+	case ".json":
+		return "json"
+	case ".mk":
+		return "makefile"
+	default:
+		return ""
+	}
+}
 
 // cmdVcAnnotate runs git blame on the current file and displays the output in
 // a *vc-annotate* buffer (C-x v g).
@@ -1682,7 +1766,13 @@ func (e *Editor) cmdVcAnnotate() {
 	if err != nil && text == "" {
 		text = err.Error()
 	}
-	e.vcShowOutput("*vc-annotate*", text, "vc-annotate")
+	// Encode the source language in the mode name so the highlighter can
+	// apply syntax colouring to the source portion of each blame line.
+	mode := "vc-annotate"
+	if lang := langForExt(filepath.Ext(filePath)); lang != "" {
+		mode = "vc-annotate+" + lang
+	}
+	e.vcShowOutput("*vc-annotate*", text, mode)
 	e.vcLogRoots[e.ActiveBuffer()] = root
 }
 
@@ -1713,6 +1803,10 @@ func (e *Editor) vcAnnotateDispatch(ke terminal.KeyEvent) bool {
 
 	switch ke.Rune {
 	case 'q':
+		if parent, ok := e.vcParent[buf]; ok {
+			e.activeWin.SetBuf(parent)
+			return true
+		}
 		e.vcQuit("vc-annotate")
 		return true
 
@@ -1725,12 +1819,13 @@ func (e *Editor) vcAnnotateDispatch(ke terminal.KeyEvent) bool {
 		if be == nil {
 			return true
 		}
-		text, err := be.Show(root, hash)
+		text, err := be.ShowLog(root, hash)
 		if err != nil && text == "" {
 			text = err.Error()
 		}
-		e.vcShowOutput("*VC Show*", text, "diff")
+		e.vcShowOutput("*VC Log Message*", text, "vc-show")
 		e.vcLogRoots[e.ActiveBuffer()] = root
+		e.vcParent[e.ActiveBuffer()] = buf
 		return true
 
 	case 'd':
@@ -1746,8 +1841,9 @@ func (e *Editor) vcAnnotateDispatch(ke terminal.KeyEvent) bool {
 		if err != nil && text == "" {
 			text = err.Error()
 		}
-		e.vcShowOutput("*vc-diff*", text, "diff")
+		e.vcShowOutput("*vc-diff*", text, "vc-show")
 		e.vcLogRoots[e.ActiveBuffer()] = root
+		e.vcParent[e.ActiveBuffer()] = buf
 		return true
 	}
 	return false

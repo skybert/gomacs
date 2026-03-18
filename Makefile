@@ -14,7 +14,7 @@ all: fmt lint test vulncheck build man
 
 build: fmt
 	mkdir -p $(BUILDDIR)
-	go build $(GOFLAGS) -o $(BUILDDIR)/$(BINARY) .
+	go build $(GOFLAGS) -ldflags "-X main.Version=$(VERSION)" -o $(BUILDDIR)/$(BINARY) .
 
 # Used by CI/CD to build release binaries. GOOS and GOARCH env vars
 # are set in the CI/CD conf.

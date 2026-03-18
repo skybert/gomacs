@@ -106,6 +106,15 @@ type Editor struct {
 	minibufSelectedIdx     int
 	minibufCandidateOffset int
 	minibufLastQuery       string
+	// minibufCandidateChosen is true only when the user has explicitly
+	// navigated the popup (Tab/Down/Up), so Enter uses the highlighted
+	// candidate instead of the raw typed text.
+	minibufCandidateChosen bool
+	// minibufPreferTyped, when set, is called with the raw typed text on
+	// Enter.  If it returns true the typed text is used as-is even when
+	// candidates are present.  Used by find-file to prefer a typed
+	// directory path over the first completion inside that directory.
+	minibufPreferTyped func(string) bool
 
 	// lastYankEnd tracks the end position of the last yank so that
 	// yank-pop can replace it.
@@ -135,6 +144,10 @@ type Editor struct {
 
 	// vcLogRoots maps *VC Log* buffers to their git repository root dir.
 	vcLogRoots map[*buffer.Buffer]string
+
+	// vcParent maps a child VC output buffer (e.g. *VC Log Message*, *VC Show*)
+	// to the parent VC buffer that opened it.  Used by q to navigate back.
+	vcParent map[*buffer.Buffer]*buffer.Buffer
 
 	// vcCommitRoots maps *VC Commit* buffers to their git repository root dir.
 	vcCommitRoots map[*buffer.Buffer]string
@@ -166,6 +179,10 @@ type Editor struct {
 	// Set to false via (setq save-buffer-delete-trailing-whitespace nil).
 	saveBufferDeleteTrailingWS bool
 
+	// visualLines enables visual line wrapping at 80 characters (default true).
+	// Disabled via (setq visual-lines nil) in ~/.gomacs.
+	visualLines bool
+
 	// passive LSP hover state (eldoc-style)
 	lastHoverFile  string
 	lastHoverPoint int
@@ -183,6 +200,11 @@ type Editor struct {
 	// spanCaches caches syntax-highlight spans per buffer so that
 	// scrolling (C-n/C-p) does not re-highlight the whole file every frame.
 	spanCaches map[*buffer.Buffer]*spanCache
+
+	// version is the build version string (embedded at compile time).
+	version string
+	// startTime is when the editor was started (for uptime display).
+	startTime time.Time
 }
 
 // spanCache holds pre-computed highlighting data for a buffer.  It is
@@ -207,6 +229,8 @@ type Options struct {
 	// The caller must read and close os.Stdin before calling New so that tcell
 	// can claim /dev/tty for keyboard input.
 	StdinData []byte
+	// Version is the build version string embedded at compile time.
+	Version string
 }
 
 // / New creates and initialises the editor: terminal, scratch buffer, keymaps,
@@ -226,13 +250,17 @@ func New(opts Options) (*Editor, error) {
 		registers:                  make(map[rune]register),
 		diredStates:                make(map[*buffer.Buffer]*diredState),
 		vcLogRoots:                 make(map[*buffer.Buffer]string),
+		vcParent:                   make(map[*buffer.Buffer]*buffer.Buffer),
 		vcCommitRoots:              make(map[*buffer.Buffer]string),
 		fillColumn:                 70,
 		isSearchCaseFold:           true,
 		saveBufferDeleteTrailingWS: true,
+		visualLines:                true,
 		lspConns:                   make(map[string]*lspConn),
 		lspOpCancel:                nopCancel,
 		lspCbs:                     make(chan func(), 16),
+		version:                    opts.Version,
+		startTime:                  time.Now(),
 	}
 
 	// Apply the default colour theme.
@@ -390,6 +418,10 @@ func New(opts Options) (*Editor, error) {
 	if !opts.Quick {
 		e.loadInitFile()
 	}
+
+	// Apply visual-lines wrap column (may have been changed by init file,
+	// or is the default true value set above).
+	e.applyVisualLines()
 
 	// If the caller read piped stdin data, open it as a *stdin* buffer.
 	if len(opts.StdinData) > 0 {
@@ -624,6 +656,15 @@ func (e *Editor) applyElispConfig() {
 			e.saveBufferDeleteTrailingWS = false
 		}
 	}
+	if v, ok := e.lisp.GetGlobalVar("visual-lines"); ok {
+		switch val := v.(type) {
+		case elisp.Bool:
+			e.visualLines = val.V
+		case elisp.Nil:
+			e.visualLines = false
+		}
+	}
+	e.applyVisualLines()
 }
 
 // ---------------------------------------------------------------------------
@@ -837,6 +878,7 @@ func (e *Editor) ReadMinibuffer(prompt string, done func(string)) {
 	e.minibufPrompt = prompt
 	e.minibufDoneFunc = done
 	e.minibufCompletions = nil // reset; caller may set via SetMinibufCompletions
+	e.minibufPreferTyped = nil // reset; caller may set via SetMinibufPreferTyped
 	e.minibufHint = ""
 	// Clear the minibuffer buffer.
 	e.minibufBuf.Delete(0, e.minibufBuf.Len())
@@ -849,6 +891,13 @@ func (e *Editor) ReadMinibuffer(prompt string, done func(string)) {
 func (e *Editor) SetMinibufCompletions(fn func(string) []string) {
 	e.minibufCompletions = fn
 	e.refreshMinibufCandidates()
+}
+
+// SetMinibufPreferTyped registers a predicate that, when it returns true for
+// the raw typed text, causes Enter to submit the typed text rather than the
+// first popup candidate.  Call immediately after ReadMinibuffer.
+func (e *Editor) SetMinibufPreferTyped(fn func(string) bool) {
+	e.minibufPreferTyped = fn
 }
 
 // commonPrefix returns the longest string that is a prefix of every element
@@ -876,10 +925,14 @@ func (e *Editor) finishMinibuffer() {
 	if !e.minibufActive {
 		return
 	}
-	// If a candidate is selected in the popup, use it; otherwise use the
-	// raw text the user typed.
+	// Use the typed text when:
+	//   (a) the caller says to prefer it (e.g. find-file with a valid path), or
+	//   (b) the user has not explicitly navigated the popup.
+	// Otherwise use the highlighted candidate.
 	input := e.minibufBuf.String()
-	if len(e.minibufCandidates) > 0 {
+	if !e.minibufCandidateChosen &&
+		(e.minibufPreferTyped == nil || !e.minibufPreferTyped(input)) &&
+		len(e.minibufCandidates) > 0 {
 		idx := e.minibufSelectedIdx
 		if idx >= 0 && idx < len(e.minibufCandidates) {
 			input = e.minibufCandidates[idx]
@@ -888,6 +941,8 @@ func (e *Editor) finishMinibuffer() {
 	e.minibufActive = false
 	e.minibufHint = ""
 	e.minibufCandidates = nil
+	e.minibufCandidateChosen = false
+	e.minibufPreferTyped = nil
 	e.minibufLastQuery = ""
 	fn := e.minibufDoneFunc
 	e.minibufDoneFunc = nil
@@ -902,6 +957,8 @@ func (e *Editor) cancelMinibuffer() {
 	e.minibufActive = false
 	e.minibufHint = ""
 	e.minibufCandidates = nil
+	e.minibufCandidateChosen = false
+	e.minibufPreferTyped = nil
 	e.minibufLastQuery = ""
 	e.minibufDoneFunc = nil
 	e.minibufPrompt = ""
@@ -1149,7 +1206,7 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	}
 
 	// When in a diff-mode buffer (*vc diff*, *vc show*), handle q/n/p/Enter.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "diff" {
+	if e.prefixKeymap == nil && (e.ActiveBuffer().Mode() == "diff" || e.ActiveBuffer().Mode() == "vc-show") {
 		if e.vcDiffDispatch(ke) {
 			return
 		}
@@ -1170,8 +1227,15 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	}
 
 	// When in a *vc-annotate* buffer, handle l/d/q.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-annotate" {
+	if e.prefixKeymap == nil && strings.HasPrefix(e.ActiveBuffer().Mode(), "vc-annotate") {
 		if e.vcAnnotateDispatch(ke) {
+			return
+		}
+	}
+
+	// When in a *Help* buffer, q closes it.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "help" {
+		if e.helpDispatch(ke) {
 			return
 		}
 	}
@@ -1299,9 +1363,12 @@ func (e *Editor) showCommandHelp(keySeq, cmdName string) {
 		helpBuf = buffer.NewWithContent("*Help*", sb.String())
 		e.buffers = append(e.buffers, helpBuf)
 	} else {
+		helpBuf.SetReadOnly(false)
 		helpBuf.Delete(0, helpBuf.Len())
 		helpBuf.InsertString(0, sb.String())
 	}
+	helpBuf.SetMode("help")
+	helpBuf.SetReadOnly(true)
 	helpBuf.SetPoint(0)
 	e.activeWin.SetBuf(helpBuf)
 }
@@ -1321,9 +1388,12 @@ func (e *Editor) showVariableHelp(varName string) {
 		helpBuf = buffer.NewWithContent("*Help*", body)
 		e.buffers = append(e.buffers, helpBuf)
 	} else {
+		helpBuf.SetReadOnly(false)
 		helpBuf.Delete(0, helpBuf.Len())
 		helpBuf.InsertString(0, body)
 	}
+	helpBuf.SetMode("help")
+	helpBuf.SetReadOnly(true)
 	helpBuf.SetPoint(0)
 	e.activeWin.SetBuf(helpBuf)
 }
@@ -1539,6 +1609,7 @@ func (e *Editor) refreshMinibufCandidates() {
 	e.minibufCandidates = e.minibufCompletions(query)
 	e.minibufSelectedIdx = 0
 	e.minibufCandidateOffset = 0
+	e.minibufCandidateChosen = false
 }
 
 // minibufSelectNext moves the popup selection one step down.
@@ -1552,6 +1623,7 @@ func (e *Editor) minibufSelectNext() {
 			e.minibufCandidateOffset++
 		}
 	}
+	e.minibufCandidateChosen = true
 }
 
 // minibufSelectPrev moves the popup selection one step up.
@@ -1565,6 +1637,7 @@ func (e *Editor) minibufSelectPrev() {
 			e.minibufCandidateOffset--
 		}
 	}
+	e.minibufCandidateChosen = true
 }
 
 // fuzzyMatch reports whether query is a case-insensitive subsequence of candidate.
@@ -1812,6 +1885,8 @@ func (e *Editor) Redraw() {
 	if e.term == nil {
 		return
 	}
+	// Sync visual-lines wrap column on all windows before rendering.
+	e.applyVisualLines()
 	// Notify LSP of any buffered changes before rendering.
 	e.lspMaybeDidChange(e.ActiveBuffer())
 	e.term.Clear()
@@ -1863,34 +1938,66 @@ func (e *Editor) getSpanCache(buf *buffer.Buffer) *spanCache {
 
 // highlighterFor returns the appropriate syntax highlighter for buf.
 func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
-	switch buf.Mode() {
-	case "go":
+	mode := buf.Mode()
+	switch {
+	case mode == "go":
 		return syntax.GoHighlighter{}
-	case "markdown":
+	case mode == "markdown":
 		return syntax.MarkdownHighlighter{}
-	case modeElisp:
+	case mode == modeElisp:
 		return syntax.ElispHighlighter{}
-	case "python":
+	case mode == "python":
 		return syntax.PythonHighlighter{}
-	case "java":
+	case mode == "java":
 		return syntax.JavaHighlighter{}
-	case "bash":
+	case mode == "bash":
 		return syntax.BashHighlighter{}
-	case "json":
+	case mode == "json":
 		return syntax.JSONHighlighter{}
-	case "diff":
+	case mode == "diff":
 		return syntax.DiffHighlighter{}
-	case "vc-log":
+	case mode == "vc-show":
+		return syntax.VcShowHighlighter{}
+	case mode == "vc-log":
 		return syntax.VcLogHighlighter{}
-	case "vc-annotate":
-		return syntax.VcAnnotateHighlighter{}
-	case "vc-commit":
+	case mode == "vc-grep":
+		return syntax.VcGrepHighlighter{}
+	case mode == "vc-annotate" || strings.HasPrefix(mode, "vc-annotate+"):
+		hl := syntax.VcAnnotateHighlighter{}
+		if _, lang, ok := strings.Cut(mode, "+"); ok {
+			hl.Source = syntax.LangToHighlighter(lang)
+		}
+		return hl
+	case mode == "vc-commit":
 		return syntax.VcCommitHighlighter{}
-	case "makefile":
+	case mode == "makefile":
 		return syntax.MakefileHighlighter{}
 	default:
 		return syntax.NilHighlighter{}
 	}
+}
+
+// helpDispatch handles key events in a *Help* buffer.
+// q closes the buffer and switches to the most recently used non-help buffer.
+func (e *Editor) helpDispatch(ke terminal.KeyEvent) bool {
+	if ke.Key != tcell.KeyRune || ke.Rune != 'q' {
+		return false
+	}
+	cur := e.ActiveBuffer()
+	for _, b := range e.bufferMRU {
+		if b != cur && b.Mode() != "help" {
+			e.activeWin.SetBuf(b)
+			return true
+		}
+	}
+	for _, b := range e.buffers {
+		if b != cur && b.Mode() != "help" {
+			e.activeWin.SetBuf(b)
+			return true
+		}
+	}
+	e.SwitchToBuffer("*scratch*")
+	return true
 }
 
 // faceAtPos returns the syntax face that covers position pos, given a sorted
@@ -2048,6 +2155,10 @@ func (e *Editor) renderModeline(w *window.Window) {
 	name := buf.Name()
 	line, col := buf.LineCol(buf.Point())
 	mode := buf.Mode()
+	// Strip any language suffix from vc-annotate mode (e.g. "vc-annotate+go" → "vc-annotate").
+	if modeBase, _, ok := strings.Cut(mode, "+"); ok && strings.HasPrefix(mode, "vc-annotate") {
+		mode = modeBase
+	}
 	narrow := ""
 	if buf.Narrowed() {
 		narrow = " Narrow"
@@ -2192,14 +2303,21 @@ func (e *Editor) placeCursor() {
 	w := e.activeWin
 	buf := w.Buf()
 	pt := w.Point()
-	line, _ := buf.LineCol(pt)
-	screenRow := w.Top() + (line - w.ScrollLine())
+	// Use VisualRowForPoint so the cursor lands on the correct visual row
+	// when visual line wrapping is active.
+	visualRow := w.VisualRowForPoint()
 	// Clamp to the last text row — never let the cursor land on the modeline.
-	maxTextRow := w.Top() + w.Height() - 2
-	if screenRow > maxTextRow {
-		screenRow = maxTextRow
+	maxTextRow := w.Height() - 2
+	if visualRow > maxTextRow {
+		visualRow = maxTextRow
 	}
-	e.term.ShowCursor(w.Left()+screenColForPoint(buf, pt), screenRow)
+	screenRow := w.Top() + visualRow
+	// When wrapping, the screen column is within the current visual segment.
+	screenCol := screenColForPoint(buf, pt)
+	if w.WrapCol() > 0 {
+		screenCol = screenCol % w.WrapCol()
+	}
+	e.term.ShowCursor(w.Left()+screenCol, screenRow)
 }
 
 // screenColForPoint returns the visual screen column for position pt within
@@ -2220,6 +2338,18 @@ func screenColForPoint(buf *buffer.Buffer, pt int) int {
 // ---------------------------------------------------------------------------
 // Public helpers used by main
 // ---------------------------------------------------------------------------
+
+// applyVisualLines sets the wrapCol on all non-minibuffer windows according to
+// the current visualLines setting (80 when enabled, 0 when disabled).
+func (e *Editor) applyVisualLines() {
+	col := 0
+	if e.visualLines {
+		col = 80
+	}
+	for _, w := range e.windows {
+		w.SetWrapCol(col)
+	}
+}
 
 // OpenFile loads path into a buffer and makes it current.
 // Errors are stored as messages; the function never returns a fatal error.

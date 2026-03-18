@@ -238,6 +238,8 @@ func init() {
 		"Show git blame annotation for the current file (C-x v g).")
 	registerCommand("messages", (*Editor).cmdMessages,
 		"Switch to the *messages* buffer showing recent editor messages.")
+	registerCommand("gomacs-version", (*Editor).cmdGomacsVersion,
+		"Display gomacs version, Go runtime version, and uptime.")
 
 	// ---- narrowing ---------------------------------------------------------
 	registerCommand("narrow-to-region", (*Editor).cmdNarrowToRegion,
@@ -1023,6 +1025,15 @@ func (e *Editor) cmdFindFile() {
 		e.minibufBuf.SetPoint(e.minibufBuf.Len())
 	}
 	e.SetMinibufCompletions(filePathCompletions)
+	e.SetMinibufPreferTyped(func(s string) bool {
+		if strings.HasPrefix(s, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				s = home + s[1:]
+			}
+		}
+		_, err := os.Stat(s)
+		return err == nil
+	})
 }
 
 func (e *Editor) cmdSaveBuffer() {
