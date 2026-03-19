@@ -203,7 +203,7 @@ func (e *Editor) cmdVcDiff() {
 		e.Message("vc-diff: no uncommitted changes")
 		return
 	}
-	e.vcShowOutput("*vc diff*", text, "diff")
+	e.vcShowOutput("*vc-diff*", text, "diff")
 	e.vcLogRoots[e.ActiveBuffer()] = root
 }
 
@@ -219,7 +219,7 @@ func (e *Editor) cmdVcStatus() {
 	if err != nil && text == "" {
 		text = err.Error()
 	}
-	e.vcShowOutput("*vc status*", text, "vc-status")
+	e.vcShowOutput("*vc-status*", text, "vc-status")
 	e.vcLogRoots[e.ActiveBuffer()] = root
 }
 
@@ -785,7 +785,9 @@ func (e *Editor) cmdVcAnnotate() {
 		mode = "vc-annotate+" + lang
 	}
 	e.vcShowOutput("*vc-annotate*", text, mode)
-	e.vcLogRoots[e.ActiveBuffer()] = root
+	annotateBuf := e.ActiveBuffer()
+	e.vcLogRoots[annotateBuf] = root
+	e.vcParent[annotateBuf] = buf
 }
 
 func (e *Editor) vcAnnotateHashAtPoint(buf *buffer.Buffer) string {

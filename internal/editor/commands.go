@@ -315,6 +315,8 @@ func init() {
 		"Check spelling of word at point (uses spell-command, default aspell).")
 	registerCommand("spell", (*Editor).cmdSpell,
 		"Interactively spell-check the current buffer using the configured spell checker.")
+	registerCommand("dabbrev-expand", (*Editor).cmdDabbrevExpand,
+		"Expand word before point to the nearest matching word in any open buffer (M-/).")
 
 	// ---- list navigation ---------------------------------------------------
 	registerCommand("forward-list", (*Editor).cmdForwardList,
@@ -383,17 +385,25 @@ func (e *Editor) cmdNextLine() {
 	buf := e.ActiveBuffer()
 	w := e.activeWin
 
-	// Establish goal column.
+	// Establish goal column as character offset from line start.
 	if w.GoalCol() < 0 {
-		_, col := buf.LineCol(buf.Point())
-		w.SetGoalCol(col)
+		w.SetGoalCol(buf.Point() - buf.BeginningOfLine(buf.Point()))
 	}
 	goal := w.GoalCol()
 
-	line, _ := buf.LineCol(buf.Point())
-	target := line + n
-	pos := buf.PosForLineCol(target, goal)
-	buf.SetPoint(pos)
+	for range n {
+		eol := buf.EndOfLine(buf.Point())
+		if eol >= buf.Len() {
+			break // already on last line
+		}
+		nextStart := eol + 1 // first char of next line
+		nextEol := buf.EndOfLine(nextStart)
+		pos := nextStart + goal
+		if pos > nextEol {
+			pos = nextEol
+		}
+		buf.SetPoint(pos)
+	}
 }
 
 func (e *Editor) cmdPreviousLine() {
@@ -403,15 +413,23 @@ func (e *Editor) cmdPreviousLine() {
 	w := e.activeWin
 
 	if w.GoalCol() < 0 {
-		_, col := buf.LineCol(buf.Point())
-		w.SetGoalCol(col)
+		w.SetGoalCol(buf.Point() - buf.BeginningOfLine(buf.Point()))
 	}
 	goal := w.GoalCol()
 
-	line, _ := buf.LineCol(buf.Point())
-	target := max(line-n, 1)
-	pos := buf.PosForLineCol(target, goal)
-	buf.SetPoint(pos)
+	for range n {
+		start := buf.BeginningOfLine(buf.Point())
+		if start == 0 {
+			break // already on first line
+		}
+		prevEol := start - 1 // the '\n' ending the previous line
+		prevStart := buf.BeginningOfLine(prevEol)
+		pos := prevStart + goal
+		if pos > prevEol {
+			pos = prevEol
+		}
+		buf.SetPoint(pos)
+	}
 }
 
 func (e *Editor) cmdBeginningOfLine() {
@@ -1654,7 +1672,15 @@ func filePathCompletions(prefix string) []string {
 		}
 		results = append(results, full)
 	}
-	sort.Strings(results)
+	// Sort by match quality (prefix > substring > subsequence), then alphabetically.
+	sort.Slice(results, func(i, j int) bool {
+		si := fuzzyScore(filepath.Base(results[i]), base)
+		sj := fuzzyScore(filepath.Base(results[j]), base)
+		if si != sj {
+			return si < sj
+		}
+		return results[i] < results[j]
+	})
 	return results
 }
 

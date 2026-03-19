@@ -219,6 +219,12 @@ type Editor struct {
 	version string
 	// startTime is when the editor was started (for uptime display).
 	startTime time.Time
+
+	// dabbrev state: last expansion prefix and list of remaining candidates.
+	dabbrevPrefix     string
+	dabbrevCandidates []string
+	dabbrevIdx        int
+	dabbrevLastEnd    int // end of the last expansion in buffer, for cycling
 }
 
 // spanCache holds pre-computed highlighting data for a buffer.  It is
@@ -551,6 +557,7 @@ func (e *Editor) setupKeymaps() {
 	gk.Bind(keymap.MetaKey('y'), "yank-pop")
 	gk.Bind(keymap.MetaKey('d'), "kill-word")
 	gk.Bind(keymap.MakeKey(tcell.KeyBackspace, 0, tcell.ModAlt), "backward-kill-word")
+	gk.Bind(keymap.MetaKey('/'), "dabbrev-expand")
 	gk.Bind(keymap.CtrlKey('t'), "transpose-chars")
 	gk.Bind(keymap.CtrlKey('o'), "open-line")
 	gk.Bind(keymap.MetaKey('t'), "transpose-words")
@@ -958,11 +965,16 @@ func (e *Editor) finishMinibuffer() {
 	//   (b) the user has not explicitly navigated the popup.
 	// Otherwise use the highlighted candidate.
 	input := e.minibufBuf.String()
-	if !e.minibufCandidateChosen &&
-		(e.minibufPreferTyped == nil || !e.minibufPreferTyped(input)) &&
-		len(e.minibufCandidates) > 0 {
+	if len(e.minibufCandidates) > 0 {
 		idx := e.minibufSelectedIdx
-		if idx >= 0 && idx < len(e.minibufCandidates) {
+		if idx < 0 || idx >= len(e.minibufCandidates) {
+			idx = 0
+		}
+		if e.minibufCandidateChosen {
+			// User explicitly navigated the popup — always use their selection.
+			input = e.minibufCandidates[idx]
+		} else if e.minibufPreferTyped == nil || !e.minibufPreferTyped(input) {
+			// No explicit navigation; typed text is not a valid existing path — use top candidate.
 			input = e.minibufCandidates[idx]
 		}
 	}
@@ -1700,6 +1712,23 @@ func fuzzyMatch(candidate, query string) bool {
 	return false
 }
 
+// fuzzyScore returns a rank for how well query matches candidate (lower = better).
+// Priority: prefix match (0) > substring match (1) > subsequence match (2).
+func fuzzyScore(candidate, query string) int {
+	if query == "" {
+		return 2
+	}
+	lower := strings.ToLower(candidate)
+	q := strings.ToLower(query)
+	if strings.HasPrefix(lower, q) {
+		return 0
+	}
+	if strings.Contains(lower, q) {
+		return 1
+	}
+	return 2
+}
+
 // selfInsert inserts a printable rune at point in the active buffer.
 func (e *Editor) selfInsert(r rune) {
 	buf := e.ActiveBuffer()
@@ -1812,6 +1841,11 @@ func (e *Editor) isearchHandleKey(ke terminal.KeyEvent) {
 		if ke.Key == tcell.KeyRune && ke.Mod == 0 && unicode.IsPrint(ke.Rune) {
 			e.isearchStr += string(ke.Rune)
 			e.isearchFind()
+		} else {
+			// Any other key (motion commands, etc.) exits isearch and executes the key.
+			e.isearching = false
+			e.Message("")
+			e.dispatchParsedKey(ke)
 		}
 	}
 }
@@ -2121,6 +2155,17 @@ func (e *Editor) renderWindow(w *window.Window) {
 
 	// Spell-check spans (nil when disabled or mode not applicable).
 	spellSpans := e.getSpellSpans(buf)
+	// Compute the word bounds around the cursor so we can suppress spell
+	// highlighting on the word currently being typed.
+	pt := buf.Point()
+	curWordStart := pt
+	for curWordStart > 0 && isSpellWordRune(buf.RuneAt(curWordStart-1)) {
+		curWordStart--
+	}
+	curWordEnd := pt
+	for curWordEnd < buf.Len() && isSpellWordRune(buf.RuneAt(curWordEnd)) {
+		curWordEnd++
+	}
 
 	viewLines := w.ViewLines()
 	// ViewLines returns height rows; only use the text rows (not the modeline row).
@@ -2148,8 +2193,8 @@ func (e *Editor) renderWindow(w *window.Window) {
 			}
 			pos := vl.StartPos + bufOffset
 			face := faceAtPos(spans, pos)
-			// Overlay spell-error underline.
-			if isSpellErrorAt(spellSpans, pos) {
+			// Overlay spell-error underline (skip word currently being typed).
+			if isSpellErrorAt(spellSpans, pos) && !(pos >= curWordStart && pos < curWordEnd) {
 				face.Underline = true
 				face.UnderlineColor = "red"
 			}

@@ -17,12 +17,18 @@ Simple TTY only Emacs clone written in Go.
   wrap visually (file content unchanged). Disable with `(setq visual-lines nil)`.
 - Spell checking with `aspell` (auto-enabled for `markdown`, `text`,
   `fundamental` modes; only comments checked for code modes).
-  Configurable with `(setq spell-command "/usr/bin/aspell")`.
-  `M-x spell` for interactive spell checking. Misspelled words are underlined.
+  Configurable with `(setq spell-command "/usr/bin/aspell")` and
+  `(setq spell-language "en")`.
+  `M-x spell` for interactive spell checking (SPC=skip, r=replace,
+  i=add to personal dictionary, q=quit). Misspelled words are underlined
+  in red; the word currently being typed is never highlighted.
 - `forward-list` (<kbd>C-M-n</kbd>) navigates to the matching closing
   bracket/paren/brace, or closing sh keyword (`fi`, `done`, `esac`) in bash mode.
 - `backward-list` (<kbd>C-M-p</kbd>) navigates to the matching opening
   bracket/paren/brace, or opening sh keyword in bash mode.
+- `dabbrev-expand` (<kbd>M-/</kbd>) completes the word before point using words
+  from the current buffer (nearest first), other open buffers, then command names.
+  Repeated <kbd>M-/</kbd> cycles through candidates.
 
 # LSP support
 
@@ -75,8 +81,23 @@ Cheers,
 
 # Known issues
 
-None currently known.
+No syntax highlighting in `*vc-status`.
+
+Interactive spell checker doesn't offer candidates.
+
+*vc log* should navigate to next and previous with `n` and `p`.
 
 # Missing features
 
-None currently known.
+The code API doc in minibuffer should have syntax highlighting.
+
+For all minibuffer commands, there should be history. So when invoking
+`vc-grep` for example, hitting the arrow up arrow should cycle through
+the previous inputs to that minibuffer command.
+
+`count-buffer-lines` bound to `C-x l` should list the number of lines
+in the current buffer. Should also say how many lines are before and
+after point.
+
+`yaml-mode` should provide syntax highlighting and indentation for YAML.
+

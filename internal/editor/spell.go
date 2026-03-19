@@ -360,6 +360,41 @@ func (e *Editor) cmdSpell() {
 	e.spellShowCurrent()
 }
 
+// aspellSuggest returns replacement suggestions for word using aspell pipe mode.
+// Returns nil if aspell is unavailable or has no suggestions.
+func aspellSuggest(cmd, lang, word string) []string {
+	args := []string{"-a"}
+	if lang != "" {
+		args = append(args, "--lang="+lang)
+	}
+	c := exec.Command(cmd, args...) //nolint:gosec
+	c.Stdin = strings.NewReader(word + "\n")
+	out, err := c.Output()
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		// Format: "& word count offset: sug1, sug2, ..."
+		if !strings.HasPrefix(line, "& ") {
+			continue
+		}
+		colon := strings.Index(line, ": ")
+		if colon < 0 {
+			continue
+		}
+		parts := strings.Split(line[colon+2:], ", ")
+		var result []string
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				result = append(result, s)
+			}
+		}
+		return result
+	}
+	return nil
+}
+
 // spellShowCurrent moves point to the current spell error and shows the prompt.
 func (e *Editor) spellShowCurrent() {
 	if e.spellErrorIdx >= len(e.spellErrors) {
@@ -372,8 +407,17 @@ func (e *Editor) spellShowCurrent() {
 	buf.SetPoint(se.start)
 	e.activeWin.EnsurePointVisible()
 	total := len(e.spellErrors)
-	e.Message("Misspelled: %q  [%d/%d]  SPC=skip  r=replace  i=add to dict  q=quit",
-		se.word, e.spellErrorIdx+1, total)
+	sugs := aspellSuggest(e.spellCommand, e.spellLanguage, se.word)
+	if len(sugs) > 4 {
+		sugs = sugs[:4]
+	}
+	if len(sugs) > 0 {
+		e.Message("Misspelled: %q  [%d/%d]  Suggestions: %s  SPC=skip  r=replace  i=add  q=quit",
+			se.word, e.spellErrorIdx+1, total, strings.Join(sugs, ", "))
+	} else {
+		e.Message("Misspelled: %q  [%d/%d]  SPC=skip  r=replace  i=add to dict  q=quit",
+			se.word, e.spellErrorIdx+1, total)
+	}
 }
 
 // spellHandleKey processes a key press while the interactive spell check is active.
