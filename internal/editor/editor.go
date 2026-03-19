@@ -1115,7 +1115,7 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 		b.SetMode("java")
 	case ext == ".txt":
 		b.SetMode("text")
-	case ext == ".sh" || ext == ".bash":
+	case ext == ".sh" || ext == ".bash" || base == ".bashrc" || base == ".zshrc":
 		b.SetMode("bash")
 	case ext == ".json":
 		b.SetMode("json")
