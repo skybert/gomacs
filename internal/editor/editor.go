@@ -2356,7 +2356,7 @@ func (e *Editor) renderModeline(w *window.Window) {
 	label := fmt.Sprintf(" %s  %-20s  (%s%s%s%s)  L%d C%d ", modifiedMark, name, mode, narrow, macro, diag, line, col)
 	// Pad to window width.
 	for len(label) < winW {
-		label += "-"
+		label += " "
 	}
 	if len(label) > winW {
 		label = label[:winW]
