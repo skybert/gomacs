@@ -15,6 +15,14 @@ Simple TTY only Emacs clone written in Go.
   and <kbd>C-h k</kbd> `describe-key`
 - `visual-line-mode` enabled by default: lines longer than 80 characters
   wrap visually (file content unchanged). Disable with `(setq visual-lines nil)`.
+- Spell checking with `aspell` (auto-enabled for `markdown`, `text`,
+  `fundamental` modes; only comments checked for code modes).
+  Configurable with `(setq spell-command "/usr/bin/aspell")`.
+  `M-x spell` for interactive spell checking. Misspelled words are underlined.
+- `forward-list` (<kbd>C-M-n</kbd>) navigates to the matching closing
+  bracket/paren/brace, or closing sh keyword (`fi`, `done`, `esac`) in bash mode.
+- `backward-list` (<kbd>C-M-p</kbd>) navigates to the matching opening
+  bracket/paren/brace, or opening sh keyword in bash mode.
 
 # LSP support
 
@@ -64,3 +72,11 @@ be better off using the real thing.
 Cheers,
 
 -Torstein
+
+# Known issues
+
+None currently known.
+
+# Missing features
+
+None currently known.

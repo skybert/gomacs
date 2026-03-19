@@ -201,6 +201,18 @@ type Editor struct {
 	// scrolling (C-n/C-p) does not re-highlight the whole file every frame.
 	spanCaches map[*buffer.Buffer]*spanCache
 
+	// spellCommand is the spell-checker executable (default "aspell").
+	// Set to "" to disable spell checking.
+	spellCommand string
+	// spellCaches caches spell-error spans per buffer, keyed by changeGen.
+	spellCaches map[*buffer.Buffer]*spellCache
+	// spellPending records the changeGen of an in-flight async spell check per buffer.
+	spellPending map[*buffer.Buffer]int
+	// Interactive spell-check state (M-x spell).
+	spellActive   bool
+	spellErrors   []spellError
+	spellErrorIdx int
+
 	// version is the build version string (embedded at compile time).
 	version string
 	// startTime is when the editor was started (for uptime display).
@@ -256,6 +268,7 @@ func New(opts Options) (*Editor, error) {
 		isSearchCaseFold:           true,
 		saveBufferDeleteTrailingWS: true,
 		visualLines:                true,
+		spellCommand:               "aspell",
 		lspConns:                   make(map[string]*lspConn),
 		lspOpCancel:                nopCancel,
 		lspCbs:                     make(chan func(), 16),
@@ -568,6 +581,8 @@ func (e *Editor) setupKeymaps() {
 
 	// C-M bindings (represented as Meta + Ctrl combos)
 	gk.Bind(keymap.MakeKey(tcell.KeyRune, '\\', tcell.ModCtrl|tcell.ModAlt), "indent-region")
+	gk.Bind(keymap.MakeKey(tcell.KeyRune, 'n', tcell.ModCtrl|tcell.ModAlt), "forward-list")
+	gk.Bind(keymap.MakeKey(tcell.KeyRune, 'p', tcell.ModCtrl|tcell.ModAlt), "backward-list")
 
 	// ---- C-x bindings -------------------------------------------------------
 	cx.Bind(keymap.CtrlKey('f'), "find-file")
@@ -662,6 +677,11 @@ func (e *Editor) applyElispConfig() {
 			e.visualLines = val.V
 		case elisp.Nil:
 			e.visualLines = false
+		}
+	}
+	if v, ok := e.lisp.GetGlobalVar("spell-command"); ok {
+		if s, ok := v.(elisp.StringVal); ok && s.V != "" {
+			e.spellCommand = s.V
 		}
 	}
 	e.applyVisualLines()
@@ -1045,6 +1065,8 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 		b.SetMode("python")
 	case ext == ".java":
 		b.SetMode("java")
+	case ext == ".txt":
+		b.SetMode("text")
 	case ext == ".sh" || ext == ".bash":
 		b.SetMode("bash")
 	case ext == ".json":
@@ -1099,6 +1121,12 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	// Query-replace intercepts keys.
 	if e.queryReplaceActive {
 		e.queryReplaceHandleKey(ke)
+		return
+	}
+
+	// Interactive spell check intercepts keys.
+	if e.spellActive {
+		e.spellHandleKey(ke)
 		return
 	}
 
@@ -2078,6 +2106,9 @@ func (e *Editor) renderWindow(w *window.Window) {
 		// reserve last row for modeline
 		winH-1, 1)
 
+	// Spell-check spans (nil when disabled or mode not applicable).
+	spellSpans := e.getSpellSpans(buf)
+
 	viewLines := w.ViewLines()
 	// ViewLines returns height rows; only use the text rows (not the modeline row).
 	for rowIdx := 0; rowIdx < textH && rowIdx < len(viewLines); rowIdx++ {
@@ -2104,6 +2135,10 @@ func (e *Editor) renderWindow(w *window.Window) {
 			}
 			pos := vl.StartPos + bufOffset
 			face := faceAtPos(spans, pos)
+			// Overlay spell-error underline.
+			if isSpellErrorAt(spellSpans, pos) {
+				face.Underline = true
+			}
 			// Overlay region.
 			if regionActive && pos >= regionStart && pos < regionEnd {
 				face = syntax.FaceRegion

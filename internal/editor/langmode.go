@@ -29,6 +29,7 @@ var langModes = []langModeInfo{
 	{modeName: "elisp", rootMarkers: []string{}},
 	{modeName: "json", rootMarkers: []string{}},
 	{modeName: "makefile", rootMarkers: []string{}},
+	{modeName: "text", rootMarkers: []string{}},
 	{modeName: "fundamental", rootMarkers: []string{}},
 }
 
@@ -91,6 +92,13 @@ func (e *Editor) cmdElispMode() {
 	e.clearArg()
 	e.setLangMode(e.ActiveBuffer(), "elisp")
 	e.Message("elisp-mode")
+}
+
+// cmdTextMode activates Text mode (plain-text spell-checking, no syntax highlighting).
+func (e *Editor) cmdTextMode() {
+	e.clearArg()
+	e.setLangMode(e.ActiveBuffer(), "text")
+	e.Message("text-mode")
 }
 
 // cmdFundamentalMode activates Fundamental mode (no syntax or indentation).

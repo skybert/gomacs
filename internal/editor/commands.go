@@ -286,6 +286,8 @@ func init() {
 		"Select Emacs Lisp mode for the current buffer.")
 	registerCommand("fundamental-mode", (*Editor).cmdFundamentalMode,
 		"Select Fundamental mode (no syntax highlighting or indentation).")
+	registerCommand("text-mode", (*Editor).cmdTextMode,
+		"Select Text mode (plain text with spell checking).")
 	registerCommand("makefile-mode", (*Editor).cmdMakefileMode,
 		"Select Makefile mode for the current buffer.")
 
@@ -308,9 +310,17 @@ func init() {
 	registerCommand("json-mode", (*Editor).cmdJsonMode,
 		"Activate JSON mode on the current buffer.")
 
-	// ---- misc stubs --------------------------------------------------------
+	// ---- spell checking ----------------------------------------------------
 	registerCommand("ispell-word", (*Editor).cmdIspellWord,
-		"Check spelling of word at point.")
+		"Check spelling of word at point (uses spell-command, default aspell).")
+	registerCommand("spell", (*Editor).cmdSpell,
+		"Interactively spell-check the current buffer using the configured spell checker.")
+
+	// ---- list navigation ---------------------------------------------------
+	registerCommand("forward-list", (*Editor).cmdForwardList,
+		"Move forward past the next balanced list delimiter or closing bracket.")
+	registerCommand("backward-list", (*Editor).cmdBackwardList,
+		"Move backward past the previous balanced list delimiter or opening bracket.")
 }
 
 // ---------------------------------------------------------------------------
