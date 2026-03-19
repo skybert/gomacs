@@ -399,6 +399,7 @@ func aspellSuggest(cmd, lang, word string) []string {
 func (e *Editor) spellShowCurrent() {
 	if e.spellErrorIdx >= len(e.spellErrors) {
 		e.spellActive = false
+		e.spellCurrentSugs = nil
 		e.Message("Spell check done")
 		return
 	}
@@ -411,9 +412,14 @@ func (e *Editor) spellShowCurrent() {
 	if len(sugs) > 4 {
 		sugs = sugs[:4]
 	}
+	e.spellCurrentSugs = sugs
 	if len(sugs) > 0 {
-		e.Message("Misspelled: %q  [%d/%d]  Suggestions: %s  SPC=skip  r=replace  i=add  q=quit",
-			se.word, e.spellErrorIdx+1, total, strings.Join(sugs, ", "))
+		var sugParts []string
+		for i, s := range sugs {
+			sugParts = append(sugParts, fmt.Sprintf("%d=%s", i+1, s))
+		}
+		e.Message("Misspelled: %q  [%d/%d]  %s  SPC=skip  r=replace  i=add  q=quit",
+			se.word, e.spellErrorIdx+1, total, strings.Join(sugParts, "  "))
 	} else {
 		e.Message("Misspelled: %q  [%d/%d]  SPC=skip  r=replace  i=add to dict  q=quit",
 			se.word, e.spellErrorIdx+1, total)
@@ -432,6 +438,31 @@ func (e *Editor) spellHandleKey(ke terminal.KeyEvent) {
 
 	case ke.Key == tcell.KeyRune && (ke.Rune == ' ' || ke.Rune == 'n'):
 		e.spellErrorIdx++
+		e.spellShowCurrent()
+
+	case ke.Key == tcell.KeyRune && ke.Rune >= '1' && ke.Rune <= '9':
+		// Select a suggestion by number.
+		idx := int(ke.Rune - '1')
+		if idx >= len(e.spellCurrentSugs) {
+			e.spellShowCurrent()
+			return
+		}
+		if e.spellErrorIdx >= len(e.spellErrors) {
+			return
+		}
+		se := e.spellErrors[e.spellErrorIdx]
+		replacement := e.spellCurrentSugs[idx]
+		delta := len([]rune(replacement)) - (se.end - se.start)
+		e.ActiveBuffer().ReplaceString(se.start, se.end-se.start, replacement)
+		for i := e.spellErrorIdx + 1; i < len(e.spellErrors); i++ {
+			e.spellErrors[i].start += delta
+			e.spellErrors[i].end += delta
+		}
+		e.spellErrors = append(
+			e.spellErrors[:e.spellErrorIdx],
+			e.spellErrors[e.spellErrorIdx+1:]...,
+		)
+		e.spellActive = true
 		e.spellShowCurrent()
 
 	case ke.Key == tcell.KeyRune && ke.Rune == 'r':

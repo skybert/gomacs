@@ -106,6 +106,12 @@ type Editor struct {
 	minibufSelectedIdx     int
 	minibufCandidateOffset int
 	minibufLastQuery       string
+	// minibufHistory stores per-prompt input history (most recent first).
+	// Keyed by the prompt string so different commands keep separate histories.
+	minibufHistory      map[string][]string
+	minibufHistoryIdx   int    // -1 = not in history mode; >=0 = index into hist
+	minibufHistorySaved string // text saved before entering history navigation
+
 	// minibufCandidateChosen is true only when the user has explicitly
 	// navigated the popup (Tab/Down/Up), so Enter uses the highlighted
 	// candidate instead of the raw typed text.
@@ -211,9 +217,10 @@ type Editor struct {
 	// spellPending records the changeGen of an in-flight async spell check per buffer.
 	spellPending map[*buffer.Buffer]int
 	// Interactive spell-check state (M-x spell).
-	spellActive   bool
-	spellErrors   []spellError
-	spellErrorIdx int
+	spellActive      bool
+	spellErrors      []spellError
+	spellErrorIdx    int
+	spellCurrentSugs []string // cached suggestions for the current error
 
 	// version is the build version string (embedded at compile time).
 	version string
@@ -613,6 +620,7 @@ func (e *Editor) setupKeymaps() {
 	cx.Bind(keymap.PlainKey('h'), "mark-whole-buffer")
 	cx.Bind(keymap.PlainKey('d'), "dired")
 	cx.Bind(keymap.PlainKey('='), "what-cursor-position")
+	cx.Bind(keymap.PlainKey('l'), "count-buffer-lines")
 	cx.Bind(keymap.CtrlKey('o'), "delete-blank-lines")
 	cx.Bind(keymap.CtrlKey('u'), "upcase-region")
 	cx.Bind(keymap.CtrlKey('l'), "downcase-region")
@@ -915,6 +923,8 @@ func (e *Editor) ReadMinibuffer(prompt string, done func(string)) {
 	e.minibufCompletions = nil // reset; caller may set via SetMinibufCompletions
 	e.minibufPreferTyped = nil // reset; caller may set via SetMinibufPreferTyped
 	e.minibufHint = ""
+	e.minibufHistoryIdx = -1
+	e.minibufHistorySaved = ""
 	// Clear the minibuffer buffer.
 	e.minibufBuf.Delete(0, e.minibufBuf.Len())
 	e.minibufBuf.SetPoint(0)
@@ -976,6 +986,24 @@ func (e *Editor) finishMinibuffer() {
 		} else if e.minibufPreferTyped == nil || !e.minibufPreferTyped(input) {
 			// No explicit navigation; typed text is not a valid existing path — use top candidate.
 			input = e.minibufCandidates[idx]
+		}
+	}
+	// Save non-empty input to history for this prompt.
+	if input != "" {
+		prompt := e.minibufPrompt
+		if e.minibufHistory == nil {
+			e.minibufHistory = make(map[string][]string)
+		}
+		hist := e.minibufHistory[prompt]
+		filtered := hist[:0]
+		for _, h := range hist {
+			if h != input {
+				filtered = append(filtered, h)
+			}
+		}
+		e.minibufHistory[prompt] = append([]string{input}, filtered...)
+		if len(e.minibufHistory[prompt]) > 50 {
+			e.minibufHistory[prompt] = e.minibufHistory[prompt][:50]
 		}
 	}
 	e.minibufActive = false
@@ -1091,6 +1119,8 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 		b.SetMode("bash")
 	case ext == ".json":
 		b.SetMode("json")
+	case ext == ".yaml" || ext == ".yml":
+		b.SetMode("yaml")
 	case ext == ".mk" || base == "makefile" || base == "gnumakefile" || base == "bsdmakefile":
 		b.SetMode("makefile")
 	default:
@@ -1497,9 +1527,17 @@ func (e *Editor) dispatchMinibufKey(ke terminal.KeyEvent) {
 			e.minibufComplete()
 		}
 	case tcell.KeyDown:
-		e.minibufSelectNext()
+		if len(e.minibufCandidates) > 0 {
+			e.minibufSelectNext()
+		} else {
+			e.minibufHistoryNext()
+		}
 	case tcell.KeyUp:
-		e.minibufSelectPrev()
+		if len(e.minibufCandidates) > 0 {
+			e.minibufSelectPrev()
+		} else {
+			e.minibufHistoryPrev()
+		}
 	case tcell.KeyCtrlN:
 		e.minibufSelectNext()
 	case tcell.KeyCtrlP:
@@ -1691,6 +1729,51 @@ func (e *Editor) minibufSelectPrev() {
 		}
 	}
 	e.minibufCandidateChosen = true
+}
+
+// minibufHistoryPrev navigates to the previous (older) history entry.
+func (e *Editor) minibufHistoryPrev() {
+	if e.minibufHistory == nil {
+		return
+	}
+	hist := e.minibufHistory[e.minibufPrompt]
+	if len(hist) == 0 {
+		return
+	}
+	if e.minibufHistoryIdx == -1 {
+		e.minibufHistorySaved = e.minibufBuf.String()
+	}
+	if e.minibufHistoryIdx < len(hist)-1 {
+		e.minibufHistoryIdx++
+		text := hist[e.minibufHistoryIdx]
+		e.minibufBuf.Delete(0, e.minibufBuf.Len())
+		e.minibufBuf.InsertString(0, text)
+		e.minibufBuf.SetPoint(len([]rune(text)))
+		e.refreshMinibufCandidates()
+	}
+}
+
+// minibufHistoryNext navigates to the next (newer) history entry, restoring
+// the saved text when the beginning of history is reached.
+func (e *Editor) minibufHistoryNext() {
+	if e.minibufHistoryIdx == -1 {
+		return
+	}
+	e.minibufHistoryIdx--
+	var text string
+	if e.minibufHistoryIdx < 0 {
+		text = e.minibufHistorySaved
+		e.minibufHistoryIdx = -1
+	} else {
+		hist := e.minibufHistory[e.minibufPrompt]
+		if e.minibufHistoryIdx < len(hist) {
+			text = hist[e.minibufHistoryIdx]
+		}
+	}
+	e.minibufBuf.Delete(0, e.minibufBuf.Len())
+	e.minibufBuf.InsertString(0, text)
+	e.minibufBuf.SetPoint(len([]rune(text)))
+	e.refreshMinibufCandidates()
 }
 
 // fuzzyMatch reports whether query is a case-insensitive subsequence of candidate.
@@ -2029,6 +2112,8 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.BashHighlighter{}
 	case mode == "json":
 		return syntax.JSONHighlighter{}
+	case mode == "yaml":
+		return syntax.YAMLHighlighter{}
 	case mode == "diff":
 		return syntax.DiffHighlighter{}
 	case mode == "vc-show":
@@ -2037,6 +2122,8 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.VcLogHighlighter{}
 	case mode == "vc-grep":
 		return syntax.VcGrepHighlighter{}
+	case mode == "vc-status":
+		return syntax.VcStatusHighlighter{}
 	case mode == "vc-annotate" || strings.HasPrefix(mode, "vc-annotate+"):
 		hl := syntax.VcAnnotateHighlighter{}
 		if _, lang, ok := strings.Cut(mode, "+"); ok {
@@ -2194,7 +2281,7 @@ func (e *Editor) renderWindow(w *window.Window) {
 			pos := vl.StartPos + bufOffset
 			face := faceAtPos(spans, pos)
 			// Overlay spell-error underline (skip word currently being typed).
-			if isSpellErrorAt(spellSpans, pos) && !(pos >= curWordStart && pos < curWordEnd) {
+			if isSpellErrorAt(spellSpans, pos) && (pos < curWordStart || pos >= curWordEnd) {
 				face.Underline = true
 				face.UnderlineColor = "red"
 			}

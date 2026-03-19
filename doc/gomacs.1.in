@@ -103,6 +103,38 @@ C\-x (	Start recording macro
 C\-x )	Stop recording macro
 C\-x e	Execute last macro
 .TE
+.SS Version Control (C\-x v prefix)
+.TS
+l l.
+C\-x v l	Show git log (vc\-print\-log)
+C\-x v =	Show uncommitted diff (vc\-diff)
+C\-x v s	Show repository status (vc\-status)
+C\-x v v	Stage file or open commit buffer (vc\-next\-action)
+C\-x v G	Grep across the repository (vc\-grep)
+C\-x v g	Annotate / git blame current file (vc\-annotate)
+.TE
+.PP
+In vc\-log, vc\-status, vc\-annotate and vc\-show buffers:
+.B q
+returns to the previous buffer,
+.B d
+or
+.B RET
+shows a diff,
+.B l
+shows the commit log message.  In vc\-diff/vc\-show buffers,
+.B n/p
+jump between hunks and
+.B RET
+navigates to the source line.
+.PP
+In a
+.B *vc\-commit*
+buffer, write a commit message and press
+.B C\-c C\-c
+to commit or
+.B C\-c C\-k
+to abort.
 .SS Shell
 .TS
 l l.
@@ -116,6 +148,7 @@ M\-x sort\-lines	Sort lines in region (or whole buffer)
 M\-x delete\-duplicate\-lines	Remove duplicate lines from region
 M\-x count\-words	Count words in buffer or region
 M\-x fill\-column	Set fill column
+C\-x l	Count buffer lines (total, before and after point)
 .TE
 .SS LSP (Language Server Protocol)
 .TS
@@ -145,6 +178,29 @@ g	Refresh listing
 ^	Go to parent directory
 q	Quit dired
 .TE
+.SS Spell Checking
+.TS
+l l.
+M\-x spell	Interactive spell check of current buffer
+M\-$ (M\-x ispell\-word)	Check spelling of word at point
+.TE
+.PP
+During interactive spell check:
+.B SPC/n
+skips the word,
+.B 1\-4
+selects a suggestion by number,
+.B r
+prompts for a replacement,
+.B i
+adds the word to the personal dictionary, and
+.B q
+quits.
+.SS Minibuffer History
+The Up and Down arrow keys cycle through previous inputs for each
+minibuffer command (e.g.\&
+.BR vc\-grep ", " goto\-line )
+when no completion popup is active.
 .SS Major Modes
 .TS
 l l.
@@ -155,11 +211,14 @@ M\-x bash\-mode	Bash/sh source
 M\-x markdown\-mode	Markdown
 M\-x elisp\-mode	Emacs Lisp
 M\-x json\-mode	JSON
+M\-x yaml\-mode	YAML
+M\-x makefile\-mode	Makefile
+M\-x text\-mode	Plain text (spell checking enabled)
 M\-x fundamental\-mode	No syntax or indentation
 .TE
 .PP
 Modes are set automatically from the file extension
-(.go, .py, .java, .sh/.bash, .md/.markdown, .el, .json).
+(.go, .py, .java, .sh/.bash, .md/.markdown, .el, .json, .yaml/.yml, .mk/Makefile).
 .SS Help
 .TS
 l l.
@@ -215,10 +274,47 @@ Per\-level indentation string for JSON buffers.
 Default: two spaces.
 Example: \fB(setq json\-indent 4)\fR
 .TP
+.B yaml\-indent
+Per\-level indentation string for YAML buffers.
+Default: two spaces.
+Example: \fB(setq yaml\-indent 2)\fR
+.TP
 .B markdown\-indent
 Per\-level indentation string for Markdown buffers.
 Default: two spaces.
 Example: \fB(setq markdown\-indent 4)\fR
+.TP
+.B save\-buffer\-delete\-trailing\-whitespace
+When non\-nil (the default), trailing whitespace is deleted automatically
+when a buffer is saved.  Set to
+.B nil
+to disable.
+Default: t.
+Example: \fB(setq save\-buffer\-delete\-trailing\-whitespace nil)\fR
+.TP
+.B visual\-lines
+When non\-nil (the default), lines longer than 80 characters wrap visually;
+the file content is unchanged.  Set to
+.B nil
+to disable wrapping.
+Default: t.
+Example: \fB(setq visual\-lines nil)\fR
+.TP
+.B spell\-command
+Path to the spell\-checker executable.  Set to an empty string to disable
+spell checking.
+Default: "aspell".
+Example: \fB(setq spell\-command "/usr/bin/aspell")\fR
+.TP
+.B spell\-language
+Language code passed to aspell (e.g. "en", "de", "fr").
+Default: "en".
+Example: \fB(setq spell\-language "de")\fR
+.TP
+.B lsp\-completion\-min\-chars
+Minimum number of characters typed before LSP auto\-completion is triggered.
+Default: 1.
+Example: \fB(setq lsp\-completion\-min\-chars 3)\fR
 .SS Key bindings
 Custom key bindings can be set in the init file using
 .BR global\-set\-key :

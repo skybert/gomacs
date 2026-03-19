@@ -129,6 +129,18 @@ func (e *Editor) cmdPreviousError() {
 	e.Message("previous-error: not yet implemented")
 }
 
+// cmdCountBufferLines shows total lines in the buffer plus how many are before
+// and after point (C-x l).
+func (e *Editor) cmdCountBufferLines() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	line, _ := buf.LineCol(buf.Point())
+	total := buf.LineCount()
+	before := line - 1
+	after := total - line
+	e.Message("Buffer has %d lines; point on line %d (%d before, %d after)", total, line, before, after)
+}
+
 // cmdMessages switches to the *messages* buffer, creating it if needed.
 func (e *Editor) cmdMessages() {
 	b := e.FindBuffer("*messages*")

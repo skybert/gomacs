@@ -315,7 +315,74 @@ func (VcCommitHighlighter) Highlight(text string, start, end int) []Span {
 	return spans
 }
 
-// isHexRune returns true if r is a hexadecimal digit.
+// VcStatusHighlighter highlights git status output.
+// Section headers end with a colon and are shown as keywords.
+// Status labels (modified:, new file:, deleted:, renamed:) are coloured
+// by type.  Hint lines starting with "(use " are shown as comments.
+// The first line "On branch …" is shown as a bold header.
+type VcStatusHighlighter struct{}
+
+func (VcStatusHighlighter) Highlight(text string, start, end int) []Span {
+	runes := []rune(text)
+	var spans []Span
+	i := start
+	for i < end {
+		lineStart := i
+		for i < end && runes[i] != '\n' {
+			i++
+		}
+		lineEnd := i
+		if i < end {
+			i++
+		}
+		if lineStart >= lineEnd {
+			continue
+		}
+		line := string(runes[lineStart:lineEnd])
+		trimmed := strings.TrimSpace(line)
+
+		switch {
+		case strings.HasPrefix(trimmed, "On branch") || strings.HasPrefix(trimmed, "HEAD detached"):
+			spans = append(spans, Span{Start: lineStart, End: lineEnd, Face: FaceHeader1})
+		case strings.HasPrefix(trimmed, "(use "):
+			spans = append(spans, Span{Start: lineStart, End: lineEnd, Face: FaceComment})
+		case strings.HasSuffix(trimmed, ":") && !strings.ContainsAny(trimmed[:len(trimmed)-1], " \t"):
+			// Simple one-word header like "nothing to commit" — skip; handle below
+		case strings.HasPrefix(trimmed, "nothing to commit") || strings.HasPrefix(trimmed, "Your branch"):
+			spans = append(spans, Span{Start: lineStart, End: lineEnd, Face: FaceComment})
+		default:
+			// Section headers: non-empty lines that end with ':'
+			if len(trimmed) > 1 && trimmed[len(trimmed)-1] == ':' && !strings.HasPrefix(line, "\t") && !strings.HasPrefix(line, "  ") {
+				spans = append(spans, Span{Start: lineStart, End: lineEnd, Face: FaceKeyword})
+				continue
+			}
+			// Status labels inside sections
+			for _, label := range []struct {
+				text string
+				face Face
+			}{
+				{"modified:", FaceFunction},
+				{"new file:", FaceString},
+				{"deleted:", FaceNumber},
+				{"renamed:", FaceType},
+				{"copied:", FaceType},
+				{"both modified:", FaceNumber},
+				{"both added:", FaceNumber},
+				{"both deleted:", FaceNumber},
+			} {
+				if strings.HasPrefix(trimmed, label.text) {
+					idx := strings.Index(line, label.text)
+					if idx >= 0 {
+						spans = append(spans, Span{Start: lineStart + idx, End: lineStart + idx + len(label.text), Face: label.face})
+					}
+					break
+				}
+			}
+		}
+	}
+	return spans
+}
+
 func isHexRune(r rune) bool {
 	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }
@@ -338,6 +405,8 @@ func LangToHighlighter(lang string) Highlighter {
 		return BashHighlighter{}
 	case "json":
 		return JSONHighlighter{}
+	case "yaml":
+		return YAMLHighlighter{}
 	case "makefile":
 		return MakefileHighlighter{}
 	default:

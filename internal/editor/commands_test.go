@@ -1276,6 +1276,22 @@ func TestCmdJsonMode(t *testing.T) {
 	}
 }
 
+func TestCmdYamlMode(t *testing.T) {
+	e := newTestEditor("key: value\nlist:\n  - item\n")
+	e.cmdYamlMode()
+	if got := buf(e).Mode(); got != "yaml" {
+		t.Errorf("yaml-mode: want mode=%q, got %q", "yaml", got)
+	}
+	// Verify highlighter dispatch works and returns spans.
+	cache := e.getSpanCache(buf(e))
+	if cache == nil {
+		t.Fatal("yaml-mode: span cache should not be nil")
+	}
+	if len(cache.spans) == 0 {
+		t.Error("yaml-mode: expected syntax spans, got none")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // delete-trailing-whitespace
 // ---------------------------------------------------------------------------

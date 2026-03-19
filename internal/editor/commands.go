@@ -182,6 +182,8 @@ func init() {
 		"Visit next compilation error message and corresponding source code.")
 	registerCommand("previous-error", (*Editor).cmdPreviousError,
 		"Visit previous compilation error message and corresponding source code.")
+	registerCommand("count-buffer-lines", (*Editor).cmdCountBufferLines,
+		"Display number of lines in buffer and how many are before and after point.")
 
 	// ---- mark extras -------------------------------------------------------
 	registerCommand("mark-whole-buffer", (*Editor).cmdMarkWholeBuffer,
@@ -309,6 +311,8 @@ func init() {
 
 	registerCommand("json-mode", (*Editor).cmdJsonMode,
 		"Activate JSON mode on the current buffer.")
+	registerCommand("yaml-mode", (*Editor).cmdYamlMode,
+		"Activate YAML mode on the current buffer.")
 
 	// ---- spell checking ----------------------------------------------------
 	registerCommand("ispell-word", (*Editor).cmdIspellWord,
@@ -574,7 +578,7 @@ func (e *Editor) cmdNewline() {
 	}
 	// Auto-indent for programming modes that have an indent engine.
 	switch buf.Mode() {
-	case "go", "java", "python", "bash", "json":
+	case "go", "java", "python", "bash", "json", "yaml":
 		indentCurrentLine(buf, e.modeIndentStr(buf.Mode()))
 	}
 }
@@ -588,7 +592,6 @@ func (e *Editor) cmdIndentOrComplete() {
 	}
 	indentCurrentLine(buf, e.modeIndentStr(buf.Mode()))
 }
-
 func (e *Editor) cmdSelfInsert() {
 	// This command is not normally called via the registry (self-insert happens
 	// in dispatchKey for unbound printable runes), but it is registered for

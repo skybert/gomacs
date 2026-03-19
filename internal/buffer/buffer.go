@@ -104,7 +104,7 @@ func (b *Buffer) SetReadOnly(v bool) { b.readOnly = v }
 // SetMode sets the buffer's major mode.
 func (b *Buffer) SetMode(mode string) {
 	switch mode {
-	case "go", "markdown", "elisp", "python", "java", "bash", "json", "makefile", "diff", "dired", "vc-log", "vc-status", "vc-grep", "vc-commit", "vc-show", "buffer-list", "help", modeFundamental:
+	case "go", "markdown", "elisp", "python", "java", "bash", "json", "yaml", "makefile", "text", "diff", "dired", "vc-log", "vc-status", "vc-grep", "vc-commit", "vc-show", "buffer-list", "help", modeFundamental:
 		b.mode = mode
 	default:
 		b.mode = modeFundamental

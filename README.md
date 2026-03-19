@@ -10,7 +10,7 @@ Simple TTY only Emacs clone written in Go.
 - All files are read and written as UTF-8
 - Search, forwards and backwards.
 - Syntax highlighting and indention engine of some languages,
-  including Go, Emacs Lisp, Markdown and BASH.
+  including Go, Emacs Lisp, Markdown, BASH and YAML.
 - Self documenting features, like <kbd>C-h f</kbd> `describe-function`
   and <kbd>C-h k</kbd> `describe-key`
 - `visual-line-mode` enabled by default: lines longer than 80 characters
@@ -19,8 +19,8 @@ Simple TTY only Emacs clone written in Go.
   `fundamental` modes; only comments checked for code modes).
   Configurable with `(setq spell-command "/usr/bin/aspell")` and
   `(setq spell-language "en")`.
-  `M-x spell` for interactive spell checking (SPC=skip, r=replace,
-  i=add to personal dictionary, q=quit). Misspelled words are underlined
+  `M-x spell` for interactive spell checking (SPC/n=skip, 1-4=pick suggestion,
+  r=replace, i=add to personal dictionary, q=quit). Misspelled words are underlined
   in red; the word currently being typed is never highlighted.
 - `forward-list` (<kbd>C-M-n</kbd>) navigates to the matching closing
   bracket/paren/brace, or closing sh keyword (`fi`, `done`, `esac`) in bash mode.
@@ -29,6 +29,12 @@ Simple TTY only Emacs clone written in Go.
 - `dabbrev-expand` (<kbd>M-/</kbd>) completes the word before point using words
   from the current buffer (nearest first), other open buffers, then command names.
   Repeated <kbd>M-/</kbd> cycles through candidates.
+- `yaml-mode` provides syntax highlighting and indentation for YAML (`.yaml`, `.yml`).
+  Configurable with `(setq yaml-indent 2)`.
+- `count-buffer-lines` (<kbd>C-x l</kbd>) shows the total number of lines in
+  the buffer and how many are before and after point.
+- Minibuffer history: <kbd>↑</kbd> / <kbd>↓</kbd> arrow keys cycle through
+  previous inputs per minibuffer command (e.g. `vc-grep`, `goto-line`).
 
 # LSP support
 
@@ -81,23 +87,13 @@ Cheers,
 
 # Known issues
 
-No syntax highlighting in `*vc-status`.
-
-Interactive spell checker doesn't offer candidates.
-
 *vc log* should navigate to next and previous with `n` and `p`.
+
+Doing `vc-print-log` on a buffer should list the commit log for this
+file only, not for the entire repository.
 
 # Missing features
 
 The code API doc in minibuffer should have syntax highlighting.
 
-For all minibuffer commands, there should be history. So when invoking
-`vc-grep` for example, hitting the arrow up arrow should cycle through
-the previous inputs to that minibuffer command.
-
-`count-buffer-lines` bound to `C-x l` should list the number of lines
-in the current buffer. Should also say how many lines are before and
-after point.
-
-`yaml-mode` should provide syntax highlighting and indentation for YAML.
-
+Hitting `g` in `*vc log` should update it. Sames goes for `*vc-status`.

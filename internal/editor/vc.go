@@ -755,6 +755,8 @@ func langForExt(ext string) string {
 		return "bash"
 	case ".json":
 		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
 	case ".mk":
 		return "makefile"
 	default:
