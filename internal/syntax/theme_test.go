@@ -22,7 +22,7 @@ func TestApplySweetTheme_Colors(t *testing.T) {
 		{"function", &FaceFunction, "#f6ce55", ""},
 		{"number", &FaceNumber, "#f6717e", ""},
 		{"operator", &FaceOperator, "#f561ab", ""},
-		{"header1", &FaceHeader1, "#fc1c5b", ""},
+		{"header1", &FaceHeader1, "#06c993", ""},
 		{"header2", &FaceHeader2, "#e17df3", ""},
 		{"header3", &FaceHeader3, "#a3a3ff", ""},
 		{"modeline", &FaceModeline, "#a2a9ba", "#292235"},

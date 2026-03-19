@@ -2,6 +2,7 @@ package editor
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"unicode"
@@ -37,8 +38,8 @@ type spellError struct {
 	word  string // the original word text
 }
 
-// FaceSpellError is the face applied to misspelled words (underline).
-var FaceSpellError = syntax.Face{Underline: true}
+// FaceSpellError is the face applied to misspelled words (red underline).
+var FaceSpellError = syntax.Face{Underline: true, UnderlineColor: "red"}
 
 // ---------------------------------------------------------------------------
 // Mode predicates
@@ -70,6 +71,26 @@ func isSpellWordRune(r rune) bool {
 	return unicode.IsLetter(r) || r == '\''
 }
 
+// blankHTMLTags returns a copy of runes with all HTML tag content (<...>)
+// replaced by spaces, preserving all other positions so span offsets remain valid.
+func blankHTMLTags(runes []rune) []rune {
+	out := make([]rune, len(runes))
+	copy(out, runes)
+	inTag := false
+	for i, r := range out {
+		if r == '<' {
+			inTag = true
+		}
+		if inTag {
+			out[i] = ' '
+		}
+		if r == '>' {
+			inTag = false
+		}
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Async span computation
 // ---------------------------------------------------------------------------
@@ -81,6 +102,9 @@ func isSpellWordRune(r rune) bool {
 // Returns nil if spell checking is not configured or not applicable to the mode.
 func (e *Editor) getSpellSpans(buf *buffer.Buffer) []syntax.Span {
 	if e.spellCommand == "" {
+		return nil
+	}
+	if buf.ReadOnly() {
 		return nil
 	}
 	mode := buf.Mode()
@@ -109,8 +133,9 @@ func (e *Editor) getSpellSpans(buf *buffer.Buffer) []syntax.Span {
 	e.spellPending[buf] = gen
 	text := buf.String()
 	spellCmd := e.spellCommand
+	spellLang := e.spellLanguage
 	e.lspAsync(func() func() {
-		spans := computeSpellSpansForMode(spellCmd, text, mode)
+		spans := computeSpellSpansForMode(spellCmd, spellLang, text, mode)
 		return func() {
 			if e.spellCaches == nil {
 				e.spellCaches = make(map[*buffer.Buffer]*spellCache)
@@ -122,10 +147,8 @@ func (e *Editor) getSpellSpans(buf *buffer.Buffer) []syntax.Span {
 			delete(e.spellPending, buf)
 		}
 	})
-	// Return stale spans (or nil) while the new check runs.
-	if c != nil {
-		return c.spans
-	}
+	// Don't return stale spans: their positions are relative to old content
+	// and would mark wrong characters as misspelled during undo/edit.
 	return nil
 }
 
@@ -133,11 +156,15 @@ func (e *Editor) getSpellSpans(buf *buffer.Buffer) []syntax.Span {
 // For modes in spellCheckAll, the whole text is checked.
 // For modes in spellCheckComments, only comment-face spans are checked.
 // This function is safe to call from a goroutine.
-func computeSpellSpansForMode(spellCmd, text, mode string) []syntax.Span {
+func computeSpellSpansForMode(spellCmd, spellLang, text, mode string) []syntax.Span {
 	runes := []rune(text)
 	n := len(runes)
 	if spellCheckAll(mode) {
-		return findSpellSpans(spellCmd, runes, 0, n)
+		check := runes
+		if mode == "markdown" {
+			check = blankHTMLTags(runes)
+		}
+		return findSpellSpans(spellCmd, spellLang, check, 0, n)
 	}
 	// Comment-only: extract comment spans via the language highlighter.
 	hl := syntax.LangToHighlighter(mode)
@@ -166,7 +193,7 @@ func computeSpellSpansForMode(spellCmd, text, mode string) []syntax.Span {
 	if len(virtual) == 0 {
 		return nil
 	}
-	virtSpans := findSpellSpans(spellCmd, virtual, 0, len(virtual))
+	virtSpans := findSpellSpans(spellCmd, spellLang, virtual, 0, len(virtual))
 	if len(virtSpans) == 0 {
 		return nil
 	}
@@ -201,12 +228,12 @@ func virtToOrigPos(mapping []commentMapping, virtPos int) int {
 // findSpellSpans runs aspell list on runes[start:end] and returns a span for
 // every misspelled word occurrence found in that range.
 // Positions in the returned spans are absolute (relative to runes[0]).
-func findSpellSpans(aspellCmd string, runes []rune, start, end int) []syntax.Span {
+func findSpellSpans(aspellCmd, lang string, runes []rune, start, end int) []syntax.Span {
 	if start >= end || aspellCmd == "" {
 		return nil
 	}
 	text := string(runes[start:end])
-	misspelled, err := runAspellList(aspellCmd, text)
+	misspelled, err := runAspellList(aspellCmd, lang, text)
 	if err != nil || len(misspelled) == 0 {
 		return nil
 	}
@@ -248,11 +275,15 @@ func isSpellErrorAt(spans []syntax.Span, pos int) bool {
 	return false
 }
 
-// runAspellList runs cmd with the "list" subcommand, feeds text to stdin, and
-// returns each output line as a misspelled word.
+// runAspellList runs cmd with the "list" subcommand and optional language flag,
+// feeds text to stdin, and returns each output line as a misspelled word.
 // Returns (nil, nil) if aspell is not found or the text has no misspellings.
-func runAspellList(cmd, text string) ([]string, error) {
-	c := exec.Command(cmd, "list") //nolint:gosec
+func runAspellList(cmd, lang, text string) ([]string, error) {
+	args := []string{"list"}
+	if lang != "" {
+		args = append(args, "--lang="+lang)
+	}
+	c := exec.Command(cmd, args...) //nolint:gosec
 	c.Stdin = strings.NewReader(text)
 	out, err := c.Output()
 	if err != nil {
@@ -271,6 +302,12 @@ func runAspellList(cmd, text string) ([]string, error) {
 // Interactive spell check (M-x spell)
 // ---------------------------------------------------------------------------
 
+// cmdIspellWord checks the spelling of the word at point (delegates to cmdSpell).
+func (e *Editor) cmdIspellWord() {
+	e.clearArg()
+	e.cmdSpell()
+}
+
 // cmdSpell starts an interactive spell check of the entire current buffer.
 func (e *Editor) cmdSpell() {
 	e.clearArg()
@@ -280,7 +317,7 @@ func (e *Editor) cmdSpell() {
 	}
 	buf := e.ActiveBuffer()
 	text := buf.String()
-	misspelled, err := runAspellList(e.spellCommand, text)
+	misspelled, err := runAspellList(e.spellCommand, e.spellLanguage, text)
 	if err != nil {
 		e.Message("spell: %v", err)
 		return
@@ -335,7 +372,7 @@ func (e *Editor) spellShowCurrent() {
 	buf.SetPoint(se.start)
 	e.activeWin.EnsurePointVisible()
 	total := len(e.spellErrors)
-	e.Message("Misspelled: %q  [%d/%d]  SPC=skip  r=replace  q=quit",
+	e.Message("Misspelled: %q  [%d/%d]  SPC=skip  r=replace  i=add to dict  q=quit",
 		se.word, e.spellErrorIdx+1, total)
 }
 
@@ -381,6 +418,45 @@ func (e *Editor) spellHandleKey(ke terminal.KeyEvent) {
 			e.spellActive = true
 			e.spellShowCurrent()
 		})
+
+	case ke.Key == tcell.KeyRune && ke.Rune == 'i':
+		// Add word to personal aspell dictionary and skip all occurrences.
+		if e.spellErrorIdx >= len(e.spellErrors) {
+			return
+		}
+		se := e.spellErrors[e.spellErrorIdx]
+		word := se.word
+		// Use aspell pipe mode: '*word' adds to personal dict, '#' saves it.
+		// Pass --lang so the correct personal dictionary file is used.
+		args := []string{"-a"}
+		if e.spellLanguage != "" {
+			args = append(args, "--lang="+e.spellLanguage)
+		}
+		c := exec.Command(e.spellCommand, args...) //nolint:gosec
+		c.Stdin = strings.NewReader("*" + word + "\n#\n")
+		_ = c.Run()
+		// Remove all occurrences of this word from the error list.
+		remaining := e.spellErrors[:0]
+		for _, err := range e.spellErrors {
+			if err.word != word {
+				remaining = append(remaining, err)
+			}
+		}
+		e.spellErrors = remaining
+		if e.spellErrorIdx > len(e.spellErrors) {
+			e.spellErrorIdx = len(e.spellErrors)
+		}
+		// Invalidate spell cache so the word is no longer underlined.
+		delete(e.spellCaches, e.ActiveBuffer())
+		// Report which dictionary file was updated.
+		lang := e.spellLanguage
+		if lang == "" {
+			lang = "en"
+		}
+		home, _ := os.UserHomeDir()
+		dictFile := home + "/.aspell." + lang + ".pws"
+		e.Message("Added %q to %s", word, dictFile)
+		e.spellShowCurrent()
 
 	default:
 		// Re-show the prompt for unrecognised keys.

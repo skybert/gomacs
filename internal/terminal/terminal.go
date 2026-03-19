@@ -227,7 +227,11 @@ func faceToStyle(face syntax.Face) tcell.Style {
 		Reverse(face.Reverse)
 
 	if face.Underline {
-		style = style.Underline(true)
+		if face.UnderlineColor != "" {
+			style = style.Underline(true, parseColor(face.UnderlineColor))
+		} else {
+			style = style.Underline(true)
+		}
 	}
 	return style
 }

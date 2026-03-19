@@ -2,12 +2,13 @@ package syntax
 
 // Face describes text appearance
 type Face struct {
-	Fg        string // color name: "default", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "bright-red", etc.
-	Bg        string
-	Bold      bool
-	Italic    bool
-	Underline bool
-	Reverse   bool
+	Fg             string // color name: "default", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "bright-red", etc.
+	Bg             string
+	Bold           bool
+	Italic         bool
+	Underline      bool
+	UnderlineColor string // color for the underline (separate from Fg); empty means use Fg
+	Reverse        bool
 }
 
 // DefaultFace is the zero-value face: no colors, no attributes.

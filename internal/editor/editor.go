@@ -204,6 +204,8 @@ type Editor struct {
 	// spellCommand is the spell-checker executable (default "aspell").
 	// Set to "" to disable spell checking.
 	spellCommand string
+	// spellLanguage is the language code passed to aspell (default "en").
+	spellLanguage string
 	// spellCaches caches spell-error spans per buffer, keyed by changeGen.
 	spellCaches map[*buffer.Buffer]*spellCache
 	// spellPending records the changeGen of an in-flight async spell check per buffer.
@@ -269,6 +271,7 @@ func New(opts Options) (*Editor, error) {
 		saveBufferDeleteTrailingWS: true,
 		visualLines:                true,
 		spellCommand:               "aspell",
+		spellLanguage:              "en",
 		lspConns:                   make(map[string]*lspConn),
 		lspOpCancel:                nopCancel,
 		lspCbs:                     make(chan func(), 16),
@@ -682,6 +685,11 @@ func (e *Editor) applyElispConfig() {
 	if v, ok := e.lisp.GetGlobalVar("spell-command"); ok {
 		if s, ok := v.(elisp.StringVal); ok && s.V != "" {
 			e.spellCommand = s.V
+		}
+	}
+	if v, ok := e.lisp.GetGlobalVar("spell-language"); ok {
+		if s, ok := v.(elisp.StringVal); ok && s.V != "" {
+			e.spellLanguage = s.V
 		}
 	}
 	e.applyVisualLines()
@@ -1125,9 +1133,14 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	}
 
 	// Interactive spell check intercepts keys.
+	// Exception: C-x prefix keys fall through so that C-x C-c always works.
 	if e.spellActive {
-		e.spellHandleKey(ke)
-		return
+		if ke.Key == tcell.KeyCtrlX {
+			e.spellActive = false
+		} else {
+			e.spellHandleKey(ke)
+			return
+		}
 	}
 
 	// readChar: next key delivers its rune to a callback (used by registers).
@@ -2138,6 +2151,7 @@ func (e *Editor) renderWindow(w *window.Window) {
 			// Overlay spell-error underline.
 			if isSpellErrorAt(spellSpans, pos) {
 				face.Underline = true
+				face.UnderlineColor = "red"
 			}
 			// Overlay region.
 			if regionActive && pos >= regionStart && pos < regionEnd {

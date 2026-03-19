@@ -11,7 +11,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestFindSpellSpansEmpty(t *testing.T) {
-	spans := findSpellSpans("", []rune("hello world"), 0, 11)
+	spans := findSpellSpans("", "", []rune("hello world"), 0, 11)
 	if spans != nil {
 		t.Fatalf("expected nil spans with empty command, got %v", spans)
 	}
@@ -22,7 +22,7 @@ func TestFindSpellSpansNoMisspellings(t *testing.T) {
 	// We simulate by passing a word set that won't match anything.
 	// There's no easy way to unit-test without mocking, so test the
 	// helper logic with a known no-match scenario.
-	spans := findSpellSpans("", []rune(""), 0, 0)
+	spans := findSpellSpans("", "", []rune(""), 0, 0)
 	if spans != nil {
 		t.Fatalf("expected nil spans for empty input, got %v", spans)
 	}

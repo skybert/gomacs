@@ -146,12 +146,12 @@ func applySweetTheme() {
 	FaceFunction = Face{Fg: sweetOrange1}
 	FaceNumber = Face{Fg: sweetRed1}
 	FaceOperator = Face{Fg: sweetPink}
-	FaceHeader1 = Face{Fg: sweetAccent, Bold: true}
+	FaceHeader1 = Face{Fg: sweetGreen, Bold: true}
 	FaceHeader2 = Face{Fg: sweetPurple, Bold: true}
 	FaceHeader3 = Face{Fg: sweetSilver, Bold: true}
 	FaceBold = Face{Bold: true}
 	FaceItalic = Face{Italic: true}
-	FaceCode = Face{Fg: sweetOrange1}
+	FaceCode = Face{Fg: sweetPurple}
 	FaceLink = Face{Fg: sweetBlue, Underline: true}
 	FaceBlockquote = Face{Fg: sweetGreen, Italic: true}
 	FaceModeline = Face{Fg: sweetMono1, Bg: sweetBg1, Bold: true}
