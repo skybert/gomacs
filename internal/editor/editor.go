@@ -150,6 +150,8 @@ type Editor struct {
 
 	// vcLogRoots maps *VC Log* buffers to their git repository root dir.
 	vcLogRoots map[*buffer.Buffer]string
+	// vcLogFiles maps *VC Log* buffers to the source file path used for the log query.
+	vcLogFiles map[*buffer.Buffer]string
 
 	// vcParent maps a child VC output buffer (e.g. *VC Log Message*, *VC Show*)
 	// to the parent VC buffer that opened it.  Used by q to navigate back.
@@ -277,6 +279,7 @@ func New(opts Options) (*Editor, error) {
 		registers:                  make(map[rune]register),
 		diredStates:                make(map[*buffer.Buffer]*diredState),
 		vcLogRoots:                 make(map[*buffer.Buffer]string),
+		vcLogFiles:                 make(map[*buffer.Buffer]string),
 		vcParent:                   make(map[*buffer.Buffer]*buffer.Buffer),
 		vcCommitRoots:              make(map[*buffer.Buffer]string),
 		fillColumn:                 70,

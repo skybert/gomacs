@@ -482,6 +482,9 @@ func lspInitialize(conn *lspConn) error {
 			{"uri": conn.rootURI, "name": filepath.Base(lsp.PathFromURI(conn.rootURI))},
 		},
 		"capabilities": map[string]any{
+			"workspace": map[string]any{
+				"workspaceFolders": true,
+			},
 			"textDocument": map[string]any{
 				"synchronization": map[string]any{
 					"dynamicRegistration": false,
@@ -495,7 +498,12 @@ func lspInitialize(conn *lspConn) error {
 				},
 				"definition": map[string]any{},
 				"completion": map[string]any{
-					"completionItem": map[string]any{"snippetSupport": false},
+					"completionItem": map[string]any{
+						"snippetSupport": false,
+						"insertTextModeSupport": map[string]any{
+							"valueSet": []int{1, 2},
+						},
+					},
 				},
 			},
 		},

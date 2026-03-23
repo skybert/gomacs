@@ -183,7 +183,9 @@ func (e *Editor) cmdVcPrintLog() {
 		text = err.Error()
 	}
 	e.vcShowOutput("*VC Log*", text, "vc-log")
-	e.vcLogRoots[e.ActiveBuffer()] = root
+	logBuf := e.ActiveBuffer()
+	e.vcLogRoots[logBuf] = root
+	e.vcLogFiles[logBuf] = buf.Filename()
 }
 
 // cmdVcDiff shows uncommitted changes for the current file (C-x v =).
@@ -453,6 +455,33 @@ func (e *Editor) vcLogDispatch(ke terminal.KeyEvent) bool {
 		e.vcQuit("vc-log")
 		return true
 
+	case ke.Key == tcell.KeyRune && ke.Rune == 'n':
+		e.cmdNextLine()
+		return true
+
+	case ke.Key == tcell.KeyRune && ke.Rune == 'p':
+		e.cmdPreviousLine()
+		return true
+
+	case ke.Key == tcell.KeyRune && ke.Rune == 'g':
+		if root == "" {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		filePath := e.vcLogFiles[buf]
+		text, err := be.Log(root, filePath)
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		e.vcShowOutput("*VC Log*", text, "vc-log")
+		logBuf := e.ActiveBuffer()
+		e.vcLogRoots[logBuf] = root
+		e.vcLogFiles[logBuf] = filePath
+		return true
+
 	case ke.Key == tcell.KeyRune && ke.Rune == 'l':
 		if root == "" {
 			return true
@@ -646,6 +675,24 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 
 	if ke.Key == tcell.KeyRune && ke.Rune == 'q' {
 		e.vcQuit("vc-status")
+		return true
+	}
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'g' {
+		root := e.vcLogRoots[buf]
+		if root == "" {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		text, err := be.Status(root)
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		e.vcShowOutput("*vc-status*", text, "vc-status")
+		e.vcLogRoots[e.ActiveBuffer()] = root
 		return true
 	}
 

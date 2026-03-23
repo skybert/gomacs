@@ -35,6 +35,8 @@ Simple TTY only Emacs clone written in Go.
   the buffer and how many are before and after point.
 - Minibuffer history: <kbd>↑</kbd> / <kbd>↓</kbd> arrow keys cycle through
   previous inputs per minibuffer command (e.g. `vc-grep`, `goto-line`).
+- `*vc log*`: `n`/`p` navigate between log entries; `g` refreshes the log.
+- `*vc-status*`: `g` refreshes the status.
 
 # LSP support
 
@@ -85,15 +87,13 @@ Cheers,
 
 -Torstein
 
-# Known issues
-
-*vc log* should navigate to next and previous with `n` and `p`.
-
-Doing `vc-print-log` on a buffer should list the commit log for this
-file only, not for the entire repository.
-
 # Missing features
 
+## eldoc
 The code API doc in minibuffer should have syntax highlighting.
 
-Hitting `g` in `*vc log` should update it. Sames goes for `*vc-status`.
+## vc-annotate
+
+Syntax highlighting of SHAs, metadata and source code on the right-hand side.
+Typing `q` closes `vc-annotate`. Typing `l` shows the commit log message;
+typing `d` shows the diff.

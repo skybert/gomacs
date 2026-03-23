@@ -122,7 +122,13 @@ or
 .B RET
 shows a diff,
 .B l
-shows the commit log message.  In vc\-diff/vc\-show buffers,
+shows the commit log message.
+.B n
+and
+.B p
+move to the next and previous log entry.
+.B g
+refreshes the buffer.  In vc\-diff/vc\-show buffers,
 .B n/p
 jump between hunks and
 .B RET
