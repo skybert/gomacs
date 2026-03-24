@@ -215,7 +215,7 @@ func (e *Editor) cmdHelp() {
 		if doc == "" {
 			doc = "Not documented."
 		}
-		sb.WriteString(fmt.Sprintf("%-40s%s\n  %s\n\n", name, keyStr, doc))
+		fmt.Fprintf(&sb, "%-40s%s\n  %s\n\n", name, keyStr, doc)
 	}
 
 	sb.WriteString("\nConfiguration Variables\n")
@@ -244,7 +244,7 @@ func (e *Editor) cmdHelp() {
 		if v, ok := e.lisp.GetGlobalVar(cv.name); ok {
 			val = v.String()
 		}
-		sb.WriteString(fmt.Sprintf("%-44s  %s\n  Current value: %s\n\n", cv.name, cv.doc, val))
+		fmt.Fprintf(&sb, "%-44s  %s\n  Current value: %s\n\n", cv.name, cv.doc, val)
 	}
 
 	helpBuf := e.FindBuffer("*Help*")

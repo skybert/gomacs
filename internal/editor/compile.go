@@ -22,9 +22,9 @@ type compilationError struct {
 	Col  int
 }
 
-// errRe matches common compiler error/warning lines of the form:
-// file.go:10:5: error: ... or file.go:10: error: ...
-var errRe = regexp.MustCompile(`^([^:\s][^:]*):(\d+)(?::(\d+))?:\s*(?:error|warning|note|fatal):`)
+// errRe matches compiler/linter error lines of the form file:line: or file:line:col:
+// Covers Go compiler, golangci-lint, staticcheck, and similar tools.
+var errRe = regexp.MustCompile(`^([^:\s][^:]*):(\d+)(?::(\d+))?:`)
 
 // cmdBuild runs "make" in the VC root (falling back to cwd) and streams the
 // output into a *compilation* buffer shown in a bottom split window (M-x build).
@@ -87,13 +87,18 @@ func (e *Editor) cmdBuild() {
 			errs = append(errs, compilationError{File: file, Line: lineNum, Col: col})
 		}
 
+		// Compute compilation coordinate highlights from the plain text.
+		compSpans := syntax.CompilationHighlighter{}.Highlight(plain, 0, len([]rune(plain)))
+		// Merge: ANSI spans first (higher priority via faceAtPos first-match).
+		allSpans := append(ansiSpans, compSpans...) //nolint:gocritic
+
 		return func() {
 			compBuf.SetReadOnly(false)
 			compBuf.Delete(0, compBuf.Len())
 			compBuf.InsertString(0, plain)
 			compBuf.SetReadOnly(true)
-			// Store ANSI highlighter so getSpanCache uses it.
-			e.customHighlighters[compBuf] = syntax.ANSIHighlighter{Spans: ansiSpans}
+			// Store combined highlighter so getSpanCache uses it.
+			e.customHighlighters[compBuf] = syntax.ANSIHighlighter{Spans: allSpans}
 			// Invalidate span cache so next render uses the new highlighter.
 			delete(e.spanCaches, compBuf)
 			// Auto-scroll to end.
