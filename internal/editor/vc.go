@@ -766,7 +766,7 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 		return true
 	}
 
-	if ke.Key == tcell.KeyRune && ke.Rune == 'm' {
+	if ke.Key == tcell.KeyRune && ke.Rune == 's' {
 		if root == "" {
 			return true
 		}
