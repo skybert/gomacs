@@ -452,7 +452,75 @@ func (b *Buffer) LineStart(line int) int {
 	return b.Len()
 }
 
-// PosForLineCol returns the logical position for the given 1-based line and
+// LineStartsFrom returns the buffer start positions for `count` consecutive
+// lines beginning at 1-based line `from`. It does a single forward scan so
+// the cost is O(pos_of_last_line) rather than O(count × pos_of_first_line).
+// Positions beyond the last buffer line are set to b.Len().
+func (b *Buffer) LineStartsFrom(from, count int) []int {
+	if count <= 0 {
+		return nil
+	}
+	if from < 1 {
+		from = 1
+	}
+	out := make([]int, count)
+	length := b.Len()
+	cur := 1    // 1-based line counter
+	filled := 0 // how many entries in out[] have been filled
+
+	if from == 1 {
+		out[0] = 0
+		filled = 1
+	}
+
+	for i := range length {
+		if filled >= count {
+			break
+		}
+		if b.RuneAt(i) == '\n' {
+			cur++
+			if cur >= from && cur < from+count {
+				out[cur-from] = i + 1
+				filled++
+			}
+		}
+	}
+	// Fill any remaining entries (lines beyond EOF) with Len().
+	for filled < count {
+		out[filled] = length
+		filled++
+	}
+	return out
+}
+
+// LineStartsFromPos is like LineStartsFrom but begins the forward scan at
+// bufPos (the known buffer position of 1-based line `from`) instead of 0.
+// This makes repeated ViewLines calls O(visible_lines) rather than
+// O(scrollLine) when the caller caches the first-visible-line position.
+func (b *Buffer) LineStartsFromPos(from int, bufPos int, count int) []int {
+	if count <= 0 {
+		return nil
+	}
+	if from < 1 {
+		bufPos = 0
+	}
+	out := make([]int, count)
+	out[0] = bufPos
+	length := b.Len()
+	filled := 1
+	for i := bufPos; i < length && filled < count; i++ {
+		if b.RuneAt(i) == '\n' {
+			out[filled] = i + 1
+			filled++
+		}
+	}
+	for filled < count {
+		out[filled] = length
+		filled++
+	}
+	return out
+}
+
 // 0-based column.  The column is clamped to the line length.
 func (b *Buffer) PosForLineCol(line, col int) int {
 	pos := b.LineStart(line)

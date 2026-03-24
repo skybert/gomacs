@@ -515,14 +515,20 @@ func (e *Editor) cmdScrollUp() {
 	w := e.activeWin
 	lines := max(w.Height()-2, 1)
 	w.ScrollUp(n * lines)
-	// Move point to keep it on screen.
+	// Move point to keep it on screen using buffer positions directly
+	// (avoids O(file_size) LineCol call).
 	buf := e.ActiveBuffer()
 	sl := w.ScrollLine()
-	line, _ := buf.LineCol(buf.Point())
-	if line < sl {
-		buf.SetPoint(buf.LineStart(sl))
-	} else if line >= sl+w.Height()-1 {
-		buf.SetPoint(buf.LineStart(sl + w.Height() - 2))
+	// Request height entries: [0]=first visible, [height-2]=last visible,
+	// [height-1]=first invisible line (sentinel for below-view check).
+	starts := buf.LineStartsFrom(sl, w.Height())
+	firstPos := starts[0]
+	sentinelPos := starts[max(w.Height()-1, 0)]
+	pt := buf.Point()
+	if pt < firstPos {
+		buf.SetPoint(firstPos)
+	} else if pt >= sentinelPos && sentinelPos < buf.Len() {
+		buf.SetPoint(starts[max(w.Height()-2, 0)])
 	}
 }
 
@@ -534,11 +540,14 @@ func (e *Editor) cmdScrollDown() {
 	w.ScrollDown(n * lines)
 	buf := e.ActiveBuffer()
 	sl := w.ScrollLine()
-	line, _ := buf.LineCol(buf.Point())
-	if line < sl {
-		buf.SetPoint(buf.LineStart(sl))
-	} else if line >= sl+w.Height()-1 {
-		buf.SetPoint(buf.LineStart(sl + w.Height() - 2))
+	starts := buf.LineStartsFrom(sl, w.Height())
+	firstPos := starts[0]
+	sentinelPos := starts[max(w.Height()-1, 0)]
+	pt := buf.Point()
+	if pt < firstPos {
+		buf.SetPoint(firstPos)
+	} else if pt >= sentinelPos && sentinelPos < buf.Len() {
+		buf.SetPoint(starts[max(w.Height()-2, 0)])
 	}
 }
 

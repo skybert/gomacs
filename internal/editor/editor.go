@@ -2224,8 +2224,11 @@ func (e *Editor) helpDispatch(ke terminal.KeyEvent) bool {
 // faceAtPos returns the syntax face that covers position pos, given a sorted
 // slice of spans.  Falls back to FaceDefault.
 func faceAtPos(spans []syntax.Span, pos int) syntax.Face {
-	for _, sp := range spans {
-		if pos >= sp.Start && pos < sp.End {
+	// Binary search: find the last span with Start <= pos.
+	i := sort.Search(len(spans), func(j int) bool { return spans[j].Start > pos })
+	if i > 0 {
+		sp := spans[i-1]
+		if pos < sp.End {
 			return sp.Face
 		}
 	}

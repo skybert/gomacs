@@ -27,6 +27,11 @@ type Window struct {
 	// than wrapCol runes are split into multiple view rows.  The file
 	// content is never changed.  0 means no wrapping.
 	wrapCol int
+	// Cached first-visible-line buffer position for fast scrolling.
+	// Valid when cachedScrollLine == scrollLine and cachedChangeGen == buf.ChangeGen().
+	cachedScrollLine int
+	cachedScrollPos  int
+	cachedChangeGen  int
 }
 
 // ViewLine describes the content of one rendered row.
@@ -137,6 +142,22 @@ func (w *Window) SetScrollLine(l int) {
 	w.scrollLine = l
 }
 
+// firstScrollPos returns the buffer position of the first visible line.
+// It uses a per-window cache so repeated calls with the same scrollLine and
+// buffer content cost O(1). The cache is keyed by (scrollLine, changeGen);
+// on a miss it computes the position with a forward scan.
+func (w *Window) firstScrollPos() int {
+	gen := w.buf.ChangeGen()
+	if w.cachedScrollLine == w.scrollLine && w.cachedChangeGen == gen {
+		return w.cachedScrollPos
+	}
+	pos := w.buf.LineStart(w.scrollLine)
+	w.cachedScrollLine = w.scrollLine
+	w.cachedScrollPos = pos
+	w.cachedChangeGen = gen
+	return pos
+}
+
 // WrapCol returns the visual wrap column (0 = disabled).
 func (w *Window) WrapCol() int { return w.wrapCol }
 
@@ -146,7 +167,33 @@ func (w *Window) SetWrapCol(col int) { w.wrapCol = col }
 // ScrollUp scrolls the view down by n lines (scrollLine increases), revealing
 // later content.
 func (w *Window) ScrollUp(n int) {
+	if n <= 0 {
+		return
+	}
+	oldLine := w.scrollLine
 	w.SetScrollLine(w.scrollLine + n)
+	newLine := w.scrollLine
+	delta := newLine - oldLine
+	if delta <= 0 {
+		return
+	}
+	// Update cached scroll position incrementally: scan forward by `delta`
+	// newlines from the old position so the next ViewLines call is O(visible).
+	gen := w.buf.ChangeGen()
+	if w.cachedScrollLine == oldLine && w.cachedChangeGen == gen {
+		pos := w.cachedScrollPos
+		length := w.buf.Len()
+		found := 0
+		for i := pos; i < length && found < delta; i++ {
+			if w.buf.RuneAt(i) == '\n' {
+				found++
+				pos = i + 1
+			}
+		}
+		w.cachedScrollLine = newLine
+		w.cachedScrollPos = pos
+		// cachedChangeGen stays the same
+	}
 }
 
 // ScrollDown scrolls the view up by n lines (scrollLine decreases), revealing
@@ -277,6 +324,10 @@ func (w *Window) ViewLines() []ViewLine {
 func (w *Window) viewLinesNoWrap() []ViewLine {
 	totalLines := w.buf.LineCount()
 	rows := make([]ViewLine, w.height)
+	// Use the cached first-visible-line position for O(visible_lines) scan
+	// instead of scanning from buffer start each frame.
+	firstPos := w.firstScrollPos()
+	startPositions := w.buf.LineStartsFromPos(w.scrollLine, firstPos, w.height)
 	for i := range w.height {
 		bufLine := w.scrollLine + i
 		row := w.top + i
@@ -284,7 +335,7 @@ func (w *Window) viewLinesNoWrap() []ViewLine {
 			rows[i] = ViewLine{Row: row, Line: 0}
 			continue
 		}
-		startPos := w.buf.LineStart(bufLine)
+		startPos := startPositions[i]
 		endPos := w.buf.EndOfLine(startPos)
 		text := w.buf.Substring(startPos, endPos)
 		rows[i] = ViewLine{
@@ -305,8 +356,18 @@ func (w *Window) viewLinesWrapped() []ViewLine {
 	rows := make([]ViewLine, w.height)
 	rowIdx := 0
 	bufLine := w.scrollLine
+	// Use the cached first-visible-line position for O(visible_lines) scan.
+	firstPos := w.firstScrollPos()
+	startPositions := w.buf.LineStartsFromPos(w.scrollLine, firstPos, w.height)
+	spIdx := 0
 	for rowIdx < w.height && bufLine <= totalLines {
-		startPos := w.buf.LineStart(bufLine)
+		var startPos int
+		if spIdx < len(startPositions) {
+			startPos = startPositions[spIdx]
+			spIdx++
+		} else {
+			startPos = w.buf.Len()
+		}
 		endPos := w.buf.EndOfLine(startPos)
 		text := w.buf.Substring(startPos, endPos)
 		lineRunes := []rune(text)
@@ -324,10 +385,7 @@ func (w *Window) viewLinesWrapped() []ViewLine {
 		} else {
 			segStart := 0
 			for rowIdx < w.height && segStart < lineLen {
-				segEnd := segStart + w.wrapCol
-				if segEnd > lineLen {
-					segEnd = lineLen
-				}
+				segEnd := min(segStart+w.wrapCol, lineLen)
 				rows[rowIdx] = ViewLine{
 					Row:      w.top + rowIdx,
 					Line:     bufLine,

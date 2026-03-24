@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -264,10 +265,9 @@ func findSpellSpans(aspellCmd, lang string, runes []rune, start, end int) []synt
 // isSpellErrorAt reports whether pos is covered by any spell-error span.
 // Assumes spans are sorted by Start.
 func isSpellErrorAt(spans []syntax.Span, pos int) bool {
-	for _, sp := range spans {
-		if sp.Start > pos {
-			break
-		}
+	i := sort.Search(len(spans), func(j int) bool { return spans[j].Start > pos })
+	if i > 0 {
+		sp := spans[i-1]
 		if pos < sp.End {
 			return true
 		}

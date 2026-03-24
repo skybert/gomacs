@@ -216,6 +216,33 @@ func TestLineStart(t *testing.T) {
 	}
 }
 
+func TestLineStartsFrom(t *testing.T) {
+	b := NewWithContent("test", "abc\nde\nfghi")
+	// "abc" line 1: pos 0, "de" line 2: pos 4, "fghi" line 3: pos 7
+	tests := []struct {
+		from, count int
+		want        []int
+	}{
+		{1, 3, []int{0, 4, 7}},
+		{2, 2, []int{4, 7}},
+		{3, 1, []int{7}},
+		{1, 5, []int{0, 4, 7, b.Len(), b.Len()}}, // beyond last line → Len()
+		{4, 2, []int{b.Len(), b.Len()}},          // all beyond EOF
+	}
+	for _, tc := range tests {
+		got := b.LineStartsFrom(tc.from, tc.count)
+		if len(got) != len(tc.want) {
+			t.Errorf("LineStartsFrom(%d,%d) len=%d, want %d", tc.from, tc.count, len(got), len(tc.want))
+			continue
+		}
+		for i, w := range tc.want {
+			if got[i] != w {
+				t.Errorf("LineStartsFrom(%d,%d)[%d] = %d, want %d", tc.from, tc.count, i, got[i], w)
+			}
+		}
+	}
+}
+
 func TestBeginningOfLine(t *testing.T) {
 	b := NewWithContent("test", "abc\nde\nfghi")
 	tests := []struct{ pos, want int }{
