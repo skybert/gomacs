@@ -184,6 +184,10 @@ func init() {
 		"Visit previous compilation error message and corresponding source code.")
 	registerCommand("count-buffer-lines", (*Editor).cmdCountBufferLines,
 		"Display number of lines in buffer and how many are before and after point.")
+	registerCommand("help", (*Editor).cmdHelp,
+		"Show a help buffer listing all commands and configuration variables.")
+	registerCommand("build", (*Editor).cmdBuild,
+		"Run make in the project root and show output in *compilation* buffer.")
 
 	// ---- mark extras -------------------------------------------------------
 	registerCommand("mark-whole-buffer", (*Editor).cmdMarkWholeBuffer,

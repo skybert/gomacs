@@ -1,7 +1,9 @@
 package editor
 
 import (
+	"fmt"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -121,12 +123,46 @@ func (e *Editor) cmdMarkWord() {
 
 func (e *Editor) cmdNextError() {
 	e.clearArg()
-	e.Message("next-error: not yet implemented")
+	if len(e.compilationErrors) == 0 {
+		e.Message("No errors")
+		return
+	}
+	e.compilationErrorIdx = (e.compilationErrorIdx + 1) % len(e.compilationErrors)
+	e.gotoCompilationError(e.compilationErrorIdx)
 }
 
 func (e *Editor) cmdPreviousError() {
 	e.clearArg()
-	e.Message("previous-error: not yet implemented")
+	if len(e.compilationErrors) == 0 {
+		e.Message("No errors")
+		return
+	}
+	e.compilationErrorIdx = (e.compilationErrorIdx - 1 + len(e.compilationErrors)) % len(e.compilationErrors)
+	e.gotoCompilationError(e.compilationErrorIdx)
+}
+
+// gotoCompilationError opens the source file and jumps to the error at idx.
+func (e *Editor) gotoCompilationError(idx int) {
+	ce := e.compilationErrors[idx]
+	b, err := e.loadFile(ce.File)
+	if err != nil {
+		e.Message("next-error: cannot open %s: %v", ce.File, err)
+		return
+	}
+	pos := b.LineStart(ce.Line)
+	b.SetPoint(pos)
+	// Show file in the active window (or upper window if split).
+	for _, w := range e.windows {
+		if w.Buf().Mode() != "compilation" {
+			w.SetBuf(b)
+			e.activeWin = w
+			break
+		}
+	}
+	if e.activeWin.Buf() != b {
+		e.activeWin.SetBuf(b)
+	}
+	e.Message("Error %d/%d: %s:%d", idx+1, len(e.compilationErrors), ce.File, ce.Line)
 }
 
 // cmdCountBufferLines shows total lines in the buffer plus how many are before
@@ -150,6 +186,80 @@ func (e *Editor) cmdMessages() {
 		b.SetReadOnly(true)
 	}
 	e.activeWin.SetBuf(b)
+}
+
+// cmdHelp shows a *Help* buffer listing all registered commands (with key
+// bindings and documentation) and the known configuration variables (C-h h).
+func (e *Editor) cmdHelp() {
+	e.clearArg()
+	var sb strings.Builder
+	sb.WriteString("gomacs help\n")
+	sb.WriteString(strings.Repeat("=", 60) + "\n\n")
+
+	sb.WriteString("Commands\n")
+	sb.WriteString(strings.Repeat("-", 40) + "\n\n")
+
+	names := make([]string, 0, len(commands))
+	for name := range commands {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		keys := e.keysForCommand(name)
+		keyStr := ""
+		if len(keys) > 0 {
+			keyStr = "  (" + strings.Join(keys, ", ") + ")"
+		}
+		doc := commandDocs[name]
+		if doc == "" {
+			doc = "Not documented."
+		}
+		sb.WriteString(fmt.Sprintf("%-40s%s\n  %s\n\n", name, keyStr, doc))
+	}
+
+	sb.WriteString("\nConfiguration Variables\n")
+	sb.WriteString(strings.Repeat("-", 40) + "\n\n")
+
+	type configVar struct{ name, doc string }
+	configVars := []configVar{
+		{"fill-column", "Column target for fill-paragraph (M-q). Default: 70."},
+		{"isearch-case-insensitive", "When t, isearch ignores case. Default: t."},
+		{"save-buffer-delete-trailing-whitespace", "When t, save-buffer strips trailing whitespace. Default: t."},
+		{"visual-lines", "When t, long lines wrap visually. Default: t."},
+		{"spell-command", "Path to spell-checker executable. Default: \"aspell\"."},
+		{"spell-language", "Language code for spell checker. Default: \"en\"."},
+		{"go-indent", "Indent string for Go mode. Default: \"\\t\"."},
+		{"python-indent", "Indent string or width for Python mode. Default: 4."},
+		{"java-indent", "Indent string or width for Java mode. Default: 4."},
+		{"sh-indent", "Indent string or width for Bash mode. Default: 2."},
+		{"json-indent", "Indent string or width for JSON mode. Default: 2."},
+		{"markdown-indent", "Indent string or width for Markdown mode. Default: 2."},
+		{"yaml-indent", "Indent string or width for YAML mode. Default: 2."},
+		{"theme", "Color theme name. Default: \"sweet\". Set with (setq theme 'sweet)."},
+		{"lsp-completion-min-chars", "Minimum chars before LSP completion triggers. Default: 1."},
+	}
+	for _, cv := range configVars {
+		val := "(not set)"
+		if v, ok := e.lisp.GetGlobalVar(cv.name); ok {
+			val = v.String()
+		}
+		sb.WriteString(fmt.Sprintf("%-44s  %s\n  Current value: %s\n\n", cv.name, cv.doc, val))
+	}
+
+	helpBuf := e.FindBuffer("*Help*")
+	if helpBuf == nil {
+		helpBuf = buffer.NewWithContent("*Help*", sb.String())
+		e.buffers = append(e.buffers, helpBuf)
+	} else {
+		helpBuf.SetReadOnly(false)
+		helpBuf.Delete(0, helpBuf.Len())
+		helpBuf.InsertString(0, sb.String())
+	}
+	helpBuf.SetMode("help")
+	helpBuf.SetReadOnly(true)
+	helpBuf.SetPoint(0)
+	e.activeWin.SetBuf(helpBuf)
 }
 
 // cmdGomacsVersion displays the gomacs version, Go runtime version, and uptime.

@@ -36,7 +36,15 @@ Simple TTY only Emacs clone written in Go.
 - Minibuffer history: <kbd>↑</kbd> / <kbd>↓</kbd> arrow keys cycle through
   previous inputs per minibuffer command (e.g. `vc-grep`, `goto-line`).
 - `*vc log*`: `n`/`p` navigate between log entries; `g` refreshes the log.
-- `*vc-status*`: `g` refreshes the status.
+- `*vc-status*`: `g` refreshes the status; `l` shows vc-log; `d` shows diff;
+  `m` stages the file at point; `c` opens a commit buffer.
+- `C-h h` / `M-x help` shows a help buffer listing all commands and
+  configuration variables.
+- LSP eldoc (function signature in minibuffer) is syntax-highlighted using the
+  current buffer's language highlighter.
+- `M-x build` runs `make` in the project root and shows output in a
+  `*compilation*` buffer (ANSI colours preserved). `M-g n` / `M-g p` jump to
+  the next/previous error in the source file.
 
 # LSP support
 
@@ -90,10 +98,5 @@ Cheers,
 # Missing features
 
 ## eldoc
-The code API doc in minibuffer should have syntax highlighting.
-
-## vc-annotate
-
-Syntax highlighting of SHAs, metadata and source code on the right-hand side.
-Typing `q` closes `vc-annotate`. Typing `l` shows the commit log message;
-typing `d` shows the diff.
+The code API doc in minibuffer should have syntax highlighting for comments and
+multi-line hover text.

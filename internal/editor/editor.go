@@ -234,6 +234,13 @@ type Editor struct {
 	dabbrevCandidates []string
 	dabbrevIdx        int
 	dabbrevLastEnd    int // end of the last expansion in buffer, for cycling
+
+	// compilation state
+	compilationErrors   []compilationError
+	compilationErrorIdx int
+	// customHighlighters overrides the default mode-based highlighter per buffer.
+	// Used by the compilation buffer to supply pre-computed ANSI spans.
+	customHighlighters map[*buffer.Buffer]syntax.Highlighter
 }
 
 // spanCache holds pre-computed highlighting data for a buffer.  It is
@@ -293,6 +300,7 @@ func New(opts Options) (*Editor, error) {
 		lspCbs:                     make(chan func(), 16),
 		version:                    opts.Version,
 		startTime:                  time.Now(),
+		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
 	}
 
 	// Apply the default colour theme.
@@ -504,6 +512,7 @@ func (e *Editor) setupKeymaps() {
 	ch.Bind(keymap.PlainKey('k'), "describe-key")
 	ch.Bind(keymap.PlainKey('f'), "describe-function")
 	ch.Bind(keymap.PlainKey('v'), "describe-variable")
+	ch.Bind(keymap.PlainKey('h'), "help")
 
 	// ---- M-g prefix (goto) -------------------------------------------------
 	gk.BindPrefix(keymap.MetaKey('g'), mg)
@@ -1305,6 +1314,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		}
 	}
 
+	// When in a *compilation* buffer, handle q/g/n/p.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "compilation" {
+		if e.compilationDispatch(ke) {
+			return
+		}
+	}
+
 	// When in a *vc grep* buffer, handle q and Enter.
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-grep" {
 		if e.vcGrepDispatch(ke) {
@@ -2088,7 +2104,10 @@ func (e *Editor) getSpanCache(buf *buffer.Buffer) *spanCache {
 	if c != nil && c.gen == gen && c.mode == mode {
 		return c
 	}
-	hl := highlighterFor(buf)
+	hl := e.customHighlighters[buf]
+	if hl == nil {
+		hl = highlighterFor(buf)
+	}
 	text := buf.String()
 	runes := []rune(text)
 	spans := hl.Highlight(text, 0, len(runes))
@@ -2405,6 +2424,32 @@ func (e *Editor) renderMinibuffer() {
 
 	// Draw prompt / message at promptRow.
 	runes := []rune(line)
+
+	// When showing a plain message (not in minibuf), try to syntax-highlight it
+	// using the active buffer's mode — this makes LSP eldoc signatures readable.
+	if !e.minibufActive && line != "" {
+		hl := highlighterFor(e.ActiveBuffer())
+		spans := hl.Highlight(line, 0, len(runes))
+		for col := range width {
+			ch := rune(' ')
+			face := syntax.FaceMinibuffer
+			if col < len(runes) {
+				ch = runes[col]
+				sf := faceAtPos(spans, col)
+				if sf.Fg != "" && sf.Fg != "default" {
+					face = syntax.Face{
+						Fg:     sf.Fg,
+						Bg:     syntax.FaceMinibuffer.Bg,
+						Bold:   sf.Bold,
+						Italic: sf.Italic,
+					}
+				}
+			}
+			e.term.SetCell(col, promptRow, ch, face)
+		}
+		return
+	}
+
 	for col := range width {
 		ch := ' '
 		if col < len(runes) {

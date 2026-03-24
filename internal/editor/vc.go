@@ -144,7 +144,7 @@ func (e *Editor) vcShowOutput(name, text, mode string) {
 func (e *Editor) vcQuit(skipMode string) {
 	isVCMode := func(mode string) bool {
 		switch mode {
-		case "vc-log", "vc-status", "vc-grep", "diff", "vc-commit", "vc-show":
+		case "vc-log", "vc-status", "vc-grep", "diff", "vc-commit", "vc-show", "compilation":
 			return true
 		}
 		return strings.HasPrefix(mode, "vc-annotate")
@@ -666,12 +666,33 @@ func (e *Editor) vcDiffGotoSource(buf *buffer.Buffer) bool {
 }
 
 // vcStatusDispatch handles keys in a *VC Status* buffer.
+// vcStatusFileAtPoint returns the relative path of the file on the current
+// line of a *vc-status* buffer, or "" if the line does not refer to an
+// existing file under root.
+func vcStatusFileAtPoint(buf *buffer.Buffer, root string) string {
+	pt := buf.Point()
+	bol := buf.BeginningOfLine(pt)
+	eol := buf.EndOfLine(pt)
+	line := buf.Substring(bol, eol)
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return ""
+	}
+	fields := strings.Fields(trimmed)
+	rel := strings.TrimSuffix(fields[len(fields)-1], ":")
+	if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+		return ""
+	}
+	return rel
+}
+
 func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
 		return false
 	}
 
 	buf := e.ActiveBuffer()
+	root := e.vcLogRoots[buf]
 
 	if ke.Key == tcell.KeyRune && ke.Rune == 'q' {
 		e.vcQuit("vc-status")
@@ -679,7 +700,6 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 	}
 
 	if ke.Key == tcell.KeyRune && ke.Rune == 'g' {
-		root := e.vcLogRoots[buf]
 		if root == "" {
 			return true
 		}
@@ -696,31 +716,98 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 		return true
 	}
 
+	if ke.Key == tcell.KeyRune && ke.Rune == 'l' {
+		if root == "" {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		text, err := be.Log(root, "")
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		statusBuf := buf
+		e.vcShowOutput("*VC Log*", text, "vc-log")
+		logBuf := e.ActiveBuffer()
+		e.vcLogRoots[logBuf] = root
+		e.vcLogFiles[logBuf] = ""
+		e.vcParent[logBuf] = statusBuf
+		return true
+	}
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'd' {
+		if root == "" {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		relPath := vcStatusFileAtPoint(buf, root)
+		absPath := ""
+		if relPath != "" {
+			absPath = filepath.Join(root, relPath)
+		}
+		text, err := be.Diff(root, absPath)
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		if text == "" {
+			e.Message("vc-status: no uncommitted changes")
+			return true
+		}
+		statusBuf := buf
+		e.vcShowOutput("*vc-diff*", text, "diff")
+		diffBuf := e.ActiveBuffer()
+		e.vcLogRoots[diffBuf] = root
+		e.vcParent[diffBuf] = statusBuf
+		return true
+	}
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'm' {
+		if root == "" {
+			return true
+		}
+		relPath := vcStatusFileAtPoint(buf, root)
+		absPath := ""
+		if relPath != "" {
+			absPath = filepath.Join(root, relPath)
+		}
+		e.vcGitAdd(root, absPath)
+		be, _ := vcFind(root)
+		if be != nil {
+			text, err := be.Status(root)
+			if err != nil && text == "" {
+				text = err.Error()
+			}
+			e.vcShowOutput("*vc-status*", text, "vc-status")
+			e.vcLogRoots[e.ActiveBuffer()] = root
+		}
+		return true
+	}
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'c' {
+		if root == "" {
+			return true
+		}
+		e.vcOpenCommitBuffer(root, "")
+		return true
+	}
+
 	if ke.Key != tcell.KeyEnter {
 		return false
 	}
 
-	pt := buf.Point()
-	bol := buf.BeginningOfLine(pt)
-	eol := buf.EndOfLine(pt)
-	line := buf.Substring(bol, eol)
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return true
-	}
-
-	fields := strings.Fields(trimmed)
-	filePath := strings.TrimSuffix(fields[len(fields)-1], ":")
-
-	root := e.vcLogRoots[buf]
 	if root == "" {
 		return true
 	}
-	abs := filepath.Join(root, filePath)
-	if _, err := os.Stat(abs); err != nil {
-		e.Message("vc-status: cannot find file: %s", filePath)
+	filePath := vcStatusFileAtPoint(buf, root)
+	if filePath == "" {
 		return true
 	}
+	abs := filepath.Join(root, filePath)
 	b, err := e.loadFile(abs)
 	if err != nil {
 		e.Message("Cannot open %s: %v", abs, err)
