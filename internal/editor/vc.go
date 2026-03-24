@@ -24,12 +24,14 @@ type vcBackend interface {
 	Root(dir string) string
 	Status(root string) (string, error)
 	Diff(root, filePath string) (string, error)
+	DiffStaged(root, filePath string) (string, error)
 	Log(root, filePath string) (string, error)
 	Show(root, rev string) (string, error)
 	ShowLog(root, rev string) (string, error)
 	Grep(root, pattern string) (string, error)
 	Blame(root, filePath string) (string, error)
 	Revert(root, filePath string) error
+	Unstage(root, filePath string) error
 }
 
 var vcBackends = []vcBackend{gitBackend{}}
@@ -91,6 +93,17 @@ func (gitBackend) Diff(root, filePath string) (string, error) {
 	return string(out), err
 }
 
+func (gitBackend) DiffStaged(root, filePath string) (string, error) {
+	var cmd *exec.Cmd
+	if filePath != "" {
+		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "diff", "--staged", "--", filePath) //nolint:gosec
+	} else {
+		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "diff", "--staged") //nolint:gosec
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func (gitBackend) Log(root, filePath string) (string, error) {
 	args := []string{"-C", root, "log", "--oneline", "-50"}
 	if filePath != "" {
@@ -125,6 +138,20 @@ func (gitBackend) Revert(root, filePath string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git restore: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (gitBackend) Unstage(root, filePath string) error {
+	var cmd *exec.Cmd
+	if filePath != "" {
+		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "restore", "--staged", "--", filePath) //nolint:gosec
+	} else {
+		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "restore", "--staged") //nolint:gosec
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git restore --staged: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -833,9 +860,16 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 		if relPath != "" {
 			absPath = filepath.Join(root, relPath)
 		}
+		// Try unstaged diff first; fall back to staged diff.
 		text, err := be.Diff(root, absPath)
 		if err != nil && text == "" {
 			text = err.Error()
+		}
+		if text == "" {
+			text, err = be.DiffStaged(root, absPath)
+			if err != nil && text == "" {
+				text = err.Error()
+			}
 		}
 		if text == "" {
 			e.Message("vc-status: no uncommitted changes")
@@ -846,6 +880,32 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 		diffBuf := e.ActiveBuffer()
 		e.vcLogRoots[diffBuf] = root
 		e.vcParent[diffBuf] = statusBuf
+		return true
+	}
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'u' {
+		if root == "" {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		relPath := vcStatusFileAtPoint(buf, root)
+		absPath := ""
+		if relPath != "" {
+			absPath = filepath.Join(root, relPath)
+		}
+		if err := be.Unstage(root, absPath); err != nil {
+			e.Message("vc-status: %v", err)
+			return true
+		}
+		text, err := be.Status(root)
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		e.vcShowOutput("*vc-status*", text, "vc-status")
+		e.vcLogRoots[e.ActiveBuffer()] = root
 		return true
 	}
 

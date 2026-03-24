@@ -5,9 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/elisp"
 	"github.com/skybert/gomacs/internal/keymap"
+	"github.com/skybert/gomacs/internal/terminal"
 	"github.com/skybert/gomacs/internal/window"
 )
 
@@ -1356,5 +1358,93 @@ func TestDowncaseWordUsesOneUndoStep(t *testing.T) {
 	// Must be exactly one undo step (ReplaceString produces one record).
 	if b.ApplyUndo() {
 		t.Fatal("expected only one undo record for downcase-word")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isearch: spurious modifier on printable runes (hyphen fix)
+// ---------------------------------------------------------------------------
+
+// keRune builds a KeyEvent for a printable rune with the given modifiers.
+func keRune(r rune, mod tcell.ModMask) terminal.KeyEvent {
+	return terminal.KeyEvent{Key: tcell.KeyRune, Rune: r, Mod: mod}
+}
+
+// startFwdIsearch puts e into forward isearch mode starting at pos.
+func startFwdIsearch(e *Editor, pos int) {
+	b := e.ActiveBuffer()
+	b.SetPoint(pos)
+	e.isearching = true
+	e.isearchFwd = true
+	e.isearchStr = ""
+	e.isearchStart = pos
+}
+
+// TestIsearchHyphenNoModifier: plain '-' (Mod==0) must append to search string.
+func TestIsearchHyphenNoModifier(t *testing.T) {
+	e := newTestEditor("sort-lines")
+	startFwdIsearch(e, 0)
+	e.isearchStr = "sort"
+	e.isearchHandleKey(keRune('-', 0))
+	if !e.isearching {
+		t.Fatal("isearch exited after '-' with no modifier")
+	}
+	if e.isearchStr != "sort-" {
+		t.Errorf("isearchStr = %q, want %q", e.isearchStr, "sort-")
+	}
+}
+
+// TestIsearchHyphenSpuriousModifier: '-' with a non-Ctrl/non-Alt modifier
+// must still append to the search string, not exit isearch.
+func TestIsearchHyphenSpuriousModifier(t *testing.T) {
+	e := newTestEditor("sort-lines")
+	startFwdIsearch(e, 0)
+	e.isearchStr = "sort"
+	e.isearchHandleKey(keRune('-', tcell.ModShift))
+	if !e.isearching {
+		t.Fatal("isearch exited after '-' with spurious ModShift")
+	}
+	if e.isearchStr != "sort-" {
+		t.Errorf("isearchStr = %q, want %q", e.isearchStr, "sort-")
+	}
+}
+
+// TestIsearchCtrlKeyExitsIsearch: Ctrl+char must still exit isearch.
+func TestIsearchCtrlKeyExitsIsearch(t *testing.T) {
+	e := newTestEditor("sort-lines")
+	startFwdIsearch(e, 0)
+	e.isearchStr = "sort"
+	e.isearchHandleKey(keRune('g', tcell.ModCtrl))
+	if e.isearching {
+		t.Fatal("isearch should exit on Ctrl+key")
+	}
+}
+
+// TestIsearchAltKeyExitsIsearch: Alt+char must still exit isearch.
+func TestIsearchAltKeyExitsIsearch(t *testing.T) {
+	e := newTestEditor("sort-lines")
+	startFwdIsearch(e, 0)
+	e.isearchStr = "sort"
+	e.isearchHandleKey(keRune('x', tcell.ModAlt))
+	if e.isearching {
+		t.Fatal("isearch should exit on Alt+key")
+	}
+}
+
+// TestIsearchHyphenFindsMatch: full round-trip — typing "sort-" locates
+// "sort-lines" in the buffer.
+func TestIsearchHyphenFindsMatch(t *testing.T) {
+	e := newTestEditor("foo\nsort-lines\nbar")
+	startFwdIsearch(e, 0)
+	for _, r := range "sort-" {
+		e.isearchHandleKey(keRune(r, 0))
+		if !e.isearching {
+			t.Fatalf("isearch exited after typing %q", string(r))
+		}
+	}
+	got := e.ActiveBuffer().Point()
+	want := len([]rune("foo\nsort-"))
+	if got != want {
+		t.Errorf("point after \"sort-\" = %d, want %d", got, want)
 	}
 }

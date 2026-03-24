@@ -1395,7 +1395,7 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 			return
 		}
 		// Plain printable rune → self-insert.
-		if ke.Key == tcell.KeyRune && ke.Mod == 0 && unicode.IsPrint(ke.Rune) {
+		if ke.Key == tcell.KeyRune && ke.Mod&(tcell.ModCtrl|tcell.ModAlt) == 0 && unicode.IsPrint(ke.Rune) {
 			e.selfInsert(ke.Rune)
 		}
 		return
@@ -1680,7 +1680,7 @@ func (e *Editor) dispatchMinibufKey(ke terminal.KeyEvent) {
 				buf.Delete(pt, pos-pt)
 				e.refreshMinibufCandidates()
 			}
-		case ke.Mod == 0 && unicode.IsPrint(ke.Rune):
+		case ke.Mod&(tcell.ModCtrl|tcell.ModAlt) == 0 && unicode.IsPrint(ke.Rune):
 			buf.Insert(pt, ke.Rune)
 			buf.SetPoint(pt + 1)
 			e.refreshMinibufCandidates()
@@ -1977,7 +1977,7 @@ func (e *Editor) isearchHandleKey(ke terminal.KeyEvent) {
 		}
 
 	default:
-		if ke.Key == tcell.KeyRune && ke.Mod == 0 && unicode.IsPrint(ke.Rune) {
+		if ke.Key == tcell.KeyRune && ke.Mod&(tcell.ModCtrl|tcell.ModAlt) == 0 && unicode.IsPrint(ke.Rune) {
 			e.isearchStr += string(ke.Rune)
 			e.isearchFind()
 		} else {
