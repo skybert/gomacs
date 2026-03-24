@@ -2,6 +2,7 @@ package editor
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -26,8 +27,19 @@ type compilationError struct {
 // Covers Go compiler, golangci-lint, staticcheck, and similar tools.
 var errRe = regexp.MustCompile(`^([^:\s][^:]*):(\d+)(?::(\d+))?:`)
 
-// cmdBuild runs "make" in the VC root (falling back to cwd) and streams the
-// output into a *compilation* buffer shown in a bottom split window (M-x build).
+// defaultBuildCommand returns the suggested build command for dir.
+// Returns "mvn clean install" if a pom.xml is present, otherwise "make".
+func defaultBuildCommand(dir string) string {
+	if _, err := os.Stat(filepath.Join(dir, "pom.xml")); err == nil {
+		return "mvn clean install"
+	}
+	return "make"
+}
+
+// cmdBuild prompts for a build command (defaulting to "make" or
+// "mvn clean install" for Maven projects) and runs it in the VC root
+// (falling back to cwd). Output goes into a *compilation* buffer shown in a
+// bottom split window (M-x build).
 func (e *Editor) cmdBuild() {
 	e.clearArg()
 
@@ -44,6 +56,22 @@ func (e *Editor) cmdBuild() {
 		}
 	}
 
+	def := defaultBuildCommand(dir)
+	e.ReadMinibuffer("Build command: ", func(cmdStr string) {
+		cmdStr = strings.TrimSpace(cmdStr)
+		if cmdStr == "" {
+			cmdStr = def
+		}
+		e.runBuild(dir, cmdStr)
+	})
+	// Pre-fill with the default command so the user can edit or accept it.
+	e.minibufBuf.InsertString(0, def)
+	e.minibufBuf.SetPoint(e.minibufBuf.Len())
+}
+
+// runBuild executes cmdStr in dir and streams the output into the
+// *compilation* buffer.
+func (e *Editor) runBuild(dir, cmdStr string) {
 	// Get or create the *compilation* buffer.
 	compBuf := e.FindBuffer("*compilation*")
 	if compBuf == nil {
@@ -52,19 +80,26 @@ func (e *Editor) cmdBuild() {
 	}
 	compBuf.SetReadOnly(false)
 	compBuf.Delete(0, compBuf.Len())
-	compBuf.InsertString(0, "Running make…\n")
+	compBuf.InsertString(0, "Running "+cmdStr+"…\n")
 	compBuf.SetMode("compilation")
 	compBuf.SetReadOnly(true)
 
 	// Show the compilation buffer in a bottom split.
 	e.showCompilationWindow(compBuf)
 
-	e.Message("Running make…")
+	e.Message("Running %s…", cmdStr)
 
+	parts := strings.Fields(cmdStr)
 	e.lspAsync(func() func() {
-		cmd := exec.CommandContext(context.Background(), "make") //nolint:gosec
+		var cmd *exec.Cmd
+		if len(parts) == 1 {
+			cmd = exec.CommandContext(context.Background(), parts[0]) //nolint:gosec
+		} else {
+			cmd = exec.CommandContext(context.Background(), parts[0], parts[1:]...) //nolint:gosec
+		}
 		cmd.Dir = dir
-		out, _ := cmd.CombinedOutput()
+		out, runErr := cmd.CombinedOutput()
+		exitOK := runErr == nil
 		raw := string(out)
 		plain, ansiSpans := syntax.ANSIParse(raw)
 
@@ -97,6 +132,8 @@ func (e *Editor) cmdBuild() {
 			compBuf.Delete(0, compBuf.Len())
 			compBuf.InsertString(0, plain)
 			compBuf.SetReadOnly(true)
+			// Record exit status for modeline colouring.
+			e.compilationExitOK = &exitOK
 			// Store combined highlighter so getSpanCache uses it.
 			e.customHighlighters[compBuf] = syntax.ANSIHighlighter{Spans: allSpans}
 			// Invalidate span cache so next render uses the new highlighter.

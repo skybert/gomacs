@@ -240,6 +240,8 @@ func init() {
 		"Run VCS grep and navigate results (C-x v G).")
 	registerCommand("vc-next-action", (*Editor).cmdVcNextAction,
 		"Stage the file or open a commit buffer if changes are already staged (C-x v v).")
+	registerCommand("vc-revert", (*Editor).cmdVcRevert,
+		"Revert the current file to its last committed version (C-x v u).")
 	registerCommand("vc-annotate", (*Editor).cmdVcAnnotate,
 		"Show git blame annotation for the current file (C-x v g).")
 	registerCommand("messages", (*Editor).cmdMessages,

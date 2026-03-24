@@ -238,6 +238,9 @@ type Editor struct {
 	// compilation state
 	compilationErrors   []compilationError
 	compilationErrorIdx int
+	// compilationExitOK is nil before any build, true if the last build
+	// exited 0, false otherwise.  Used to colour the modeline buffer name.
+	compilationExitOK *bool
 	// customHighlighters overrides the default mode-based highlighter per buffer.
 	// Used by the compilation buffer to supply pre-computed ANSI spans.
 	customHighlighters map[*buffer.Buffer]syntax.Highlighter
@@ -650,6 +653,7 @@ func (e *Editor) setupKeymaps() {
 	cxv.Bind(keymap.PlainKey('g'), "vc-annotate")
 	cxv.Bind(keymap.PlainKey('G'), "vc-grep")
 	cxv.Bind(keymap.PlainKey('v'), "vc-next-action")
+	cxv.Bind(keymap.PlainKey('u'), "vc-revert")
 }
 
 // loadInitFile tries ~/.gomacs and ~/.config/gomacs/init.el in that order.
@@ -842,6 +846,39 @@ func (e *Editor) FindBuffer(name string) *buffer.Buffer {
 		}
 	}
 	return nil
+}
+
+// removeWindowShowingBuf removes the window that shows buf (if any) and
+// gives its screen area back to the adjacent window.  The active window is
+// never removed.  No-op when only one window exists or buf is not visible.
+func (e *Editor) removeWindowShowingBuf(buf *buffer.Buffer) {
+	if len(e.windows) <= 1 {
+		return
+	}
+	idx := -1
+	for i, w := range e.windows {
+		if w != e.activeWin && w.Buf() == buf {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	toRemove := e.windows[idx]
+	// Give the removed window's rows to the neighbour: prefer the window
+	// immediately above (idx-1), otherwise take idx+1.
+	neighbourIdx := idx - 1
+	if neighbourIdx < 0 {
+		neighbourIdx = idx + 1
+	}
+	neighbour := e.windows[neighbourIdx]
+	// Compute the combined region that both windows occupied.
+	top := min(toRemove.Top(), neighbour.Top())
+	totalH := toRemove.Height() + neighbour.Height()
+	neighbour.SetRegion(top, neighbour.Left(), neighbour.Width(), totalH)
+	// Remove toRemove from the slice.
+	e.windows = append(e.windows[:idx], e.windows[idx+1:]...)
 }
 
 // showBuf displays b in the active window and records the previous buffer
@@ -2383,6 +2420,29 @@ func (e *Editor) renderModeline(w *window.Window) {
 	if len(label) > winW {
 		label = label[:winW]
 	}
+
+	// For the *compilation* buffer, colour the buffer-name segment on the
+	// modeline using the theme's compilation-ok / compilation-fail face.
+	if buf.Name() == "*compilation*" && e.compilationExitOK != nil {
+		nameFace := syntax.FaceCompilationFail
+		if *e.compilationExitOK {
+			nameFace = syntax.FaceCompilationOK
+		}
+		// Blend: keep the modeline background, override only Fg/Bold.
+		nameFace.Bg = syntax.FaceModeline.Bg
+		// Split label around the buffer name.
+		prefix := fmt.Sprintf(" %s  ", modifiedMark)
+		suffix := label[len(prefix)+len(fmt.Sprintf("%-20s", name)):]
+		nameField := fmt.Sprintf("%-20s", name)
+		col := w.Left()
+		e.term.DrawString(col, modeRow, prefix, syntax.FaceModeline)
+		col += len([]rune(prefix))
+		e.term.DrawString(col, modeRow, nameField, nameFace)
+		col += len([]rune(nameField))
+		e.term.DrawString(col, modeRow, suffix, syntax.FaceModeline)
+		return
+	}
+
 	e.term.DrawString(w.Left(), modeRow, label, syntax.FaceModeline)
 }
 

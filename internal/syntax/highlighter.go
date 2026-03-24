@@ -40,6 +40,12 @@ var (
 	FaceCandidate = Face{Fg: "default", Bg: "default"}
 	// FaceSelected is used for the highlighted completion candidate.
 	FaceSelected = Face{Reverse: true}
+	// FaceCompilationOK is used for the *compilation* buffer name on the
+	// modeline when the last build succeeded.
+	FaceCompilationOK = Face{Fg: "green", Bold: true}
+	// FaceCompilationFail is used for the *compilation* buffer name on the
+	// modeline when the last build failed.
+	FaceCompilationFail = Face{Fg: "red", Bold: true}
 )
 
 // Span is a highlighted range in the buffer

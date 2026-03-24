@@ -2,6 +2,7 @@ package editor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,7 @@ type vcBackend interface {
 	ShowLog(root, rev string) (string, error)
 	Grep(root, pattern string) (string, error)
 	Blame(root, filePath string) (string, error)
+	Revert(root, filePath string) error
 }
 
 var vcBackends = []vcBackend{gitBackend{}}
@@ -116,6 +118,15 @@ func (gitBackend) Grep(root, pattern string) (string, error) {
 func (gitBackend) Blame(root, filePath string) (string, error) {
 	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "blame", "--date=short", "--abbrev=8", filePath).CombinedOutput() //nolint:gosec
 	return string(out), err
+}
+
+func (gitBackend) Revert(root, filePath string) error {
+	cmd := exec.CommandContext(context.Background(), "git", "-C", root, "restore", "--", filePath) //nolint:gosec
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git restore: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +257,78 @@ func (e *Editor) cmdVcGrep() {
 		}
 		e.vcShowOutput("*vc grep*", text, "vc-grep")
 		e.vcLogRoots[e.ActiveBuffer()] = root
+	})
+}
+
+// cmdVcRevert reverts the current file to its last committed version (C-x v u).
+// Prompts for confirmation before discarding changes.
+func (e *Editor) cmdVcRevert() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	filePath := buf.Filename()
+	if filePath == "" {
+		e.Message("vc-revert: buffer has no associated file")
+		return
+	}
+	be, root := vcFind(vcDir(buf))
+	if be == nil {
+		e.Message("vc-revert: not in a version control repository")
+		return
+	}
+
+	// Get the diff first; if there's nothing to revert, say so and stop.
+	text, err := be.Diff(root, filePath)
+	if err != nil && text == "" {
+		e.Message("vc-revert: %v", err)
+		return
+	}
+	if text == "" {
+		e.Message("vc-revert: no uncommitted changes in %s", filepath.Base(filePath))
+		return
+	}
+
+	// Show the diff in a bottom split so the user can see what will be lost.
+	diffBuf := e.FindBuffer("*vc-diff*")
+	if diffBuf == nil {
+		diffBuf = buffer.NewWithContent("*vc-diff*", text)
+		e.buffers = append(e.buffers, diffBuf)
+	} else {
+		diffBuf.SetReadOnly(false)
+		diffBuf.Delete(0, diffBuf.Len())
+		diffBuf.InsertString(0, text)
+	}
+	diffBuf.SetMode("diff")
+	diffBuf.SetReadOnly(true)
+	diffBuf.SetPoint(0)
+	e.showCompilationWindow(diffBuf)
+
+	// Prompt with the source buffer still active.
+	e.ReadMinibuffer(fmt.Sprintf("Revert %s (discard changes above)? (yes or no) ", filepath.Base(filePath)), func(ans string) {
+		// Close the diff split we opened.
+		e.removeWindowShowingBuf(diffBuf)
+
+		ans = strings.TrimSpace(strings.ToLower(ans))
+		if ans != "yes" {
+			e.Message("Revert cancelled")
+			return
+		}
+		if err := be.Revert(root, filePath); err != nil {
+			e.Message("vc-revert: %v", err)
+			return
+		}
+		// Reload the buffer from disk.
+		data, err := os.ReadFile(filePath) //nolint:gosec
+		if err != nil {
+			e.Message("vc-revert: reverted on disk but could not re-read: %v", err)
+			return
+		}
+		buf.SetReadOnly(false)
+		pt := buf.Point()
+		buf.Delete(0, buf.Len())
+		buf.InsertString(0, string(data))
+		buf.SetModified(false)
+		buf.SetPoint(min(pt, buf.Len()))
+		e.Message("Reverted %s", filepath.Base(filePath))
 	})
 }
 
