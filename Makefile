@@ -20,7 +20,7 @@ build: fmt
 # are set in the CI/CD conf.
 dist:
 	@mkdir -p $(DISTDIR)
-	CGO_ENABLED=0 go build -o dist/$(BINARY)-${GOOS}-${GOARCH} .
+	CGO_ENABLED=0 go build -ldflags "-X main.Version=$(VERSION)" -o dist/$(BINARY)-$(VERSION)-${GOOS}-${GOARCH} .
 
 run: build
 	./$(BUILDDIR)/$(BINARY)

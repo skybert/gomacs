@@ -27,7 +27,13 @@ var Version = "dev"
 
 func main() {
 	quick := flag.Bool("Q", false, "start with minimum customisation (skip init file)")
+	version := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *version {
+		fmt.Println(Version)
+		os.Exit(0)
+	}
 
 	// Drain piped stdin before tcell claims /dev/tty for keyboard input.
 	var stdinData []byte

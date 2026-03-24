@@ -369,6 +369,84 @@ func isWordRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
 }
 
+// subwordForwardOne advances past one subword from pt and returns the new
+// position.  Subword boundaries are:
+//   - non-word → word transitions (standard word start)
+//   - lowercase/digit → uppercase transitions (camelCase: fooBar, FooBar)
+//   - end of an all-caps run before a TitleCase word (FOOBar → stops at B)
+func subwordForwardOne(buf *buffer.Buffer, pt int) int {
+	length := buf.Len()
+	// Skip non-word chars.
+	for pt < length && !isWordRune(buf.RuneAt(pt)) {
+		pt++
+	}
+	if pt >= length {
+		return pt
+	}
+	ch := buf.RuneAt(pt)
+	if !unicode.IsUpper(ch) {
+		// Lowercase / digit / underscore run: skip until uppercase or end.
+		for pt < length && isWordRune(buf.RuneAt(pt)) && !unicode.IsUpper(buf.RuneAt(pt)) {
+			pt++
+		}
+		return pt
+	}
+	// Uppercase start.  Peek at next char.
+	if pt+1 < length && isWordRune(buf.RuneAt(pt+1)) && !unicode.IsUpper(buf.RuneAt(pt+1)) {
+		// TitleCase (e.g. Foo): skip this uppercase then trailing lowercase run.
+		pt++
+		for pt < length && isWordRune(buf.RuneAt(pt)) && !unicode.IsUpper(buf.RuneAt(pt)) {
+			pt++
+		}
+		return pt
+	}
+	// All-caps run (e.g. FOO, FOOBar).  Advance while uppercase; stop just
+	// before the uppercase that starts the next TitleCase word.
+	for pt < length && unicode.IsUpper(buf.RuneAt(pt)) {
+		pt++
+		// After advancing: if we're now at an uppercase whose next char is a
+		// lowercase word-rune, the next subword starts here → stop.
+		if pt < length && unicode.IsUpper(buf.RuneAt(pt)) {
+			if pt+1 < length && isWordRune(buf.RuneAt(pt+1)) && !unicode.IsUpper(buf.RuneAt(pt+1)) {
+				break
+			}
+		}
+	}
+	return pt
+}
+
+// subwordBackwardOne moves backward past one subword from pt and returns the
+// new position.
+func subwordBackwardOne(buf *buffer.Buffer, pt int) int {
+	// Skip non-word chars backward.
+	for pt > 0 && !isWordRune(buf.RuneAt(pt-1)) {
+		pt--
+	}
+	if pt <= 0 {
+		return 0
+	}
+	// Skip lowercase/digit/underscore run backward.
+	for pt > 0 && isWordRune(buf.RuneAt(pt-1)) && !unicode.IsUpper(buf.RuneAt(pt-1)) {
+		pt--
+	}
+	// Skip uppercase run backward.
+	// For TitleCase (single upper before lowercase, e.g. B in Bar): skip only
+	// that one uppercase.  For AllCaps (e.g. FOO): skip all uppercase.
+	for pt > 0 && unicode.IsUpper(buf.RuneAt(pt-1)) {
+		pt--
+		// After backing up: if the char at pt (that we just passed over) is
+		// uppercase and pt+1 is a lowercase word-rune, this is a TitleCase
+		// start → don't back up further.
+		if unicode.IsUpper(buf.RuneAt(pt)) {
+			next := pt + 1
+			if next < buf.Len() && isWordRune(buf.RuneAt(next)) && !unicode.IsUpper(buf.RuneAt(next)) {
+				break
+			}
+		}
+	}
+	return pt
+}
+
 // ---------------------------------------------------------------------------
 // Movement commands
 // ---------------------------------------------------------------------------
@@ -463,13 +541,15 @@ func (e *Editor) cmdForwardWord() {
 	pt := buf.Point()
 	length := buf.Len()
 	for range n {
-		// Skip non-word chars.
-		for pt < length && !isWordRune(buf.RuneAt(pt)) {
-			pt++
-		}
-		// Skip word chars.
-		for pt < length && isWordRune(buf.RuneAt(pt)) {
-			pt++
+		if e.subwordMode {
+			pt = subwordForwardOne(buf, pt)
+		} else {
+			for pt < length && !isWordRune(buf.RuneAt(pt)) {
+				pt++
+			}
+			for pt < length && isWordRune(buf.RuneAt(pt)) {
+				pt++
+			}
 		}
 	}
 	buf.SetPoint(pt)
@@ -481,13 +561,15 @@ func (e *Editor) cmdBackwardWord() {
 	buf := e.ActiveBuffer()
 	pt := buf.Point()
 	for range n {
-		// Skip non-word chars going backward.
-		for pt > 0 && !isWordRune(buf.RuneAt(pt-1)) {
-			pt--
-		}
-		// Skip word chars going backward.
-		for pt > 0 && isWordRune(buf.RuneAt(pt-1)) {
-			pt--
+		if e.subwordMode {
+			pt = subwordBackwardOne(buf, pt)
+		} else {
+			for pt > 0 && !isWordRune(buf.RuneAt(pt-1)) {
+				pt--
+			}
+			for pt > 0 && isWordRune(buf.RuneAt(pt-1)) {
+				pt--
+			}
 		}
 	}
 	buf.SetPoint(pt)
@@ -515,20 +597,25 @@ func (e *Editor) cmdScrollUp() {
 	w := e.activeWin
 	lines := max(w.Height()-2, 1)
 	w.ScrollUp(n * lines)
-	// Move point to keep it on screen using buffer positions directly
-	// (avoids O(file_size) LineCol call).
+	// Clamp cursor using the actual view lines so wrap mode is handled
+	// correctly (prevents EnsurePointVisible from undoing the scroll).
 	buf := e.ActiveBuffer()
-	sl := w.ScrollLine()
-	// Request height entries: [0]=first visible, [height-2]=last visible,
-	// [height-1]=first invisible line (sentinel for below-view check).
-	starts := buf.LineStartsFrom(sl, w.Height())
-	firstPos := starts[0]
-	sentinelPos := starts[max(w.Height()-1, 0)]
 	pt := buf.Point()
-	if pt < firstPos {
-		buf.SetPoint(firstPos)
-	} else if pt >= sentinelPos && sentinelPos < buf.Len() {
-		buf.SetPoint(starts[max(w.Height()-2, 0)])
+	viewLines := w.ViewLines()
+	if len(viewLines) == 0 {
+		return
+	}
+	first := viewLines[0].StartPos
+	last := viewLines[0].StartPos
+	for _, vl := range viewLines {
+		if vl.Line > 0 {
+			last = vl.StartPos
+		}
+	}
+	if pt < first {
+		buf.SetPoint(first)
+	} else if pt > last {
+		buf.SetPoint(last)
 	}
 }
 
@@ -539,15 +626,22 @@ func (e *Editor) cmdScrollDown() {
 	lines := max(w.Height()-2, 1)
 	w.ScrollDown(n * lines)
 	buf := e.ActiveBuffer()
-	sl := w.ScrollLine()
-	starts := buf.LineStartsFrom(sl, w.Height())
-	firstPos := starts[0]
-	sentinelPos := starts[max(w.Height()-1, 0)]
 	pt := buf.Point()
-	if pt < firstPos {
-		buf.SetPoint(firstPos)
-	} else if pt >= sentinelPos && sentinelPos < buf.Len() {
-		buf.SetPoint(starts[max(w.Height()-2, 0)])
+	viewLines := w.ViewLines()
+	if len(viewLines) == 0 {
+		return
+	}
+	first := viewLines[0].StartPos
+	last := viewLines[0].StartPos
+	for _, vl := range viewLines {
+		if vl.Line > 0 {
+			last = vl.StartPos
+		}
+	}
+	if pt < first {
+		buf.SetPoint(first)
+	} else if pt > last {
+		buf.SetPoint(last)
 	}
 }
 
@@ -792,11 +886,15 @@ func (e *Editor) cmdKillWord() {
 	end := pt
 	length := buf.Len()
 	for range n {
-		for end < length && !isWordRune(buf.RuneAt(end)) {
-			end++
-		}
-		for end < length && isWordRune(buf.RuneAt(end)) {
-			end++
+		if e.subwordMode {
+			end = subwordForwardOne(buf, end)
+		} else {
+			for end < length && !isWordRune(buf.RuneAt(end)) {
+				end++
+			}
+			for end < length && isWordRune(buf.RuneAt(end)) {
+				end++
+			}
 		}
 	}
 	if end > pt {
@@ -816,11 +914,15 @@ func (e *Editor) cmdBackwardKillWord() {
 	pt := buf.Point()
 	start := pt
 	for range n {
-		for start > 0 && !isWordRune(buf.RuneAt(start-1)) {
-			start--
-		}
-		for start > 0 && isWordRune(buf.RuneAt(start-1)) {
-			start--
+		if e.subwordMode {
+			start = subwordBackwardOne(buf, start)
+		} else {
+			for start > 0 && !isWordRune(buf.RuneAt(start-1)) {
+				start--
+			}
+			for start > 0 && isWordRune(buf.RuneAt(start-1)) {
+				start--
+			}
 		}
 	}
 	if start < pt {
@@ -1476,12 +1578,21 @@ func (e *Editor) cmdUpcaseWord() {
 	pt := buf.Point()
 	length := buf.Len()
 	for range n {
-		for pt < length && !isWordRune(buf.RuneAt(pt)) {
-			pt++
-		}
 		start := pt
-		for pt < length && isWordRune(buf.RuneAt(pt)) {
-			pt++
+		if e.subwordMode {
+			pt = subwordForwardOne(buf, pt)
+			// subwordForwardOne skips leading non-word chars; start is after them.
+			for start < pt && !isWordRune(buf.RuneAt(start)) {
+				start++
+			}
+		} else {
+			for pt < length && !isWordRune(buf.RuneAt(pt)) {
+				pt++
+			}
+			start = pt
+			for pt < length && isWordRune(buf.RuneAt(pt)) {
+				pt++
+			}
 		}
 		if pt > start {
 			buf.ReplaceString(start, pt-start, strings.ToUpper(buf.Substring(start, pt)))
@@ -1497,12 +1608,20 @@ func (e *Editor) cmdDowncaseWord() {
 	pt := buf.Point()
 	length := buf.Len()
 	for range n {
-		for pt < length && !isWordRune(buf.RuneAt(pt)) {
-			pt++
-		}
 		start := pt
-		for pt < length && isWordRune(buf.RuneAt(pt)) {
-			pt++
+		if e.subwordMode {
+			pt = subwordForwardOne(buf, pt)
+			for start < pt && !isWordRune(buf.RuneAt(start)) {
+				start++
+			}
+		} else {
+			for pt < length && !isWordRune(buf.RuneAt(pt)) {
+				pt++
+			}
+			start = pt
+			for pt < length && isWordRune(buf.RuneAt(pt)) {
+				pt++
+			}
 		}
 		if pt > start {
 			buf.ReplaceString(start, pt-start, strings.ToLower(buf.Substring(start, pt)))
@@ -1518,12 +1637,20 @@ func (e *Editor) cmdCapitalizeWord() {
 	pt := buf.Point()
 	length := buf.Len()
 	for range n {
-		for pt < length && !isWordRune(buf.RuneAt(pt)) {
-			pt++
-		}
 		start := pt
-		for pt < length && isWordRune(buf.RuneAt(pt)) {
-			pt++
+		if e.subwordMode {
+			pt = subwordForwardOne(buf, pt)
+			for start < pt && !isWordRune(buf.RuneAt(start)) {
+				start++
+			}
+		} else {
+			for pt < length && !isWordRune(buf.RuneAt(pt)) {
+				pt++
+			}
+			start = pt
+			for pt < length && isWordRune(buf.RuneAt(pt)) {
+				pt++
+			}
 		}
 		if pt > start {
 			word := buf.Substring(start, pt)

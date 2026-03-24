@@ -106,11 +106,15 @@ func (e *Editor) cmdMarkWord() {
 	end := pt
 	length := buf.Len()
 	for range n {
-		for end < length && !isWordRune(buf.RuneAt(end)) {
-			end++
-		}
-		for end < length && isWordRune(buf.RuneAt(end)) {
-			end++
+		if e.subwordMode {
+			end = subwordForwardOne(buf, end)
+		} else {
+			for end < length && !isWordRune(buf.RuneAt(end)) {
+				end++
+			}
+			for end < length && isWordRune(buf.RuneAt(end)) {
+				end++
+			}
 		}
 	}
 	if buf.Mark() >= 0 {

@@ -183,6 +183,11 @@ type Editor struct {
 	// isSearchCaseFold enables case-insensitive isearch (default true).
 	isSearchCaseFold bool
 
+	// subwordMode, when true, makes word-motion commands stop at camelCase
+	// boundaries within identifiers (e.g. M-f on FooBar stops at Bar).
+	// Disable with (setq subword-mode nil).
+	subwordMode bool
+
 	// saveBufferDeleteTrailingWS enables deleting trailing whitespace on save (default true).
 	// Set to false via (setq save-buffer-delete-trailing-whitespace nil).
 	saveBufferDeleteTrailingWS bool
@@ -294,6 +299,7 @@ func New(opts Options) (*Editor, error) {
 		vcCommitRoots:              make(map[*buffer.Buffer]string),
 		fillColumn:                 70,
 		isSearchCaseFold:           true,
+		subwordMode:                true,
 		saveBufferDeleteTrailingWS: true,
 		visualLines:                true,
 		spellCommand:               "aspell",
@@ -692,12 +698,29 @@ func (e *Editor) applyElispConfig() {
 			e.isSearchCaseFold = false
 		}
 	}
+	if v, ok := e.lisp.GetGlobalVar("subword-mode"); ok {
+		switch val := v.(type) {
+		case elisp.Bool:
+			e.subwordMode = val.V
+		case elisp.Nil:
+			e.subwordMode = false
+		}
+	}
 	if v, ok := e.lisp.GetGlobalVar("lsp-completion-min-chars"); ok {
 		if i, ok := v.(elisp.Int); ok && i.V > 0 {
 			e.lspCompletionMinChars = int(i.V)
 		}
 	}
 	if v, ok := e.lisp.GetGlobalVar("save-buffer-delete-trailing-whitespace"); ok {
+		switch val := v.(type) {
+		case elisp.Bool:
+			e.saveBufferDeleteTrailingWS = val.V
+		case elisp.Nil:
+			e.saveBufferDeleteTrailingWS = false
+		}
+	}
+	// Also accept the shorter alias.
+	if v, ok := e.lisp.GetGlobalVar("delete-trailing-whitespace"); ok {
 		switch val := v.(type) {
 		case elisp.Bool:
 			e.saveBufferDeleteTrailingWS = val.V
