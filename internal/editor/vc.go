@@ -330,12 +330,12 @@ func (e *Editor) cmdVcRevert() {
 	e.showCompilationWindow(diffBuf)
 
 	// Prompt with the source buffer still active.
-	e.ReadMinibuffer(fmt.Sprintf("Revert %s (discard changes above)? (yes or no) ", filepath.Base(filePath)), func(ans string) {
+	e.ReadMinibuffer(fmt.Sprintf("Revert %s (discard changes above)? (y/n) ", filepath.Base(filePath)), func(ans string) {
 		// Close the diff split we opened.
 		e.removeWindowShowingBuf(diffBuf)
 
 		ans = strings.TrimSpace(strings.ToLower(ans))
-		if ans != "yes" {
+		if ans != "yes" && ans != "y" {
 			e.Message("Revert cancelled")
 			return
 		}
@@ -934,6 +934,31 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key == tcell.KeyRune && ke.Rune == 'c' {
 		if root == "" {
 			return true
+		}
+		// If point is on a header line (no file), check whether it's the
+		// "not staged" or "untracked" section and offer to stage everything.
+		relPath := vcStatusFileAtPoint(buf, root)
+		if relPath == "" {
+			pt := buf.Point()
+			bol := buf.BeginningOfLine(pt)
+			eol := buf.EndOfLine(pt)
+			line := strings.ToLower(buf.Substring(bol, eol))
+			if strings.Contains(line, "not staged") || strings.Contains(line, "untracked") {
+				e.Message("Stage all unstaged/untracked files and commit? (y/n)")
+				e.readCharPending = true
+				e.readCharCallback = func(r rune) {
+					if r != 'y' && r != 'Y' {
+						e.Message("Commit cancelled")
+						return
+					}
+					if err := exec.CommandContext(context.Background(), "git", "-C", root, "add", "-u").Run(); err != nil { //nolint:gosec
+						e.Message("git add -u failed: %v", err)
+						return
+					}
+					e.vcOpenCommitBuffer(root, "")
+				}
+				return true
+			}
 		}
 		e.vcOpenCommitBuffer(root, "")
 		return true

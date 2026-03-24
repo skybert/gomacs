@@ -227,21 +227,22 @@ func (e *Editor) cmdHelp() {
 
 	type configVar struct{ name, doc string }
 	configVars := []configVar{
+		{"delete-trailing-whitespace", "When t, save-buffer strips trailing whitespace. Default: t."},
 		{"fill-column", "Column target for fill-paragraph (M-q). Default: 70."},
+		{"go-indent", "Indent string for Go mode. Default: \"\\t\"."},
 		{"isearch-case-insensitive", "When t, isearch ignores case. Default: t."},
-		{"save-buffer-delete-trailing-whitespace", "When t, save-buffer strips trailing whitespace. Default: t."},
-		{"visual-lines", "When t, long lines wrap visually. Default: t."},
+		{"java-indent", "Indent string or width for Java mode. Default: 4."},
+		{"json-indent", "Indent string or width for JSON mode. Default: 2."},
+		{"lsp-completion-min-chars", "Minimum chars before LSP completion triggers. Default: 1."},
+		{"markdown-indent", "Indent string or width for Markdown mode. Default: 2."},
+		{"python-indent", "Indent string or width for Python mode. Default: 4."},
+		{"sh-indent", "Indent string or width for Bash mode. Default: 2."},
 		{"spell-command", "Path to spell-checker executable. Default: \"aspell\"."},
 		{"spell-language", "Language code for spell checker. Default: \"en\"."},
-		{"go-indent", "Indent string for Go mode. Default: \"\\t\"."},
-		{"python-indent", "Indent string or width for Python mode. Default: 4."},
-		{"java-indent", "Indent string or width for Java mode. Default: 4."},
-		{"sh-indent", "Indent string or width for Bash mode. Default: 2."},
-		{"json-indent", "Indent string or width for JSON mode. Default: 2."},
-		{"markdown-indent", "Indent string or width for Markdown mode. Default: 2."},
-		{"yaml-indent", "Indent string or width for YAML mode. Default: 2."},
+		{"subword-mode", "When t, word motion treats CamelCase sub-words. Default: t."},
 		{"theme", "Color theme name. Default: \"sweet\". Set with (setq theme 'sweet)."},
-		{"lsp-completion-min-chars", "Minimum chars before LSP completion triggers. Default: 1."},
+		{"visual-lines", "When t, long lines wrap visually. Default: t."},
+		{"yaml-indent", "Indent string or width for YAML mode. Default: 2."},
 	}
 	for _, cv := range configVars {
 		val := "(not set)"

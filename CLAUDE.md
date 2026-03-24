@@ -119,3 +119,14 @@ Every non-trivial Go function must have a corresponding unit test.
 - Build artefacts (coverage profiles, binaries) go under `build/`; never commit them.
 - The `terminal` package wraps tcell's screen directly; test only the pure helpers (`parseColor`, `faceToStyle`, `ParseKey`) — do not try to spin up a real screen in tests.
 - When adding a highlighter to `internal/syntax`, add a `*_test.go` alongside it covering keywords, strings, comments, and numbers.
+
+### Configuration variables
+
+When adding a new Elisp configuration variable (i.e. a new `GetGlobalVar` call in
+`applyElispConfig()` in `internal/editor/editor.go`), you **must** also:
+
+1. Add an entry to the `configVars` slice in `cmdHelp()` in `internal/editor/nav.go`
+   so that `M-x help` lists it with a description and its current value.
+2. Add a row to the configuration table in `doc/gomacs.1.in` (the man page).
+3. Update the `**Mode configuration via Elisp**` table in this file if the variable
+   is mode-specific, or add it as a standalone bullet if it is global.
