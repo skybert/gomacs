@@ -21,7 +21,8 @@ import (
 // Terminal wraps a tcell.Screen and provides the drawing API used by the
 // editor's rendering layer.
 type Terminal struct {
-	screen tcell.Screen
+	screen     tcell.Screen
+	styleCache map[syntax.Face]tcell.Style // faceToStyle cache; reset on theme change
 }
 
 // New initialises a new tcell screen.
@@ -37,7 +38,7 @@ func New() (*Terminal, error) {
 	// Disable mouse capture so that terminal text selection still works.
 	s.DisableMouse()
 	s.SetStyle(tcell.StyleDefault)
-	return &Terminal{screen: s}, nil
+	return &Terminal{screen: s, styleCache: make(map[syntax.Face]tcell.Style, 32)}, nil
 }
 
 // Close tears down the tcell screen and restores the terminal to its previous
@@ -66,7 +67,11 @@ func (t *Terminal) Show() {
 // SetCell draws a single rune at (col, row) using the colors and attributes
 // described by face.
 func (t *Terminal) SetCell(col, row int, ch rune, face syntax.Face) {
-	style := faceToStyle(face)
+	style, ok := t.styleCache[face]
+	if !ok {
+		style = faceToStyle(face)
+		t.styleCache[face] = style
+	}
 	t.screen.SetContent(col, row, ch, nil, style)
 }
 
@@ -74,12 +79,22 @@ func (t *Terminal) SetCell(col, row int, ch rune, face syntax.Face) {
 // Each rune in s advances col by one cell.  Combining characters and
 // wide runes are handled by tcell via SetContent.
 func (t *Terminal) DrawString(col, row int, s string, face syntax.Face) {
-	style := faceToStyle(face)
+	style, ok := t.styleCache[face]
+	if !ok {
+		style = faceToStyle(face)
+		t.styleCache[face] = style
+	}
 	x := col
 	for _, r := range s {
 		t.screen.SetContent(x, row, r, nil, style)
 		x++
 	}
+}
+
+// InvalidateStyleCache clears the faceToStyle cache.  Call this after a theme
+// change so that stale style values are not used for subsequent rendering.
+func (t *Terminal) InvalidateStyleCache() {
+	clear(t.styleCache)
 }
 
 // PollEvent blocks until a tcell event arrives and returns it.

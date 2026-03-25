@@ -140,8 +140,8 @@ func TestViewLinesText(t *testing.T) {
 		if vl[i].Line != tc.line {
 			t.Errorf("row %d: expected Line=%d, got %d", i, tc.line, vl[i].Line)
 		}
-		if vl[i].Text != tc.text {
-			t.Errorf("row %d: expected Text=%q, got %q", i, tc.text, vl[i].Text)
+		if got := w.Buf().Substring(vl[i].StartPos, vl[i].EndPos); got != tc.text {
+			t.Errorf("row %d: expected Text=%q, got %q", i, tc.text, got)
 		}
 	}
 }
@@ -162,8 +162,8 @@ func TestViewLinesPastEndOfBuffer(t *testing.T) {
 		if vl[i].Line != 0 {
 			t.Errorf("row %d beyond buffer: expected Line=0, got %d", i, vl[i].Line)
 		}
-		if vl[i].Text != "" {
-			t.Errorf("row %d beyond buffer: expected empty Text, got %q", i, vl[i].Text)
+		if vl[i].StartPos != vl[i].EndPos {
+			t.Errorf("row %d beyond buffer: expected empty (StartPos==EndPos), got [%d,%d)", i, vl[i].StartPos, vl[i].EndPos)
 		}
 	}
 }
@@ -253,8 +253,8 @@ func TestViewLinesWrapped(t *testing.T) {
 		if vl[i].Line != 1 {
 			t.Errorf("row %d: expected Line=1, got %d", i, vl[i].Line)
 		}
-		if vl[i].Text != want {
-			t.Errorf("row %d: expected Text=%q, got %q", i, want, vl[i].Text)
+		if got := buf.Substring(vl[i].StartPos, vl[i].EndPos); got != want {
+			t.Errorf("row %d: expected Text=%q, got %q", i, want, got)
 		}
 	}
 	for i := 3; i < 5; i++ {

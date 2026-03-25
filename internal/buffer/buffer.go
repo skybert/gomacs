@@ -45,6 +45,18 @@ type Buffer struct {
 	narrowed  bool
 	narrowMin int
 	narrowMax int // end of accessible region (exclusive)
+
+	// LineCol cache: avoids re-scanning the buffer every frame for the modeline.
+	lcacheValid bool
+	lcachePos   int
+	lcacheLine  int
+	lcacheCol   int
+	lcacheGen   int
+
+	// LineCount cache: avoids O(n) scan every frame from ViewLines.
+	lcountValid bool
+	lcountGen   int
+	lcountValue int
 }
 
 // New creates an empty buffer with the given name.
@@ -289,6 +301,8 @@ func (b *Buffer) deleteRunes(pos, count int) {
 // ---- string extraction -----------------------------------------------------
 
 // Substring returns the runes in [start, end) as a string.
+// It uses bulk copies of the gap-buffer segments instead of per-rune RuneAt
+// calls, which is significantly faster for large ranges.
 func (b *Buffer) Substring(start, end int) string {
 	length := b.Len()
 	if start < 0 {
@@ -300,16 +314,40 @@ func (b *Buffer) Substring(start, end int) string {
 	if start >= end {
 		return ""
 	}
-	runes := make([]rune, end-start)
-	for i := start; i < end; i++ {
-		runes[i-start] = b.RuneAt(i)
+
+	// Entire range is before the gap: direct slice.
+	if end <= b.gapStart {
+		return string(b.data[start:end])
 	}
-	return string(runes)
+	// Entire range is after the gap: offset by gap size.
+	gapSize := b.gapEnd - b.gapStart
+	if start >= b.gapStart {
+		return string(b.data[start+gapSize : end+gapSize])
+	}
+	// Range spans the gap: two bulk copies.
+	preLen := b.gapStart - start
+	postLen := end - b.gapStart
+	result := make([]rune, preLen+postLen)
+	copy(result, b.data[start:b.gapStart])
+	copy(result[preLen:], b.data[b.gapEnd:b.gapEnd+postLen])
+	return string(result)
 }
 
 // String returns the entire buffer content as a string.
+// It copies the two gap-buffer segments directly without per-rune overhead.
 func (b *Buffer) String() string {
-	return b.Substring(0, b.Len())
+	pre := b.data[:b.gapStart]
+	post := b.data[b.gapEnd:]
+	if len(post) == 0 {
+		return string(pre)
+	}
+	if len(pre) == 0 {
+		return string(post)
+	}
+	result := make([]rune, len(pre)+len(post))
+	n := copy(result, pre)
+	copy(result[n:], post)
+	return string(result)
 }
 
 // ---- cursor / mark ---------------------------------------------------------
@@ -403,7 +441,12 @@ func (b *Buffer) NarrowMax() int {
 // ---- line / column helpers -------------------------------------------------
 
 // LineCount returns the number of lines (newlines + 1).
+// The result is cached by changeGen so repeated calls within the same frame
+// are O(1) instead of O(n).
 func (b *Buffer) LineCount() int {
+	if b.lcountValid && b.lcountGen == b.changeGen {
+		return b.lcountValue
+	}
 	n := 1
 	length := b.Len()
 	for i := range length {
@@ -411,13 +454,21 @@ func (b *Buffer) LineCount() int {
 			n++
 		}
 	}
+	b.lcountValid = true
+	b.lcountGen = b.changeGen
+	b.lcountValue = n
 	return n
 }
 
 // LineCol returns the 1-based line number and 0-based column for pos.
+// The result is cached by (changeGen, pos) so repeated calls with the same
+// cursor position cost O(1) instead of O(pos).
 func (b *Buffer) LineCol(pos int) (line, col int) {
 	if pos > b.Len() {
 		pos = b.Len()
+	}
+	if b.lcacheValid && b.lcacheGen == b.changeGen && b.lcachePos == pos {
+		return b.lcacheLine, b.lcacheCol
 	}
 	line = 1
 	col = 0
@@ -429,6 +480,11 @@ func (b *Buffer) LineCol(pos int) (line, col int) {
 			col++
 		}
 	}
+	b.lcacheValid = true
+	b.lcachePos = pos
+	b.lcacheLine = line
+	b.lcacheCol = col
+	b.lcacheGen = b.changeGen
 	return line, col
 }
 
