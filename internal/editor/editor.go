@@ -325,6 +325,9 @@ func New(opts Options) (*Editor, error) {
 		if !syntax.LoadTheme(name) {
 			return nil, fmt.Errorf("load-theme: unknown theme %q", name)
 		}
+		if e.term != nil {
+			e.term.InvalidateStyleCache()
+		}
 		return elisp.Nil{}, nil
 	})
 
@@ -332,7 +335,9 @@ func New(opts Options) (*Editor, error) {
 	// The hook fires immediately when the variable is assigned.
 	e.lisp.SetSetqHook("theme", func(v elisp.Value) {
 		name := strings.Trim(v.String(), `'"`)
-		syntax.LoadTheme(name) // silently ignore unknown themes
+		if syntax.LoadTheme(name) && e.term != nil {
+			e.term.InvalidateStyleCache()
+		}
 	})
 
 	// set-face-attribute lets users tweak individual face colours from ~/.gomacs.
@@ -372,6 +377,9 @@ func New(opts Options) (*Editor, error) {
 			default:
 				return nil, fmt.Errorf("set-face-attribute: unknown attribute %q", kw)
 			}
+		}
+		if e.term != nil {
+			e.term.InvalidateStyleCache()
 		}
 		return elisp.Nil{}, nil
 	})
@@ -2388,7 +2396,7 @@ func (e *Editor) renderWindow(w *window.Window) {
 			continue
 		}
 
-		lineRunes := []rune(vl.Text)
+		lineRunes := cache.runes[vl.StartPos:vl.EndPos]
 		screenCol := 0
 
 		// Phase 1: render actual line content, expanding tabs.

@@ -36,11 +36,10 @@ type Window struct {
 
 // ViewLine describes the content of one rendered row.
 type ViewLine struct {
-	Row      int    // screen row
-	Line     int    // 1-based buffer line number (0 if past end of buffer)
-	StartPos int    // logical position in buffer of first rune on this row
-	EndPos   int    // logical position just past last rune (before newline)
-	Text     string // rune string of the line content
+	Row      int // screen row
+	Line     int // 1-based buffer line number (0 if past end of buffer)
+	StartPos int // logical position in buffer of first rune on this row
+	EndPos   int // logical position just past last rune (before newline)
 }
 
 // New creates a window displaying buf occupying the given screen region.
@@ -337,13 +336,11 @@ func (w *Window) viewLinesNoWrap() []ViewLine {
 		}
 		startPos := startPositions[i]
 		endPos := w.buf.EndOfLine(startPos)
-		text := w.buf.Substring(startPos, endPos)
 		rows[i] = ViewLine{
 			Row:      row,
 			Line:     bufLine,
 			StartPos: startPos,
 			EndPos:   endPos,
-			Text:     text,
 		}
 	}
 	return rows
@@ -369,9 +366,9 @@ func (w *Window) viewLinesWrapped() []ViewLine {
 			startPos = w.buf.Len()
 		}
 		endPos := w.buf.EndOfLine(startPos)
-		text := w.buf.Substring(startPos, endPos)
-		lineRunes := []rune(text)
-		lineLen := len(lineRunes)
+		// Buffer positions are rune indices so the rune count is just the
+		// difference — no string/rune-slice allocation needed.
+		lineLen := endPos - startPos
 
 		if lineLen <= w.wrapCol {
 			rows[rowIdx] = ViewLine{
@@ -379,19 +376,17 @@ func (w *Window) viewLinesWrapped() []ViewLine {
 				Line:     bufLine,
 				StartPos: startPos,
 				EndPos:   endPos,
-				Text:     text,
 			}
 			rowIdx++
 		} else {
-			segStart := 0
-			for rowIdx < w.height && segStart < lineLen {
-				segEnd := min(segStart+w.wrapCol, lineLen)
+			segStart := startPos
+			for rowIdx < w.height && segStart < endPos {
+				segEnd := min(segStart+w.wrapCol, endPos)
 				rows[rowIdx] = ViewLine{
 					Row:      w.top + rowIdx,
 					Line:     bufLine,
-					StartPos: startPos + segStart,
-					EndPos:   startPos + segEnd,
-					Text:     string(lineRunes[segStart:segEnd]),
+					StartPos: segStart,
+					EndPos:   segEnd,
 				}
 				rowIdx++
 				segStart = segEnd

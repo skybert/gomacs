@@ -1921,6 +1921,9 @@ func (e *Editor) cmdLoadTheme() {
 			e.Message("Unknown theme: %s", name)
 			return
 		}
+		if e.term != nil {
+			e.term.InvalidateStyleCache()
+		}
 		e.Message("Theme %s loaded", name)
 	})
 	e.SetMinibufCompletions(func(prefix string) []string {
