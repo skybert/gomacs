@@ -200,16 +200,92 @@ func (e *Editor) cmdHelp() {
 	sb.WriteString("gomacs help\n")
 	sb.WriteString(strings.Repeat("=", 60) + "\n\n")
 
-	sb.WriteString("Commands\n")
-	sb.WriteString(strings.Repeat("-", 40) + "\n\n")
-
-	names := make([]string, 0, len(commands))
-	for name := range commands {
-		names = append(names, name)
+	type group struct {
+		title    string
+		commands []string
 	}
-	sort.Strings(names)
+	groups := []group{
+		{"Navigation", []string{
+			"backward-char", "forward-char", "previous-line", "next-line",
+			"beginning-of-line", "end-of-line",
+			"beginning-of-buffer", "end-of-buffer",
+			"forward-word", "backward-word",
+			"beginning-of-sentence", "end-of-sentence",
+			"scroll-up", "scroll-down", "recenter",
+			"goto-line", "what-line", "what-cursor-position", "count-buffer-lines",
+			"back-to-indentation",
+			"forward-list", "backward-list",
+		}},
+		{"Editing", []string{
+			"newline", "self-insert-command", "open-line",
+			"delete-char", "backward-delete-char",
+			"kill-line", "kill-word", "backward-kill-word", "kill-sentence", "kill-region",
+			"copy-region-as-kill", "yank", "yank-pop",
+			"transpose-chars", "transpose-words", "join-line",
+			"undo", "redo",
+			"delete-blank-lines", "delete-duplicate-lines", "delete-trailing-whitespace", "sort-lines",
+			"upcase-word", "downcase-word", "capitalize-word", "upcase-region", "downcase-region",
+			"fill-paragraph", "set-fill-column",
+		}},
+		{"Search & Replace", []string{
+			"isearch-forward", "isearch-backward",
+			"query-replace", "replace-string",
+		}},
+		{"Marks & Registers", []string{
+			"set-mark-command", "mark-word", "mark-whole-buffer", "exchange-point-and-mark",
+			"point-to-register", "jump-to-register", "copy-to-register", "insert-register",
+			"copy-rectangle-to-register",
+		}},
+		{"Narrowing", []string{
+			"narrow-to-region", "widen",
+		}},
+		{"Indentation & Comments", []string{
+			"indent-or-complete", "indent-region", "indent-rigidly",
+			"comment-dwim",
+		}},
+		{"Files & Buffers", []string{
+			"find-file", "save-buffer", "save-buffers-kill-terminal", "save-some-buffers",
+			"kill-buffer", "switch-to-buffer", "list-buffers", "toggle-read-only",
+			"dired", "messages",
+		}},
+		{"Windows", []string{
+			"split-window-below", "split-window-right", "delete-other-windows", "other-window",
+		}},
+		{"Shell & Build", []string{
+			"shell-command", "shell-command-on-region", "man",
+			"build", "next-error", "previous-error",
+		}},
+		{"Version Control", []string{
+			"vc-print-log", "vc-diff", "vc-status", "vc-grep",
+			"vc-annotate", "vc-next-action", "vc-revert",
+		}},
+		{"Spell Checking", []string{
+			"spell", "ispell-word",
+		}},
+		{"LSP", []string{
+			"lsp-find-definition", "lsp-pop-definition", "lsp-hover",
+		}},
+		{"Keyboard Macros", []string{
+			"start-kbd-macro", "end-kbd-macro", "call-last-kbd-macro",
+		}},
+		{"Major Modes", []string{
+			"go-mode", "python-mode", "java-mode", "bash-mode", "markdown-mode",
+			"elisp-mode", "text-mode", "fundamental-mode", "json-mode", "yaml-mode",
+			"makefile-mode", "load-theme",
+		}},
+		{"Help & Info", []string{
+			"help", "describe-key", "describe-function", "describe-variable",
+			"gomacs-version", "count-words", "imenu",
+		}},
+		{"Completion", []string{
+			"dabbrev-expand",
+		}},
+		{"Misc", []string{
+			"eval-last-sexp", "execute-extended-command", "keyboard-quit", "universal-argument",
+		}},
+	}
 
-	for _, name := range names {
+	printCmd := func(name string) {
 		keys := e.keysForCommand(name)
 		keyStr := ""
 		if len(keys) > 0 {
@@ -219,7 +295,42 @@ func (e *Editor) cmdHelp() {
 		if doc == "" {
 			doc = "Not documented."
 		}
-		fmt.Fprintf(&sb, "%-40s%s\n  %s\n\n", name, keyStr, doc)
+		fmt.Fprintf(&sb, "  %-38s%s\n    %s\n\n", name, keyStr, doc)
+	}
+
+	// Collect all commands already assigned to a group.
+	assigned := make(map[string]bool)
+	for _, g := range groups {
+		for _, name := range g.commands {
+			assigned[name] = true
+		}
+	}
+
+	// Collect any registered commands not yet assigned.
+	var other []string
+	for name := range commands {
+		if !assigned[name] {
+			other = append(other, name)
+		}
+	}
+	sort.Strings(other)
+
+	sb.WriteString("Commands\n")
+	sb.WriteString(strings.Repeat("-", 40) + "\n\n")
+
+	for _, g := range groups {
+		sb.WriteString(g.title + "\n")
+		for _, name := range g.commands {
+			if _, ok := commands[name]; ok {
+				printCmd(name)
+			}
+		}
+	}
+	if len(other) > 0 {
+		sb.WriteString("Other\n")
+		for _, name := range other {
+			printCmd(name)
+		}
 	}
 
 	sb.WriteString("\nConfiguration Variables\n")
@@ -249,7 +360,7 @@ func (e *Editor) cmdHelp() {
 		if v, ok := e.lisp.GetGlobalVar(cv.name); ok {
 			val = v.String()
 		}
-		fmt.Fprintf(&sb, "%-44s  %s\n  Current value: %s\n\n", cv.name, cv.doc, val)
+		fmt.Fprintf(&sb, "  %-42s  %s\n    Current value: %s\n\n", cv.name, cv.doc, val)
 	}
 
 	helpBuf := e.FindBuffer("*Help*")

@@ -76,9 +76,9 @@ func manpathDirs() []string {
 	return []string{"/usr/share/man", "/usr/local/share/man", "/opt/homebrew/share/man"}
 }
 
-// manCompletions returns man page names matching query, sorted by fuzzy score.
-func manCompletions(query string) []string {
-	all := manPageNames()
+// filterManPages filters and ranks names against query using fuzzy matching.
+// Extracted for testability; manCompletions wraps this with the live cache.
+func filterManPages(all []string, query string) []string {
 	if query == "" {
 		return all
 	}
@@ -104,6 +104,11 @@ func manCompletions(query string) []string {
 		out[i] = m.name
 	}
 	return out
+}
+
+// manCompletions returns man page names matching query, sorted by fuzzy score.
+func manCompletions(query string) []string {
+	return filterManPages(manPageNames(), query)
 }
 
 // cmdMan prompts for a man page topic and displays it in a *Man <topic>* buffer.
