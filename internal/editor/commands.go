@@ -230,6 +230,8 @@ func init() {
 		"Execute string COMMAND in inferior shell; display output.")
 	registerCommand("shell-command-on-region", (*Editor).cmdShellCommandOnRegion,
 		"Execute string COMMAND in inferior shell with region as input.")
+	registerCommand("man", (*Editor).cmdMan,
+		"Display the manual page for TOPIC in a read-only *Man TOPIC* buffer.")
 	registerCommand("vc-print-log", (*Editor).cmdVcPrintLog,
 		"Show git log for the current repository (C-x v l).")
 	registerCommand("vc-diff", (*Editor).cmdVcDiff,
@@ -1068,23 +1070,40 @@ func (e *Editor) cmdExecuteExtendedCommand() {
 		}
 	})
 	e.SetMinibufCompletions(func(prefix string) []string {
-		// Collect all matching command names.
-		inLRU := make(map[string]bool, len(e.commandLRU))
-		var lruMatches []string
-		for _, name := range e.commandLRU {
-			if fuzzyMatch(name, prefix) {
-				lruMatches = append(lruMatches, name)
-				inLRU[name] = true
-			}
+		lruPos := make(map[string]int, len(e.commandLRU))
+		for i, name := range e.commandLRU {
+			lruPos[name] = i
 		}
-		var rest []string
+		type scored struct {
+			name     string
+			score    int
+			lruIndex int
+		}
+		var matches []scored
 		for name := range commands {
-			if !inLRU[name] && fuzzyMatch(name, prefix) {
-				rest = append(rest, name)
+			if !fuzzyMatch(name, prefix) {
+				continue
 			}
+			idx, inLRU := lruPos[name]
+			if !inLRU {
+				idx = len(e.commandLRU)
+			}
+			matches = append(matches, scored{name, fuzzyScore(name, prefix), idx})
 		}
-		sort.Strings(rest)
-		return append(lruMatches, rest...)
+		sort.Slice(matches, func(i, j int) bool {
+			if matches[i].score != matches[j].score {
+				return matches[i].score < matches[j].score
+			}
+			if matches[i].lruIndex != matches[j].lruIndex {
+				return matches[i].lruIndex < matches[j].lruIndex
+			}
+			return matches[i].name < matches[j].name
+		})
+		out := make([]string, len(matches))
+		for i, m := range matches {
+			out[i] = m.name
+		}
+		return out
 	})
 }
 

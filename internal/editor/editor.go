@@ -1402,6 +1402,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		}
 	}
 
+	// When in a *Man ...* buffer, q closes it.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "man" {
+		if e.manDispatch(ke) {
+			return
+		}
+	}
+
 	// When in a *VC Commit* buffer, C-c C-c submits and C-c C-k aborts.
 	if e.ActiveBuffer().Mode() == "vc-commit" {
 		if e.vcCommitDispatch(ke) {
@@ -1930,7 +1937,11 @@ func (e *Editor) execCommand(name string) {
 	// fn reads e.lastCommand (e.g. for C-l cycling) before we overwrite it.
 	fn(e)
 	e.lastCommand = name
-	e.pushCommandLRU(name)
+	// Don't record execute-extended-command itself in the LRU — the command
+	// it dispatches to is already pushed by cmdExecuteExtendedCommand.
+	if name != "execute-extended-command" {
+		e.pushCommandLRU(name)
+	}
 }
 
 // pushCommandLRU records name as the most recently used command.
@@ -2244,7 +2255,29 @@ func (e *Editor) helpDispatch(ke terminal.KeyEvent) bool {
 	return true
 }
 
-// faceAtPos returns the syntax face that covers position pos, given a sorted
+// manDispatch handles key events in a *Man ...* buffer.
+// q closes the buffer and switches to the most recently used non-man buffer.
+func (e *Editor) manDispatch(ke terminal.KeyEvent) bool {
+	if ke.Key != tcell.KeyRune || ke.Rune != 'q' {
+		return false
+	}
+	cur := e.ActiveBuffer()
+	for _, b := range e.bufferMRU {
+		if b != cur && b.Mode() != "man" {
+			e.activeWin.SetBuf(b)
+			return true
+		}
+	}
+	for _, b := range e.buffers {
+		if b != cur && b.Mode() != "man" {
+			e.activeWin.SetBuf(b)
+			return true
+		}
+	}
+	e.SwitchToBuffer("*scratch*")
+	return true
+}
+
 // slice of spans.  Falls back to FaceDefault.
 func faceAtPos(spans []syntax.Span, pos int) syntax.Face {
 	// Binary search: find the last span with Start <= pos.
