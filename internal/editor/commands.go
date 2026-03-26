@@ -186,8 +186,12 @@ func init() {
 		"Display number of lines in buffer and how many are before and after point.")
 	registerCommand("help", (*Editor).cmdHelp,
 		"Show a help buffer listing all commands and configuration variables.")
-	registerCommand("build", (*Editor).cmdBuild,
+	registerCommand("project-build", (*Editor).cmdBuild,
 		"Run make in the project root and show output in *compilation* buffer.")
+	registerCommand("project-find-file", (*Editor).cmdProjectFindFile,
+		"Fuzzy-search all files in the current project (VC root) and open the selected one.")
+	registerCommand("project-grep", (*Editor).cmdProjectGrep,
+		"Grep for a pattern across the project using VC backend or grep -R -i -n (C-x p g).")
 
 	// ---- mark extras -------------------------------------------------------
 	registerCommand("mark-whole-buffer", (*Editor).cmdMarkWholeBuffer,
@@ -306,6 +310,8 @@ func init() {
 		"Find the definition of the symbol at point using the LSP server.")
 	registerCommand("lsp-pop-definition", (*Editor).cmdLSPPopDefinition,
 		"Pop back to the position before the last lsp-find-definition jump.")
+	registerCommand("lsp-find-references", (*Editor).cmdLSPFindReferences,
+		"Find all references to the symbol at point and show them in *LSP References*.")
 	registerCommand("lsp-hover", (*Editor).cmdLSPHover,
 		"Show documentation for the symbol at point from the LSP server.")
 
@@ -1156,6 +1162,138 @@ func (e *Editor) cmdExchangePointAndMark() {
 // ---------------------------------------------------------------------------
 // File / buffer commands
 // ---------------------------------------------------------------------------
+
+// cmdProjectFindFile presents a fuzzy-search menu of all files in the current
+// project (VC root) and opens the selected file (C-x p f).
+// Candidates are ordered LRU first, then by fuzzy match quality.
+func (e *Editor) cmdProjectFindFile() {
+	e.clearArg()
+
+	_, root := vcFind(vcDir(e.ActiveBuffer()))
+	if root == "" {
+		// No VC root found — fall back to regular find-file.
+		e.cmdFindFile()
+		return
+	}
+
+	// Collect all project files synchronously (once per invocation).
+	files := walkProjectFiles(root)
+
+	e.ReadMinibuffer("Project find file: ", func(rel string) {
+		rel = strings.TrimSpace(rel)
+		if rel == "" {
+			return
+		}
+		var absPath string
+		if filepath.IsAbs(rel) {
+			absPath = rel
+		} else {
+			absPath = filepath.Join(root, rel)
+		}
+		b, err := e.loadFile(absPath)
+		if err != nil {
+			e.Message("Error opening file: %v", err)
+			return
+		}
+		e.activeWin.SetBuf(b)
+		e.Message("Opened %s", rel)
+	})
+	e.SetMinibufCompletions(func(query string) []string {
+		return e.projectFileCompletions(root, files, query)
+	})
+}
+
+// projectFileCompletions returns relative file paths from root that fuzzy-match
+// query, sorted LRU-first then by match quality then alphabetically.
+func (e *Editor) projectFileCompletions(root string, files []string, query string) []string {
+	// Build an LRU index from open buffers keyed by filename.
+	lruIdx := make(map[string]int, len(e.bufferMRU))
+	for i, b := range e.bufferMRU {
+		if b.Filename() != "" {
+			lruIdx[b.Filename()] = i
+		}
+	}
+	// Also include the currently active buffer.
+	if ab := e.ActiveBuffer(); ab != nil && ab.Filename() != "" {
+		if _, seen := lruIdx[ab.Filename()]; !seen {
+			lruIdx[ab.Filename()] = len(e.bufferMRU)
+		}
+	}
+
+	type scored struct {
+		rel    string
+		abs    string
+		score  int
+		lruIdx int
+	}
+
+	noLRU := len(e.bufferMRU) + 1
+	var matches []scored
+	for _, absPath := range files {
+		rel, _ := filepath.Rel(root, absPath)
+		base := filepath.Base(absPath)
+		if query != "" {
+			// Match against both the base name and the relative path.
+			if !fuzzyMatch(base, query) && !fuzzyMatch(rel, query) {
+				continue
+			}
+		}
+		idx, inLRU := lruIdx[absPath]
+		if !inLRU {
+			idx = noLRU
+		}
+		score := 0
+		if query != "" {
+			s1 := fuzzyScore(base, query)
+			s2 := fuzzyScore(rel, query)
+			score = min(s1, s2)
+		}
+		matches = append(matches, scored{rel, absPath, score, idx})
+	}
+
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score < matches[j].score
+		}
+		if matches[i].lruIdx != matches[j].lruIdx {
+			return matches[i].lruIdx < matches[j].lruIdx
+		}
+		return matches[i].rel < matches[j].rel
+	})
+
+	result := make([]string, len(matches))
+	for i, m := range matches {
+		result[i] = m.rel
+	}
+	return result
+}
+
+// walkProjectFiles returns the absolute paths of all regular files under root,
+// skipping common non-source directories (.git, node_modules, vendor, etc.).
+func walkProjectFiles(root string) []string {
+	var files []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".svn", ".hg", ".bzr",
+				"node_modules", "vendor", "__pycache__",
+				"target", ".gradle", ".idea", ".vscode",
+				"dist", "build", ".cache":
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	return files
+}
 
 func (e *Editor) cmdFindFile() {
 	// Pre-populate with the directory of the current buffer (or cwd).

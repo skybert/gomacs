@@ -40,6 +40,7 @@ type Editor struct {
 	ctrlXNKeymap *keymap.Keymap // C-x n (narrowing)
 	ctrlXRKeymap *keymap.Keymap // C-x r (registers)
 	ctrlXVKeymap *keymap.Keymap // C-x v (version control)
+	ctrlXPKeymap *keymap.Keymap // C-x p (project)
 	metaGKeymap  *keymap.Keymap // M-g (goto)
 	ctrlCKeymap  *keymap.Keymap // C-c prefix map
 
@@ -504,6 +505,7 @@ func (e *Editor) setupKeymaps() {
 	e.ctrlXNKeymap = keymap.New("C-x n")
 	e.ctrlXRKeymap = keymap.New("C-x r")
 	e.ctrlXVKeymap = keymap.New("C-x v")
+	e.ctrlXPKeymap = keymap.New("C-x p")
 	e.metaGKeymap = keymap.New("M-g")
 	e.ctrlCKeymap = keymap.New("C-c")
 
@@ -565,6 +567,7 @@ func (e *Editor) setupKeymaps() {
 	gk.Bind(keymap.MetaKey('>'), "end-of-buffer")
 	gk.Bind(keymap.MetaKey('.'), "lsp-find-definition")
 	gk.Bind(keymap.MetaKey(','), "lsp-pop-definition")
+	gk.Bind(keymap.MetaKey('?'), "lsp-find-references")
 	gk.Bind(keymap.CtrlKey('v'), "scroll-up")
 	gk.Bind(keymap.MetaKey('v'), "scroll-down")
 	gk.Bind(keymap.CtrlKey('l'), "recenter")
@@ -668,6 +671,13 @@ func (e *Editor) setupKeymaps() {
 	cxv.Bind(keymap.PlainKey('G'), "vc-grep")
 	cxv.Bind(keymap.PlainKey('v'), "vc-next-action")
 	cxv.Bind(keymap.PlainKey('u'), "vc-revert")
+
+	// ---- C-x p prefix (project) --------------------------------------------
+	cxp := e.ctrlXPKeymap
+	cx.BindPrefix(keymap.PlainKey('p'), cxp)
+	cxp.Bind(keymap.PlainKey('f'), "project-find-file")
+	cxp.Bind(keymap.PlainKey('g'), "project-grep")
+	cxp.Bind(keymap.PlainKey('!'), "project-build")
 }
 
 // loadInitFile tries ~/.gomacs and ~/.config/gomacs/init.el in that order.
@@ -1392,6 +1402,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	// When in a *vc grep* buffer, handle q and Enter.
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-grep" {
 		if e.vcGrepDispatch(ke) {
+			return
+		}
+	}
+
+	// When in a *LSP References* buffer, handle q and Enter.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "lsp-refs" {
+		if e.lspRefsDispatch(ke) {
 			return
 		}
 	}
@@ -2221,7 +2238,7 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.VcShowHighlighter{}
 	case mode == "vc-log":
 		return syntax.VcLogHighlighter{}
-	case mode == "vc-grep":
+	case mode == "vc-grep" || mode == "lsp-refs":
 		return syntax.VcGrepHighlighter{}
 	case mode == "vc-status":
 		return syntax.VcStatusHighlighter{}

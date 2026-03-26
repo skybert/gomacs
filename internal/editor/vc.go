@@ -182,7 +182,7 @@ func (e *Editor) vcShowOutput(name, text, mode string) {
 func (e *Editor) vcQuit(skipMode string) {
 	isVCMode := func(mode string) bool {
 		switch mode {
-		case "vc-log", "vc-status", "vc-grep", "diff", "vc-commit", "vc-show", "compilation":
+		case "vc-log", "vc-status", "vc-grep", "diff", "vc-commit", "vc-show", "compilation", "lsp-refs":
 			return true
 		}
 		return strings.HasPrefix(mode, "vc-annotate")
@@ -284,6 +284,48 @@ func (e *Editor) cmdVcGrep() {
 		}
 		e.vcShowOutput("*vc grep*", text, "vc-grep")
 		e.vcLogRoots[e.ActiveBuffer()] = root
+	})
+}
+
+// cmdProjectGrep prompts for a pattern and searches the project. Uses the VC
+// backend's grep if one is available, otherwise falls back to grep -R -i -n
+// (C-x p g).
+func (e *Editor) cmdProjectGrep() {
+	e.clearArg()
+	be, root := vcFind(vcDir(e.ActiveBuffer()))
+	prompt := "Project grep: "
+	if be != nil {
+		prompt = be.Name() + " grep: "
+	}
+	e.ReadMinibuffer(prompt, func(pattern string) {
+		if pattern == "" {
+			return
+		}
+		var text string
+		if be != nil {
+			var err error
+			text, err = be.Grep(root, pattern)
+			if err != nil && text == "" {
+				text = "No matches found."
+			}
+		} else {
+			// No VC backend — use plain grep.
+			if root == "" {
+				root = "."
+			}
+			out, err := exec.Command("grep", "-R", "-i", "-n", pattern, root).CombinedOutput()
+			text = string(out)
+			if err != nil && text == "" {
+				text = "No matches found."
+			}
+		}
+		if text == "" {
+			text = "No matches found."
+		}
+		e.vcShowOutput("*vc grep*", text, "vc-grep")
+		if root != "" {
+			e.vcLogRoots[e.ActiveBuffer()] = root
+		}
 	})
 }
 
