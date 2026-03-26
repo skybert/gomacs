@@ -2720,6 +2720,13 @@ func (e *Editor) applyVisualLines() {
 		col = 80
 	}
 	for _, w := range e.windows {
+		mode := w.Buf().Mode()
+		if mode == "vc-grep" || mode == "lsp-refs" || mode == "vc-status" ||
+			mode == "vc-log" || mode == "vc-show" || mode == "diff" ||
+			mode == "compilation" {
+			w.SetWrapCol(0)
+			continue
+		}
 		w.SetWrapCol(col)
 	}
 }
