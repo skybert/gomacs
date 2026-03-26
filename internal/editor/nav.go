@@ -253,7 +253,7 @@ func (e *Editor) cmdHelp() {
 		}},
 		{"Shell & Build", []string{
 			"shell-command", "shell-command-on-region", "man",
-			"build", "next-error", "previous-error",
+			"project-build", "project-find-file", "project-grep", "next-error", "previous-error",
 		}},
 		{"Version Control", []string{
 			"vc-print-log", "vc-diff", "vc-status", "vc-grep",
@@ -263,7 +263,7 @@ func (e *Editor) cmdHelp() {
 			"spell", "ispell-word",
 		}},
 		{"LSP", []string{
-			"lsp-find-definition", "lsp-pop-definition", "lsp-hover",
+			"lsp-find-definition", "lsp-pop-definition", "lsp-find-references", "lsp-hover",
 		}},
 		{"Keyboard Macros", []string{
 			"start-kbd-macro", "end-kbd-macro", "call-last-kbd-macro",

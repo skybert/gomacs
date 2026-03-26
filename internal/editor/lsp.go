@@ -1,17 +1,21 @@
 package editor
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/lsp"
+	"github.com/skybert/gomacs/internal/terminal"
 )
 
 // lspConn holds a running LSP server connection for one language mode.
@@ -377,8 +381,132 @@ func (e *Editor) cmdLSPHover() {
 	})
 }
 
+// cmdLSPFindReferences finds all references to the symbol under point (M-?).
+// Results are displayed in a *LSP References* buffer; Enter jumps to a location.
+func (e *Editor) cmdLSPFindReferences() {
+	e.clearArg()
+	buf := e.ActiveBuffer()
+	conn := e.lspConns[buf.Mode()]
+	if conn == nil {
+		e.Message("No LSP server for mode %q", buf.Mode())
+		return
+	}
+	if !conn.isReady {
+		e.Message("LSP server is initializing, please wait…")
+		return
+	}
+	ctx := e.lspNewOpCtx()
+	pos := e.bufPointToLSP(buf)
+	uri := lsp.FileURI(buf.Filename())
+	e.Message("Finding references…")
+	e.lspAsync(func() func() {
+		result, err := conn.client.CallCtx(ctx, "textDocument/references", map[string]any{
+			"textDocument": map[string]any{"uri": uri},
+			"position":     pos,
+			"context":      map[string]any{"includeDeclaration": true},
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return func() { e.Message("Cancelled") }
+			}
+			return func() { e.Message("lsp-find-references: %v", err) }
+		}
+		locs := parseLocations(result)
+		if len(locs) == 0 {
+			return func() { e.Message("No references found") }
+		}
+		// Build display text: "absfile:lineNum:col: lineText"
+		var sb strings.Builder
+		for _, loc := range locs {
+			path := lsp.PathFromURI(loc.URI)
+			lineNum := loc.Range.Start.Line + 1  // 1-based
+			col := loc.Range.Start.Character + 1 // 1-based for display
+			lineText := lspReadFileLine(path, loc.Range.Start.Line)
+			fmt.Fprintf(&sb, "%s:%d:%d: %s\n", path, lineNum, col, lineText)
+		}
+		text := sb.String()
+		return func() {
+			e.vcShowOutput("*LSP References*", text, "lsp-refs")
+			e.Message("%d reference(s) found", len(locs))
+		}
+	})
+}
+
+// lspRefsDispatch handles key events in a *LSP References* buffer.
+// Enter jumps to the reference on the current line; q quits to the previous buffer.
+func (e *Editor) lspRefsDispatch(ke terminal.KeyEvent) bool {
+	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
+		return false
+	}
+
+	buf := e.ActiveBuffer()
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'q' {
+		e.vcQuit("lsp-refs")
+		return true
+	}
+
+	if ke.Key != tcell.KeyEnter {
+		return false
+	}
+
+	pt := buf.Point()
+	bol := buf.BeginningOfLine(pt)
+	eol := buf.EndOfLine(pt)
+	line := buf.Substring(bol, eol)
+	if line == "" {
+		return true
+	}
+
+	// Format: /abs/path.go:lineNum:col: content
+	// Split into at most 4 parts so the content after col is preserved.
+	parts := strings.SplitN(line, ":", 4)
+	if len(parts) < 3 {
+		return true
+	}
+	absPath := parts[0]
+	lineNum, err := strconv.Atoi(parts[1])
+	if err != nil || lineNum < 1 {
+		return true
+	}
+	col, _ := strconv.Atoi(parts[2])
+	if col < 1 {
+		col = 1
+	}
+
+	b, loadErr := e.loadFile(absPath)
+	if loadErr != nil {
+		e.Message("Cannot open %s: %v", absPath, loadErr)
+		return true
+	}
+	e.activeWin.SetBuf(b)
+	// col is 1-based; PosForLineCol takes a 0-based column.
+	pos := b.PosForLineCol(lineNum, col-1)
+	b.SetPoint(pos)
+	e.activeWin.SetPoint(pos)
+	e.syncWindowPoint(e.activeWin)
+	e.activeWin.EnsurePointVisible()
+	return true
+}
+
+// lspReadFileLine returns the trimmed text of 0-based line lineIdx in the file
+// at path.  Used while building the *LSP References* buffer.
+func lspReadFileLine(path string, lineIdx int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	for i := 0; sc.Scan(); i++ {
+		if i == lineIdx {
+			return strings.TrimRight(sc.Text(), "\r")
+		}
+	}
+	return ""
+}
+
 // lspMaybeHover passively shows the first line of hover documentation in the
-// minibuffer when the cursor sits on a symbol, without requiring an explicit
 // user command.  It is called from Run() after each Redraw().
 func (e *Editor) lspMaybeHover() {
 	buf := e.ActiveBuffer()
@@ -497,6 +625,7 @@ func lspInitialize(conn *lspConn) error {
 					"contentFormat": []string{"plaintext", "markdown"},
 				},
 				"definition": map[string]any{},
+				"references": map[string]any{},
 				"completion": map[string]any{
 					"completionItem": map[string]any{
 						"snippetSupport": false,
@@ -578,6 +707,18 @@ func parseSingleLocation(raw json.RawMessage) (lsp.Location, error) {
 		return locs[0], nil
 	}
 	return lsp.Location{}, nil
+}
+
+// parseLocations decodes a references response (null or []Location).
+func parseLocations(raw json.RawMessage) []lsp.Location {
+	if raw == nil || string(raw) == "null" {
+		return nil
+	}
+	var locs []lsp.Location
+	if err := json.Unmarshal(raw, &locs); err == nil {
+		return locs
+	}
+	return nil
 }
 
 // extractHoverText pulls plain text out of a hover response, which may
