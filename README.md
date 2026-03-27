@@ -95,8 +95,3 @@ Cheers,
 
 -Torstein
 
-# Missing features
-
-## eldoc
-The code API doc in minibuffer should have syntax highlighting for comments and
-multi-line hover text.

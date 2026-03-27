@@ -1137,6 +1137,7 @@ func (e *Editor) addToKillRing(s string) {
 		e.killRing = e.killRing[:60]
 	}
 	e.yankIdx = 0
+	clipboardWrite(s)
 }
 
 // yank returns the most recent kill ring entry, or "".
