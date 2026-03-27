@@ -71,6 +71,12 @@ call `vc-grep` if there's a VC backend, if not use a standard grep command shoul
 grep -R -i -n
 ```
 
+The search hits should be presented in a buffer called `*grep*`
+they+should hook onto the `next-error` function that the
+`*compilation*`+buffer has, letting the user quickly going through
+each of the hits.+The `next-error` function should be bound to `C-x \``
+(Ctrl + backtick). tests
+
 # Minibuffer
 
 The code API doc in the minibuffer should have syntax highlighting.
@@ -104,5 +110,15 @@ corresponding `_test.go` file of that file they're testing.
 `M-x man` should offer tab completion of the available man pages in
 `$MANPATH`.
 
+# Text modes
 
+In pure text modes, like `text` and `markdown`, lines should be
+automatically wrapped at `fill-column`. By default this is `70`
+characters.
+
+The user can configure this with:
+
+```lisp
+(setq fill-column 80)
+```
 
