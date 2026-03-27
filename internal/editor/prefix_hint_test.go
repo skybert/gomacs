@@ -13,10 +13,10 @@ import (
 
 // newPrefixTestEditor builds an Editor with a three-level keymap tree:
 //
-//	C-x      → prefix (cx)
-//	C-x v    → prefix (cxv)
-//	C-x v s  → command "forward-char"   (three-deep, hint shown at C-x v)
-//  C-x f    → command "forward-char"   (two-deep, no hint shown)
+//		C-x      → prefix (cx)
+//		C-x v    → prefix (cxv)
+//		C-x v s  → command "forward-char"   (three-deep, hint shown at C-x v)
+//	 C-x f    → command "forward-char"   (two-deep, no hint shown)
 //
 // "forward-char" and "keyboard-quit" are already registered in the global
 // command table via the editor package's init().

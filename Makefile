@@ -8,7 +8,7 @@ VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "de
 AUTHORS  := $(shell awk 'NR>1{printf ", "} {gsub(/[<>]/, "\\\\&"); printf "%s", $$0} END{print ""}' AUTHORS 2>/dev/null)
 DATE     := $(shell date +%Y-%m-%d)
 
-.PHONY: all build test lint vulncheck fmt clean install man dist
+.PHONY: all build test lint vulncheck fmt clean install man doc dist
 
 all: fmt lint test vulncheck build man
 
@@ -52,3 +52,8 @@ $(BUILDDIR)/gomacs.1: doc/gomacs.1.in AUTHORS
 	    -e 's/@AUTHORS@/$(AUTHORS)/g' \
 	    -e 's/@DATE@/$(DATE)/g' \
 	    $< > $@
+
+doc: doc/gomacs.md
+
+doc/gomacs.md: doc/gomacs.1.in AUTHORS doc/*.png
+	go run ./cmd/man2md
