@@ -338,6 +338,7 @@ func (e *Editor) cmdHelp() {
 
 	type configVar struct{ name, doc string }
 	configVars := []configVar{
+		{"auto-revert", "When t, reload unmodified buffers if their file changes on disk. Default: t."},
 		{"delete-trailing-whitespace", "When t, save-buffer strips trailing whitespace. Default: t."},
 		{"fill-column", "Column target for fill-paragraph (M-q). Default: 70."},
 		{"go-indent", "Indent string for Go mode. Default: \"\\t\"."},

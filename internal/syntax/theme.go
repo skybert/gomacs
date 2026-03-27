@@ -160,7 +160,7 @@ func applySweetTheme() {
 	FaceBlockquote = Face{Fg: sweetGreen, Italic: true}
 	FaceModeline = Face{Fg: sweetMono1, Bg: sweetBg1, Bold: true}
 	FaceMinibuffer = Face{Fg: sweetFg, Bg: sweetBg}
-	FaceRegion = Face{Fg: sweetBlack, Bg: sweetPurple}
+	FaceRegion = Face{Fg: sweetBlack, Bg: sweetGreen}
 	FaceIsearch = Face{Fg: sweetBlack, Bg: sweetOrange1}
 	FaceCandidate = Face{Fg: sweetFg, Bg: sweetBg}
 	FaceSelected = Face{Fg: sweetBlack, Bg: sweetGreen}

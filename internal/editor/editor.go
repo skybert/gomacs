@@ -250,6 +250,15 @@ type Editor struct {
 	// customHighlighters overrides the default mode-based highlighter per buffer.
 	// Used by the compilation buffer to supply pre-computed ANSI spans.
 	customHighlighters map[*buffer.Buffer]syntax.Highlighter
+
+	// autoRevert, when true, silently reloads unmodified buffers when their
+	// backing file changes on disk.  Disable with (setq auto-revert nil).
+	autoRevert bool
+	// autoRevertMtimes tracks the file modification time at the last load or
+	// save for each buffer that has a backing file.
+	autoRevertMtimes map[*buffer.Buffer]time.Time
+	// autoRevertLastCheck is the last time we polled file mtimes.
+	autoRevertLastCheck time.Time
 }
 
 // spanCache holds pre-computed highlighting data for a buffer.  It is
@@ -311,6 +320,8 @@ func New(opts Options) (*Editor, error) {
 		version:                    opts.Version,
 		startTime:                  time.Now(),
 		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
+		autoRevert:                  true,
+		autoRevertMtimes:            make(map[*buffer.Buffer]time.Time),
 	}
 
 	// Apply the default colour theme.
@@ -764,6 +775,14 @@ func (e *Editor) applyElispConfig() {
 			e.spellLanguage = s.V
 		}
 	}
+	if v, ok := e.lisp.GetGlobalVar("auto-revert"); ok {
+		switch val := v.(type) {
+		case elisp.Bool:
+			e.autoRevert = val.V
+		case elisp.Nil:
+			e.autoRevert = false
+		}
+	}
 	e.applyVisualLines()
 }
 
@@ -799,6 +818,7 @@ func (e *Editor) Run() {
 		}
 		e.Redraw()
 		e.lspMaybeHover()
+		e.maybeAutoRevert()
 	}
 }
 
@@ -806,6 +826,47 @@ func (e *Editor) Run() {
 // that EnsurePointVisible and Recenter operate on the current cursor position.
 func (e *Editor) syncWindowPoint(w *window.Window) {
 	w.SetPoint(w.Buf().Point())
+}
+
+// maybeAutoRevert checks whether any open buffer's backing file has been
+// modified on disk since it was last loaded or saved.  If auto-revert is
+// enabled and the buffer has no unsaved changes, it silently reloads the
+// buffer.  Checks are throttled to once every 2 seconds.
+func (e *Editor) maybeAutoRevert() {
+	if !e.autoRevert {
+		return
+	}
+	if time.Since(e.autoRevertLastCheck) < 2*time.Second {
+		return
+	}
+	e.autoRevertLastCheck = time.Now()
+	for _, b := range e.buffers {
+		path := b.Filename()
+		if path == "" || b.Modified() {
+			continue
+		}
+		info, err := os.Stat(path) //nolint:gosec
+		if err != nil {
+			continue
+		}
+		recorded, seen := e.autoRevertMtimes[b]
+		if !seen || !info.ModTime().After(recorded) {
+			continue
+		}
+		// File changed on disk — reload silently.
+		data, err := os.ReadFile(path) //nolint:gosec
+		if err != nil {
+			continue
+		}
+		pt := b.Point()
+		b.Delete(0, b.Len())
+		b.InsertString(0, string(data))
+		b.SetModified(false)
+		b.SetPoint(min(pt, b.Len()))
+		e.autoRevertMtimes[b] = info.ModTime()
+		delete(e.spanCaches, b)
+		e.Message("Reverted buffer %s", b.Name())
+	}
 }
 
 // handleResize adjusts all windows to the new terminal dimensions.
@@ -1219,6 +1280,10 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 	}
 
 	e.buffers = append(e.buffers, b)
+	// Record mtime for auto-revert tracking.
+	if info, err2 := os.Stat(path); err2 == nil { //nolint:gosec
+		e.autoRevertMtimes[b] = info.ModTime()
+	}
 	// Start LSP server for this file's mode if one is configured.
 	e.lspActivate(b)
 	return b, nil
@@ -1375,6 +1440,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	// When in a *VC Log* buffer, handle q and Enter.
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-log" {
 		if e.vcLogDispatch(ke) {
+			return
+		}
+	}
+
+	// When in a *VC Fixup Select* buffer, handle q / C-c C-c.
+	if (e.prefixKeymap == nil || e.prefixKeymap == e.ctrlCKeymap) && e.ActiveBuffer().Mode() == "vc-fixup-select" {
+		if e.vcFixupSelectDispatch(ke) {
 			return
 		}
 	}

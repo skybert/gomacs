@@ -68,6 +68,7 @@ tcell event → terminal.ParseKey → keymap.Lookup → execCommand(name) → cm
 
 | Variable | Type | Default | Effect |
 |---|---|---|---|
+| `auto-revert` | bool/nil | `t` | Auto-reload unmodified buffers when their file changes on disk |
 | `fill-column` | integer | `70` | Column target for `fill-paragraph` (M-q) |
 | `isearch-case-insensitive` | bool/nil | `t` | Case-insensitive isearch; set to `nil` for case-sensitive |
 | `python-indent` | integer or string | `"  "` | Per-level indent for Python |

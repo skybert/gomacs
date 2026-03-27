@@ -331,6 +331,8 @@ func init() {
 	// ---- spell checking ----------------------------------------------------
 	registerCommand("ispell-word", (*Editor).cmdIspellWord,
 		"Check spelling of word at point (uses spell-command, default aspell).")
+	registerCommand("ispell-buffer", (*Editor).cmdSpell,
+		"Interactively spell-check the current buffer (uses spell-command, default aspell).")
 	registerCommand("spell", (*Editor).cmdSpell,
 		"Interactively spell-check the current buffer using the configured spell checker.")
 	registerCommand("dabbrev-expand", (*Editor).cmdDabbrevExpand,
@@ -1368,6 +1370,10 @@ func (e *Editor) writeBuffer(buf *buffer.Buffer) {
 		return
 	}
 	buf.SetModified(false)
+	// Update mtime so auto-revert doesn't immediately reload what we just wrote.
+	if info, err2 := os.Stat(buf.Filename()); err2 == nil {
+		e.autoRevertMtimes[buf] = info.ModTime()
+	}
 	e.lspDidSave(buf)
 	e.Message("Wrote %s", buf.Filename())
 }

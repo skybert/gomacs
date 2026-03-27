@@ -182,7 +182,7 @@ func (e *Editor) vcShowOutput(name, text, mode string) {
 func (e *Editor) vcQuit(skipMode string) {
 	isVCMode := func(mode string) bool {
 		switch mode {
-		case "vc-log", "vc-status", "vc-grep", "diff", "vc-commit", "vc-show", "compilation", "lsp-refs":
+		case "vc-log", "vc-status", "vc-grep", "diff", "vc-commit", "vc-show", "vc-fixup-select", "compilation", "lsp-refs":
 			return true
 		}
 		return strings.HasPrefix(mode, "vc-annotate")
@@ -589,6 +589,72 @@ func (e *Editor) vcCommitAbort() {
 // VC key dispatch functions
 // ---------------------------------------------------------------------------
 
+// vcFixupSelectDispatch handles keys in a *VC Fixup Select* buffer.
+// The user navigates to the target commit and presses C-c C-c to create a
+// fixup commit (git commit --fixup=<sha>).
+func (e *Editor) vcFixupSelectDispatch(ke terminal.KeyEvent) bool {
+	// C-c C-c: run git commit --fixup=<sha> for commit at point.
+	if e.prefixKeymap == e.ctrlCKeymap {
+		if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyCtrlC {
+			return false
+		}
+		if ke.Key == tcell.KeyCtrlC {
+			e.prefixKeymap = nil
+			buf := e.ActiveBuffer()
+			root := e.vcLogRoots[buf]
+			if root == "" {
+				e.Message("vc-fixup: no repository root")
+				return true
+			}
+			pt := buf.Point()
+			bol := buf.BeginningOfLine(pt)
+			eol := buf.EndOfLine(pt)
+			line := buf.Substring(bol, eol)
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				e.Message("vc-fixup: no commit on this line")
+				return true
+			}
+			sha := fields[0]
+			out, err := exec.CommandContext(context.Background(), "git", "-C", root, "commit", "--fixup="+sha).CombinedOutput() //nolint:gosec
+			if err != nil {
+				e.Message("git commit --fixup failed: %s", strings.TrimSpace(string(out)))
+				return true
+			}
+			e.Message("Fixup commit created: %s", strings.TrimSpace(string(out)))
+			// Return to parent vc-status buffer.
+			if parent, ok := e.vcParent[buf]; ok {
+				e.activeWin.SetBuf(parent)
+			} else {
+				e.vcQuit("vc-fixup-select")
+			}
+			return true
+		}
+		return false
+	}
+
+	if ke.Key != tcell.KeyRune {
+		return false
+	}
+	switch ke.Rune {
+	case 'q':
+		buf := e.ActiveBuffer()
+		if parent, ok := e.vcParent[buf]; ok {
+			e.activeWin.SetBuf(parent)
+		} else {
+			e.vcQuit("vc-fixup-select")
+		}
+		return true
+	case 'n':
+		e.cmdNextLine()
+		return true
+	case 'p':
+		e.cmdPreviousLine()
+		return true
+	}
+	return false
+}
+
 // vcLogDispatch handles keys in a *VC Log* buffer.
 func (e *Editor) vcLogDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
@@ -970,6 +1036,27 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 			e.vcShowOutput("*vc-status*", text, "vc-status")
 			e.vcLogRoots[e.ActiveBuffer()] = root
 		}
+		return true
+	}
+
+	if ke.Key == tcell.KeyRune && ke.Rune == 'f' {
+		if root == "" {
+			return true
+		}
+		be, _ := vcFind(root)
+		if be == nil {
+			return true
+		}
+		statusBuf := buf
+		text, err := be.Log(root, "")
+		if err != nil && text == "" {
+			text = err.Error()
+		}
+		e.vcShowOutput("*VC Fixup Select*", text, "vc-fixup-select")
+		fixupBuf := e.ActiveBuffer()
+		e.vcLogRoots[fixupBuf] = root
+		e.vcParent[fixupBuf] = statusBuf
+		e.Message("C-c C-c: fixup into commit at point  q: abort")
 		return true
 	}
 
