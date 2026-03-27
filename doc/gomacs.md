@@ -460,13 +460,13 @@ Torstein Krause Johansen <torstein@skybert.net>
 
 ## VERSION
 
-v1.6.1-3-g53675ca-dirty
+v1.6.1-5-gc8ea6b2-dirty
 
 ## Screenshots
 
-![gomacs-lsp-auto-complete](doc/gomacs-lsp-auto-complete.png)
+<img src="gomacs-lsp-auto-complete.png" alt="gomacs-lsp-auto-complete"/>
 
-![gomacs-m-x](doc/gomacs-m-x.png)
+<img src="gomacs-m-x.png" alt="gomacs-m-x"/>
 
-![gomacs-screenshot](doc/gomacs-screenshot.png)
+<img src="gomacs-screenshot.png" alt="gomacs-screenshot"/>
 

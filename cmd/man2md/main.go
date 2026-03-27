@@ -30,7 +30,7 @@ func main() {
 		md += "\n## Screenshots\n\n"
 		for _, s := range shots {
 			name := strings.TrimSuffix(filepath.Base(s), ".png")
-			md += fmt.Sprintf("![%s](%s)\n\n", name, filepath.ToSlash(s))
+			md += fmt.Sprintf("<img src=\"%s\" alt=\"%s\"/>\n\n", filepath.Base(s), name)
 		}
 	}
 
