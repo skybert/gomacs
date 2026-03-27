@@ -302,10 +302,46 @@ func runAspellList(cmd, lang, text string) ([]string, error) {
 // Interactive spell check (M-x spell)
 // ---------------------------------------------------------------------------
 
-// cmdIspellWord checks the spelling of the word at point (delegates to cmdSpell).
+// cmdIspellWord checks the spelling of the word at point.
+// If the word is misspelled the interactive repair loop is started for that
+// single word; if it is correct a message is shown and nothing else happens.
 func (e *Editor) cmdIspellWord() {
 	e.clearArg()
-	e.cmdSpell()
+	if e.spellCommand == "" {
+		e.Message("spell: no spell checker configured; set (setq spell-command \"/usr/bin/aspell\") in ~/.gomacs")
+		return
+	}
+	buf := e.ActiveBuffer()
+	pt := buf.Point()
+	runes := []rune(buf.String())
+	n := len(runes)
+	// Find word bounds around point.
+	start := pt
+	for start > 0 && isSpellWordRune(runes[start-1]) {
+		start--
+	}
+	end := pt
+	for end < n && isSpellWordRune(runes[end]) {
+		end++
+	}
+	if start >= end {
+		e.Message("No word at point")
+		return
+	}
+	word := string(runes[start:end])
+	misspelled, err := runAspellList(e.spellCommand, e.spellLanguage, word)
+	if err != nil {
+		e.Message("ispell-word: %v", err)
+		return
+	}
+	if len(misspelled) == 0 {
+		e.Message("%q is correctly spelled", word)
+		return
+	}
+	e.spellErrors = []spellError{{start: start, end: end, word: word}}
+	e.spellErrorIdx = 0
+	e.spellActive = true
+	e.spellShowCurrent()
 }
 
 // cmdSpell starts an interactive spell check of the entire current buffer.

@@ -31,11 +31,25 @@ on modified files, `s` should stage modified, unstaged files. `c`
 should open a VC commit buffer with comments showing the staged files
 that will be included in the commit.
 
+Pressing `f` should make a fixup commit. The user should be prompted
+with the list of current commits (the same screen as `vc-print-log`)
+on which to attach the fixup. `C-c C-c` on the line of that commit
+should complete the fixup flow.
 
 ## vc-grep
 
 `vc-grep` should not wrap its lines. visual line mode should not be
 active in `vc-grep` buffers.
+
+# Spell checker
+
+`ispell-buffer` should start a spell checker session for the entire
+buffer. `ispell-word` should only spell check the current word.
+
+# Clipboard
+
+When copying text in `gomacs`, it SHOULD go on the OS clipboard as
+well. It MUST support Linux/Xorg, Linux/Wayland and macOS.
 
 # Project commands
 
@@ -57,6 +71,10 @@ call `vc-grep` if there's a VC backend, if not use a standard grep command shoul
 grep -R -i -n
 ```
 
+# Minibuffer
+
+The code API doc in the minibuffer should have syntax highlighting.
+
 # LSP - language server protocol
 
 ## lsp-find-references
@@ -65,8 +83,10 @@ grep -R -i -n
 
 # Performance
 
-Optimise `gomacs` speed. Focus on the user experience, how fast the
-user can input text and scroll in `gomacs`.
+`gomacs` should be very fast. It should provide a great the user
+experience of fast editor, letting the user input text as fast as she
+can type, and scroll up and down in buffers as fast as the operating
+system keyboard settings allow.
 
 # Help system
 
@@ -81,7 +101,8 @@ corresponding `_test.go` file of that file they're testing.
 
 # Man page integration
 
-`M-x man` should offer tab completion of the available man pages in `$MANPATH`.
+`M-x man` should offer tab completion of the available man pages in
+`$MANPATH`.
 
 
 

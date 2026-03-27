@@ -95,20 +95,3 @@ Cheers,
 
 -Torstein
 
-# Known issues
-
-*vc log* should navigate to next and previous with `n` and `p`.
-
-Doing `vc-print-log` on a buffer should list the commit log for this
-file only, not for the entire repository.
-
-`M-<` and `M->` don't work. They should take the cursor to the
-beginning and end of the buffer respectively.
-
-Hitting `q` to quit from the  `*vc-annotate*` buffer doesn't work.
-
-# Missing features
-
-## eldoc
-The code API doc in minibuffer should have syntax highlighting for comments and
-multi-line hover text.
