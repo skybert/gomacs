@@ -594,9 +594,21 @@ func (e *Editor) vcCommitAbort() {
 // fixup commit (git commit --fixup=<sha>).
 func (e *Editor) vcFixupSelectDispatch(ke terminal.KeyEvent) bool {
 	// C-c C-c: run git commit --fixup=<sha> for commit at point.
+	// C-c C-k: cancel.
 	if e.prefixKeymap == e.ctrlCKeymap {
 		if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyCtrlC {
 			return false
+		}
+		if ke.Key == tcell.KeyRune && ke.Rune == 'k' {
+			e.prefixKeymap = nil
+			e.Message("Fixup cancelled")
+			buf := e.ActiveBuffer()
+			if parent, ok := e.vcParent[buf]; ok {
+				e.activeWin.SetBuf(parent)
+			} else {
+				e.vcQuit("vc-fixup-select")
+			}
+			return true
 		}
 		if ke.Key == tcell.KeyCtrlC {
 			e.prefixKeymap = nil

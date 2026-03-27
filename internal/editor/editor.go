@@ -61,6 +61,10 @@ type Editor struct {
 
 	// prefix key state (non-nil while processing a multi-key sequence)
 	prefixKeymap *keymap.Keymap
+	// prefixKeySeq accumulates the human-readable prefix typed so far
+	// (e.g. "C-x v") and is shown in the minibuffer while waiting for the
+	// next key.  It is cleared when the sequence completes or is cancelled.
+	prefixKeySeq string
 
 	// describe-key state: set by C-h k; intercepts the next key sequence
 	// and shows the bound command and its documentation.
@@ -320,8 +324,8 @@ func New(opts Options) (*Editor, error) {
 		version:                    opts.Version,
 		startTime:                  time.Now(),
 		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
-		autoRevert:                  true,
-		autoRevertMtimes:            make(map[*buffer.Buffer]time.Time),
+		autoRevert:                 true,
+		autoRevertMtimes:           make(map[*buffer.Buffer]time.Time),
 	}
 
 	// Apply the default colour theme.
@@ -1519,6 +1523,7 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		// Unrecognised key in a prefix sequence: cancel prefix, beep.
 		if e.prefixKeymap != nil {
 			e.prefixKeymap = nil
+			e.prefixKeySeq = ""
 			e.Message("Key sequence incomplete")
 			return
 		}
@@ -1533,12 +1538,27 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	e.prefixKeymap = nil
 
 	if binding.Prefix != nil {
-		// Begin a prefix sequence (e.g. C-x).
+		// Begin or extend a prefix sequence (e.g. C-x, then C-x v).
+		keyStr := keymap.FormatKey(mk)
+		if e.prefixKeySeq == "" {
+			// First chord (e.g. C-x): record it but don't show yet.
+			e.prefixKeySeq = keyStr
+		} else {
+			// Second+ chord (e.g. C-x v): append and show in minibuffer.
+			e.prefixKeySeq = e.prefixKeySeq + " " + keyStr
+			e.Message("%s", e.prefixKeySeq)
+		}
 		e.prefixKeymap = binding.Prefix
 		return
 	}
 
 	// Execute the bound command.
+	// If a prefix-sequence hint was showing in the minibuffer, clear it now
+	// so it doesn't linger after the command runs.
+	if e.prefixKeySeq != "" {
+		e.message = ""
+	}
+	e.prefixKeySeq = ""
 	if binding.Command != "" {
 		e.execCommand(binding.Command)
 	}
@@ -2309,7 +2329,7 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.DiffHighlighter{}
 	case mode == "vc-show":
 		return syntax.VcShowHighlighter{}
-	case mode == "vc-log":
+	case mode == "vc-log" || mode == "vc-fixup-select":
 		return syntax.VcLogHighlighter{}
 	case mode == "vc-grep" || mode == "lsp-refs":
 		return syntax.VcGrepHighlighter{}
@@ -2796,7 +2816,7 @@ func (e *Editor) applyVisualLines() {
 		mode := w.Buf().Mode()
 		if mode == "vc-grep" || mode == "lsp-refs" || mode == "vc-status" ||
 			mode == "vc-log" || mode == "vc-show" || mode == "diff" ||
-			mode == "compilation" {
+			mode == "compilation" || mode == "vc-fixup-select" {
 			w.SetWrapCol(0)
 			continue
 		}

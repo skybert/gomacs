@@ -1046,6 +1046,7 @@ func (e *Editor) cmdKeyboardQuit() {
 	}
 	if e.prefixKeymap != nil {
 		e.prefixKeymap = nil
+		e.prefixKeySeq = ""
 	}
 	buf := e.ActiveBuffer()
 	buf.SetMarkActive(false)
