@@ -1,50 +1,12 @@
 # What is gomacs?
 
-Simple TTY only Emacs clone written in Go.
+Simple Emacs clone written in Go. 
 
 <img src="doc/gomacs-screenshot.png" alt="gomacs"/>
 
 # Which features?
 
-- Open and write files.
-- All files are read and written as UTF-8
-- Search, forwards and backwards.
-- Syntax highlighting and indention engine of some languages,
-  including Go, Emacs Lisp, Markdown, BASH and YAML.
-- Self documenting features, like <kbd>C-h f</kbd> `describe-function`
-  and <kbd>C-h k</kbd> `describe-key`
-- `visual-line-mode` enabled by default: lines longer than 80 characters
-  wrap visually (file content unchanged). Disable with `(setq visual-lines nil)`.
-- Spell checking with `aspell` (auto-enabled for `markdown`, `text`,
-  `fundamental` modes; only comments checked for code modes).
-  Configurable with `(setq spell-command "/usr/bin/aspell")` and
-  `(setq spell-language "en")`.
-  `M-x spell` for interactive spell checking (SPC/n=skip, 1-4=pick suggestion,
-  r=replace, i=add to personal dictionary, q=quit). Misspelled words are underlined
-  in red; the word currently being typed is never highlighted.
-- `forward-list` (<kbd>C-M-n</kbd>) navigates to the matching closing
-  bracket/paren/brace, or closing sh keyword (`fi`, `done`, `esac`) in bash mode.
-- `backward-list` (<kbd>C-M-p</kbd>) navigates to the matching opening
-  bracket/paren/brace, or opening sh keyword in bash mode.
-- `dabbrev-expand` (<kbd>M-/</kbd>) completes the word before point using words
-  from the current buffer (nearest first), other open buffers, then command names.
-  Repeated <kbd>M-/</kbd> cycles through candidates.
-- `yaml-mode` provides syntax highlighting and indentation for YAML (`.yaml`, `.yml`).
-  Configurable with `(setq yaml-indent 2)`.
-- `count-buffer-lines` (<kbd>C-x l</kbd>) shows the total number of lines in
-  the buffer and how many are before and after point.
-- Minibuffer history: <kbd>↑</kbd> / <kbd>↓</kbd> arrow keys cycle through
-  previous inputs per minibuffer command (e.g. `vc-grep`, `goto-line`).
-- `*vc log*`: `n`/`p` navigate between log entries; `g` refreshes the log.
-- `*vc-status*`: `g` refreshes the status; `l` shows vc-log; `d` shows diff;
-  `m` stages the file at point; `c` opens a commit buffer.
-- `C-h h` / `M-x help` shows a help buffer listing all commands and
-  configuration variables.
-- LSP eldoc (function signature in minibuffer) is syntax-highlighted using the
-  current buffer's language highlighter.
-- `M-x build` runs `make` in the project root and shows output in a
-  `*compilation*` buffer (ANSI colours preserved). `M-g n` / `M-g p` jump to
-  the next/previous error in the source file.
+See [the gomacs manual](doc/gomacs.md) for a full list.
 
 # LSP support
 
