@@ -47,17 +47,17 @@ away:
 </a>
 
 Admittedly, the auto complete box is a tad too wide for the default
-portrait mode on my phone:
+portrait mode on my phone. Turning the phone over to landscape mode,
+though, makes it look pretty decent:
 
-<a href="gomacs-android-go-lsp-landscape.png">
-  <img
-    src="gomacs-android-go-lsp-landscape.png"
-    alt="gomacs on android"
-    style="height: 500px"
-  />
-</a>
+<a href="gomacs-android-go-lsp-landscape.png"> <img
+  src="gomacs-android-go-lsp-landscape.png" alt="gomacs on android"
+  style="height: 500px" /> </a>
 
-Turning the phone over to landscape mode, though, makes it look pretty decent:
+
+## Builtin man page viewer
+
+`M-x man RET ls` shows the `ls` man page in all its colourful glory:
 
 <a href="gomacs-android-man-ls.png">
 <img
@@ -65,7 +65,7 @@ Turning the phone over to landscape mode, though, makes it look pretty decent:
     alt="gomacs on android"
     style="height: 500px"
   />
-  </a>
+</a>
 
 ## Markdown support
 
