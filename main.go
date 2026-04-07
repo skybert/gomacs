@@ -31,7 +31,7 @@ func main() {
 	flag.Parse()
 
 	if *version {
-		fmt.Println(Version)
+		fmt.Println("gomacs " + Version)
 		os.Exit(0)
 	}
 
