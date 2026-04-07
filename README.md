@@ -1,6 +1,7 @@
 # What is gomacs?
 
-Simple Emacs clone written in Go. 
+Lean Emacs clone written in Go. It works great on Linux, macOS and
+[Android](doc/android/README.md).
 
 <img src="doc/gomacs-screenshot.png" alt="gomacs"/>
 
