@@ -134,3 +134,61 @@ func TestDowncaseRegion(t *testing.T) {
 		t.Errorf("got %q, want \"hello WORLD\"", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// maybeAutoFill
+// ---------------------------------------------------------------------------
+
+func TestAutoFill_WrapsInTextMode(t *testing.T) {
+	e := newTestEditor("Hello World Foo")
+	b := buf(e)
+	b.SetMode("text")
+	e.fillColumn = 10
+	// Simulate the cursor being after "Foo" (position 15).
+	b.SetPoint(15)
+	e.maybeAutoFill()
+	got := b.String()
+	// "Hello " (6) exceeds col 10, last space at col 5 → break there.
+	want := "Hello\nWorld Foo"
+	if got != want {
+		t.Errorf("auto-fill text: got %q, want %q", got, want)
+	}
+}
+
+func TestAutoFill_NoWrapUnderFillColumn(t *testing.T) {
+	e := newTestEditor("Short line")
+	b := buf(e)
+	b.SetMode("text")
+	e.fillColumn = 70
+	b.SetPoint(10)
+	e.maybeAutoFill()
+	if got := b.String(); got != "Short line" {
+		t.Errorf("auto-fill no-op: got %q, want unchanged", got)
+	}
+}
+
+func TestAutoFill_NoWrapInGoMode(t *testing.T) {
+	e := newTestEditor("func foo() { return something + more + stuff }")
+	b := buf(e)
+	b.SetMode("go")
+	e.fillColumn = 10
+	b.SetPoint(b.Len())
+	e.maybeAutoFill()
+	// Go mode should never auto-fill.
+	if got := b.String(); got != "func foo() { return something + more + stuff }" {
+		t.Errorf("auto-fill in go mode should be no-op, got %q", got)
+	}
+}
+
+func TestAutoFill_MarkdownMode(t *testing.T) {
+	e := newTestEditor("Hello World Foo")
+	b := buf(e)
+	b.SetMode("markdown")
+	e.fillColumn = 10
+	b.SetPoint(15)
+	e.maybeAutoFill()
+	want := "Hello\nWorld Foo"
+	if got := b.String(); got != want {
+		t.Errorf("auto-fill markdown: got %q, want %q", got, want)
+	}
+}

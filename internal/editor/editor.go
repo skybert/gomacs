@@ -263,6 +263,9 @@ type Editor struct {
 	autoRevertMtimes map[*buffer.Buffer]time.Time
 	// autoRevertLastCheck is the last time we polled file mtimes.
 	autoRevertLastCheck time.Time
+
+	// shellStates maps shell buffers (mode=="shell") to their live PTY state.
+	shellStates map[*buffer.Buffer]*shellState
 }
 
 // spanCache holds pre-computed highlighting data for a buffer.  It is
@@ -326,6 +329,7 @@ func New(opts Options) (*Editor, error) {
 		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
 		autoRevert:                 true,
 		autoRevertMtimes:           make(map[*buffer.Buffer]time.Time),
+		shellStates:                make(map[*buffer.Buffer]*shellState),
 	}
 
 	// Apply the default colour theme.
@@ -1029,6 +1033,11 @@ func (e *Editor) KillBuffer(name string) {
 			remaining = append(remaining, b)
 		} else {
 			delete(e.spanCaches, b)
+			// Clean up PTY state if this is a shell buffer.
+			if st, ok := e.shellStates[b]; ok {
+				st.close()
+				delete(e.shellStates, b)
+			}
 		}
 	}
 	e.buffers = remaining
@@ -1507,6 +1516,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	// When in a *Man ...* buffer, q closes it.
 	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "man" {
 		if e.manDispatch(ke) {
+			return
+		}
+	}
+
+	// When in a *shell* buffer, forward most keys to the PTY.
+	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "shell" {
+		if e.shellDispatch(ke) {
 			return
 		}
 	}
@@ -2028,9 +2044,43 @@ func (e *Editor) selfInsert(r rune) {
 	buf.Insert(pt, r)
 	buf.SetPoint(pt + 1)
 	buf.SetMarkActive(false)
+	// Auto-fill in text/markdown modes.
+	e.maybeAutoFill()
 	// Dismiss any stale completion popup, then maybe trigger a new one.
 	e.lspCompDismiss()
 	e.lspMaybeTriggerCompletion()
+}
+
+// maybeAutoFill breaks the current line at the last word boundary when it
+// exceeds fill-column, but only in text and markdown modes.
+func (e *Editor) maybeAutoFill() {
+	buf := e.ActiveBuffer()
+	mode := buf.Mode()
+	if mode != "text" && mode != "markdown" {
+		return
+	}
+	pt := buf.Point()
+	bol := buf.BeginningOfLine(pt)
+	// Column of point (0-based rune count from beginning of line).
+	col := pt - bol
+	if col <= e.fillColumn {
+		return
+	}
+	// Find the last space at or before fill-column.
+	breakPos := -1
+	for pos := bol; pos < pt; pos++ {
+		if buf.RuneAt(pos) == ' ' && (pos-bol) <= e.fillColumn {
+			breakPos = pos
+		}
+	}
+	if breakPos < 0 {
+		return // no suitable break point
+	}
+	// Replace the space at breakPos with a newline.
+	// After delete(breakPos,1) + insert(breakPos,'\n'), net shift is 0 so pt stays.
+	buf.Delete(breakPos, 1)
+	buf.Insert(breakPos, '\n')
+	buf.SetPoint(pt)
 }
 
 // bufReadOnly reports true and shows an error message if the active buffer is
@@ -2257,7 +2307,11 @@ func (e *Editor) Redraw() {
 	e.lspMaybeDidChange(e.ActiveBuffer())
 	e.term.Clear()
 	for _, w := range e.windows {
-		e.renderWindow(w)
+		if w.Buf().Mode() == "shell" {
+			e.renderShellWindow(w)
+		} else {
+			e.renderWindow(w)
+		}
 		e.renderModeline(w)
 	}
 	// Draw vertical separators between side-by-side windows.
@@ -2768,6 +2822,15 @@ func (e *Editor) placeCursor() {
 	// tracks its own cursor independently from the shared buffer point.
 	w := e.activeWin
 	buf := w.Buf()
+
+	// Shell buffers use the PTY's own cursor position.
+	if buf.Mode() == "shell" {
+		if col, row := e.shellCursorPos(buf); col >= 0 {
+			e.term.ShowCursor(col, row)
+			return
+		}
+	}
+
 	pt := w.Point()
 	// Use VisualRowForPoint so the cursor lands on the correct visual row
 	// when visual line wrapping is active.
@@ -2816,7 +2879,7 @@ func (e *Editor) applyVisualLines() {
 		mode := w.Buf().Mode()
 		if mode == "vc-grep" || mode == "lsp-refs" || mode == "vc-status" ||
 			mode == "vc-log" || mode == "vc-show" || mode == "diff" ||
-			mode == "compilation" || mode == "vc-fixup-select" {
+			mode == "compilation" || mode == "vc-fixup-select" || mode == "shell" {
 			w.SetWrapCol(0)
 			continue
 		}

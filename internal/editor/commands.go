@@ -234,6 +234,8 @@ func init() {
 		"Execute string COMMAND in inferior shell; display output.")
 	registerCommand("shell-command-on-region", (*Editor).cmdShellCommandOnRegion,
 		"Execute string COMMAND in inferior shell with region as input.")
+	registerCommand("shell", (*Editor).cmdShell,
+		"Create or switch to a *shell* buffer backed by a PTY terminal.")
 	registerCommand("man", (*Editor).cmdMan,
 		"Display the manual page for TOPIC in a read-only *Man TOPIC* buffer.")
 	registerCommand("vc-print-log", (*Editor).cmdVcPrintLog,

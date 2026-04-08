@@ -102,8 +102,8 @@ grouped in `M-x help`.
 
 # Unit tests
 
-Ensure all go code is unit tested, and these tests are in the
-corresponding `_test.go` file of that file they're testing.
+All Go code MUST have unit tests. These tests MUST be written in
+corresponding `_test.go` files of the file they're testing.
 
 # Man page integration
 
@@ -122,3 +122,28 @@ The user can configure this with:
 (setq fill-column 80)
 ```
 
+# Built-in shell
+
+`M-x shell` creates a buffer with a terminal. The shell should be
+capable of running other terminal applications, like `top`, but the
+following shortcuts should always be available to `gomacs` proper:
+
+- `C-<space>` to set mark
+- `C-v` to scroll down
+- `C-x b` to switch buffer.
+- `C-x k` to kill the shell buffer.
+- `M-v` to scroll up
+- `M-w` to copy active region.
+- `M-x` to type in a command
+
+The shell should start the shell interpreter set in the `$SHELL`
+environment variable.
+
+ANSI escape codes should be interpreted. For instance, colours should
+be displayed as colours, and not the ANSI escapes themselves.
+
+If there already is a `*shell*` buffer open and the user attempts to
+create a new one, then an additional shell is created with the VC repo
+name, e.g. `*shell/gomacs*`. If the current buffer is not in a VC
+repo, use the basename of the current directory. If the
+`*shell/<repo>*` already exists, jump to that buffer.
