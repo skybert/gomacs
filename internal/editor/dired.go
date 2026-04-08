@@ -192,6 +192,10 @@ func (e *Editor) diredDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
 		return false
 	}
+	// Pass through any modified key (M-x, C-x, etc.) to normal dispatch.
+	if ke.Mod != 0 {
+		return false
+	}
 
 	// Enter opens the entry under point, same as 'f'.
 	if ke.Key == tcell.KeyEnter {
