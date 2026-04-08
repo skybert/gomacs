@@ -33,8 +33,9 @@ func (e *Editor) cmdShell() {
 	e.clearArg()
 
 	// Resolve the VC root for the current buffer to derive the buffer name and
-	// starting directory.
-	_, vcRoot := vcFind(vcDir(e.ActiveBuffer()))
+	// starting directory.  Use bufferDir so dired buffers resolve to their
+	// listed directory rather than os.Getwd().
+	_, vcRoot := vcFind(e.bufferDir(e.ActiveBuffer()))
 	var shellBufName, startDir string
 	if vcRoot != "" {
 		repoName := filepath.Base(vcRoot)
