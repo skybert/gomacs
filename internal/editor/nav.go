@@ -348,6 +348,7 @@ func (e *Editor) cmdHelp() {
 		{"lsp-completion-min-chars", "Minimum chars before LSP completion triggers. Default: 1."},
 		{"markdown-indent", "Indent string or width for Markdown mode. Default: 2."},
 		{"python-indent", "Indent string or width for Python mode. Default: 4."},
+		{"screenshot-dir", "Directory for M-x screenshot output. Default: working directory at startup."},
 		{"sh-indent", "Indent string or width for Bash mode. Default: 2."},
 		{"spell-command", "Path to spell-checker executable. Default: \"aspell\"."},
 		{"spell-language", "Language code for spell checker. Default: \"en\"."},
