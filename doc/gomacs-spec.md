@@ -81,6 +81,39 @@ each of the hits.+The `next-error` function should be bound to `C-x \``
 
 The code API doc in the minibuffer should have syntax highlighting.
 
+# Auto completion
+
+When files in `gomacs`, it should offer an auto completion box
+(intellisense) after the user has typed three characters (including
+".") under the following circumstances:
+
+- When being in a mode with LSP support, like `go-mode`, the LSP
+server should provide the completion candidates. By default, `gomacs`
+should display the menu after `3` characters, i.e. when the user has
+typed `os.` to list the functions available in the `os` Go package.
+
+- When editing a file which does not have an LSP backend, offer
+completion candidates based on words in the current buffer. e.g. when
+the user edits an `.md` file, in which it somewhere says "beautiful",
+when the user types "bea", `gomacs` should offer the completion menu
+with the candidate "beautiful".
+
+The number of characters the user has to type before triggering the
+completion menu can be specified with:
+```lisp
+(setq completion-menu-trigger-chars 3)
+```
+
+The completion box should have a thin green border, using the green
+colour defined in the current them, to differentiate it from the rest
+of the buffer.
+
+The user can navigate up and down in the completion with either the
+arrow up and down keys, or with `M-n` (next) and `M-p` (previous).
+Pressing `Tab` or `Enter` selects the current candidate. `C-g` closes
+the completion menu without inserting any candidate, but leaving the
+point at where the user was typing before the menu was triggered.
+
 # LSP - language server protocol
 
 ## lsp-find-references
@@ -98,7 +131,6 @@ system keyboard settings allow.
 
 Ensure that all functions and variables are listed and logically
 grouped in `M-x help`.
-
 
 # Unit tests
 
