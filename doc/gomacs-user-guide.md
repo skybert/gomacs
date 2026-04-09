@@ -385,6 +385,15 @@ Default: 1.
 Example: **(setq lsp-completion-min-chars 3)**
 
 
+**screenshot-dir**  
+Directory where
+**M-x screenshot**
+saves PNG files.
+If not set, files are saved to the working directory from which gomacs was started.
+The directory is created if it does not exist.
+Example: **(setq screenshot-dir "~/pictures/screenshots")**
+
+
 ### Key bindings
 
 Custom key bindings can be set in the init file using
@@ -460,7 +469,7 @@ Torstein Krause Johansen <torstein@skybert.net>
 
 ## VERSION
 
-v1.6.1-5-gc8ea6b2-dirty
+v1.7.0-6-g7038f0e-dirty
 
 ## Screenshots
 
@@ -469,4 +478,36 @@ v1.6.1-5-gc8ea6b2-dirty
 <img src="gomacs-m-x.png" alt="gomacs-m-x"/>
 
 <img src="gomacs-screenshot.png" alt="gomacs-screenshot"/>
+
+
+### Android
+
+<img src="android/gomacs-android-git-diff.png" alt="gomacs-android-git-diff"/>
+
+<img src="android/gomacs-android-go-lsp-landscape.png" alt="gomacs-android-go-lsp-landscape"/>
+
+<img src="android/gomacs-android-go-lsp.png" alt="gomacs-android-go-lsp"/>
+
+<img src="android/gomacs-android-man-ls.png" alt="gomacs-android-man-ls"/>
+
+<img src="android/gomacs-android-markdown.png" alt="gomacs-android-markdown"/>
+
+<img src="android/gomacs-android-top.png" alt="gomacs-android-top"/>
+
+
+### Darwin
+
+<img src="darwin/bash-mode.png" alt="bash-mode"/>
+
+<img src="darwin/dired.png" alt="dired"/>
+
+<img src="darwin/elisp-mode.png" alt="elisp-mode"/>
+
+<img src="darwin/go-mode.png" alt="go-mode"/>
+
+<img src="darwin/markdown-mode.png" alt="markdown-mode"/>
+
+<img src="darwin/shell.png" alt="shell"/>
+
+<img src="darwin/vc-status.png" alt="vc-status"/>
 

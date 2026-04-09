@@ -1,4 +1,4 @@
-// cmd/man2md converts doc/gomacs.1.in to doc/gomacs.md and appends any
+// cmd/man2md converts doc/gomacs.1.in to doc/gomacs-user-guide.md and appends any
 // screenshots found in doc/*.png.  Run via "make doc" from the project root.
 package main
 
@@ -26,19 +26,40 @@ func main() {
 
 	shots, _ := filepath.Glob("doc/*.png")
 	sort.Strings(shots)
-	if len(shots) > 0 {
+
+	platShots, _ := filepath.Glob("doc/*/*.png")
+	sort.Strings(platShots)
+	platMap := map[string][]string{}
+	var platOrder []string
+	for _, s := range platShots {
+		dir := filepath.Base(filepath.Dir(s))
+		if _, seen := platMap[dir]; !seen {
+			platOrder = append(platOrder, dir)
+		}
+		platMap[dir] = append(platMap[dir], s)
+	}
+
+	if len(shots) > 0 || len(platShots) > 0 {
 		md += "\n## Screenshots\n\n"
 		for _, s := range shots {
 			name := strings.TrimSuffix(filepath.Base(s), ".png")
 			md += fmt.Sprintf("<img src=\"%s\" alt=\"%s\"/>\n\n", filepath.Base(s), name)
 		}
+		for _, plat := range platOrder {
+			md += fmt.Sprintf("\n### %s\n\n", strings.ToTitle(plat[:1])+plat[1:])
+			for _, s := range platMap[plat] {
+				name := strings.TrimSuffix(filepath.Base(s), ".png")
+				rel := plat + "/" + filepath.Base(s)
+				md += fmt.Sprintf("<img src=\"%s\" alt=\"%s\"/>\n\n", rel, name)
+			}
+		}
 	}
 
-	if err := os.WriteFile("doc/gomacs.md", []byte(md), 0o644); err != nil {
+	if err := os.WriteFile("doc/gomacs-user-guide.md", []byte(md), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "man2md: write: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("wrote doc/gomacs.md")
+	fmt.Println("wrote doc/gomacs-user-guide.md")
 }
 
 func gitVersion() string {

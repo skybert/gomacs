@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make              # fmt → lint → test → vulncheck → build (default)
 make build        # gofmt + go build -o build/gomacs
+make build/shotgen  # build the screenshot generator tool
 make test         # go test ./...
 make lint         # golangci-lint run ./...
 make fmt          # gofmt -w -s .
@@ -22,6 +23,10 @@ go tool cover -func=build/coverage.out
 # Run the editor (skip init file)
 ./build/gomacs -Q somefile.go
 ```
+
+**Important:** Always use `make` targets rather than bare `go build` commands.
+Running `go build ./cmd/shotgen` without `-o` drops a stray `./shotgen` binary
+in the repo root. Use `make build/shotgen` instead.
 
 ## Architecture
 
@@ -77,6 +82,7 @@ tcell event → terminal.ParseKey → keymap.Lookup → execCommand(name) → cm
 | `sh-indent` | integer or string | `"  "` | Per-level indent for Bash (`bash-indent` is not the name; use `sh-indent`) |
 | `json-indent` | integer or string | `"  "` | Per-level indent for JSON |
 | `markdown-indent` | integer or string | `"  "` | Per-level indent for Markdown |
+| `screenshot-dir` | string | `""` (startup cwd) | Directory for `M-x screenshot` PNG output; created if absent |
 
 Example `~/.gomacs`:
 ```elisp

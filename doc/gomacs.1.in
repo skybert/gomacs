@@ -321,6 +321,14 @@ Example: \fB(setq spell\-language "de")\fR
 Minimum number of characters typed before LSP auto\-completion is triggered.
 Default: 1.
 Example: \fB(setq lsp\-completion\-min\-chars 3)\fR
+.TP
+.B screenshot\-dir
+Directory where
+.B M\-x screenshot
+saves PNG files.
+If not set, files are saved to the working directory from which gomacs was started.
+The directory is created if it does not exist.
+Example: \fB(setq screenshot\-dir "~/pictures/screenshots")\fR
 .SS Key bindings
 Custom key bindings can be set in the init file using
 .BR global\-set\-key :

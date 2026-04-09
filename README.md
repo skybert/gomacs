@@ -7,7 +7,7 @@ Lean Emacs clone written in Go. It works great on Linux, macOS and
 
 # Which features?
 
-See [the gomacs manual](doc/gomacs.md) for a full list.
+See [the gomacs manual](doc/gomacs-user-guide.md) for a full list.
 
 # LSP support
 
