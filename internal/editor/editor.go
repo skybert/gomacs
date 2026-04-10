@@ -214,6 +214,8 @@ type Editor struct {
 	lspCompInflight       bool
 	lspCompWordStart      int
 	lspCompletionMinChars int // default lspDefaultCompletionMinChars
+	// lspCompDelayCancel cancels a pending delayed buffer-word completion.
+	lspCompDelayCancel context.CancelFunc
 
 	// spanCaches caches syntax-highlight spans per buffer so that
 	// scrolling (C-n/C-p) does not re-highlight the whole file every frame.
@@ -329,6 +331,7 @@ func New(opts Options) (*Editor, error) {
 		spellLanguage:              "en",
 		lspConns:                   make(map[string]*lspConn),
 		lspOpCancel:                nopCancel,
+		lspCompDelayCancel:         nopCancel,
 		lspCbs:                     make(chan func(), 16),
 		version:                    opts.Version,
 		startTime:                  time.Now(),
@@ -551,6 +554,7 @@ func NewForScreenshot(t *terminal.Terminal, width, height int) (*Editor, error) 
 		spellLanguage:              "en",
 		lspConns:                   make(map[string]*lspConn),
 		lspOpCancel:                nopCancel,
+		lspCompDelayCancel:         nopCancel,
 		lspCbs:                     make(chan func(), 16),
 		startTime:                  time.Now(),
 		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
@@ -820,6 +824,11 @@ func (e *Editor) applyElispConfig() {
 		}
 	}
 	if v, ok := e.lisp.GetGlobalVar("lsp-completion-min-chars"); ok {
+		if i, ok := v.(elisp.Int); ok && i.V > 0 {
+			e.lspCompletionMinChars = int(i.V)
+		}
+	}
+	if v, ok := e.lisp.GetGlobalVar("completion-menu-trigger-chars"); ok {
 		if i, ok := v.(elisp.Int); ok && i.V > 0 {
 			e.lspCompletionMinChars = int(i.V)
 		}
@@ -2393,7 +2402,6 @@ func (e *Editor) Redraw() {
 		} else {
 			e.renderWindow(w)
 		}
-		e.renderModeline(w)
 	}
 	// Draw vertical separators between side-by-side windows.
 	for i := 1; i < len(e.windows); i++ {
@@ -2409,6 +2417,11 @@ func (e *Editor) Redraw() {
 		}
 	}
 	e.renderMinibuffer()
+	// Modelines are drawn after the minibuffer so they overwrite any candidate
+	// popup rows that may have expanded upward into window text rows.
+	for _, w := range e.windows {
+		e.renderModeline(w)
+	}
 	// LSP completion popup (rendered over the text, below the cursor).
 	e.renderLSPCompletionPopup()
 	// Position the hardware cursor.
@@ -2607,9 +2620,7 @@ func (e *Editor) renderWindow(w *window.Window) {
 	}
 
 	_, winY, winW, winH := w.Left(), w.Top(), w.Width(), w.Height()
-	textH := max(
-		// reserve last row for modeline
-		winH-1, 1)
+	textH := max(winH-1, 1)
 
 	// Spell-check spans (nil when disabled or mode not applicable).
 	spellSpans := e.getSpellSpans(buf)

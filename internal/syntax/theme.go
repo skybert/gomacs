@@ -62,30 +62,31 @@ var themes = map[string]themeFunc{
 // Pointer stability: package-level vars have a fixed address for the
 // lifetime of the process, so these pointers are always valid.
 var faceByName = map[string]*Face{
-	"default":          &FaceDefault,
-	"keyword":          &FaceKeyword,
-	"string":           &FaceString,
-	"comment":          &FaceComment,
-	"type":             &FaceType,
-	"function":         &FaceFunction,
-	"number":           &FaceNumber,
-	"operator":         &FaceOperator,
-	"header1":          &FaceHeader1,
-	"header2":          &FaceHeader2,
-	"header3":          &FaceHeader3,
-	"bold":             &FaceBold,
-	"italic":           &FaceItalic,
-	"code":             &FaceCode,
-	"link":             &FaceLink,
-	"blockquote":       &FaceBlockquote,
-	"modeline":         &FaceModeline,
-	"minibuffer":       &FaceMinibuffer,
-	"region":           &FaceRegion,
-	"isearch":          &FaceIsearch,
-	"candidate":        &FaceCandidate,
-	"selected":         &FaceSelected,
-	"compilation-ok":   &FaceCompilationOK,
-	"compilation-fail": &FaceCompilationFail,
+	"default":           &FaceDefault,
+	"keyword":           &FaceKeyword,
+	"string":            &FaceString,
+	"comment":           &FaceComment,
+	"type":              &FaceType,
+	"function":          &FaceFunction,
+	"number":            &FaceNumber,
+	"operator":          &FaceOperator,
+	"header1":           &FaceHeader1,
+	"header2":           &FaceHeader2,
+	"header3":           &FaceHeader3,
+	"bold":              &FaceBold,
+	"italic":            &FaceItalic,
+	"code":              &FaceCode,
+	"link":              &FaceLink,
+	"blockquote":        &FaceBlockquote,
+	"modeline":          &FaceModeline,
+	"minibuffer":        &FaceMinibuffer,
+	"region":            &FaceRegion,
+	"isearch":           &FaceIsearch,
+	"candidate":         &FaceCandidate,
+	"selected":          &FaceSelected,
+	"completion-border": &FaceCompletionBorder,
+	"compilation-ok":    &FaceCompilationOK,
+	"compilation-fail":  &FaceCompilationFail,
 }
 
 // applyDefaultTheme resets all faces to the built-in terminal-colour defaults.
@@ -112,6 +113,7 @@ func applyDefaultTheme() {
 	FaceIsearch = Face{Fg: "black", Bg: "yellow"}
 	FaceCandidate = Face{Fg: "default", Bg: "default"}
 	FaceSelected = Face{Reverse: true}
+	FaceCompletionBorder = Face{Fg: "bright-black"}
 	FaceCompilationOK = Face{Fg: "green", Bold: true}
 	FaceCompilationFail = Face{Fg: "red", Bold: true}
 }
@@ -158,12 +160,13 @@ func applySweetTheme() {
 	FaceCode = Face{Fg: sweetPurple}
 	FaceLink = Face{Fg: sweetBlue, Underline: true}
 	FaceBlockquote = Face{Fg: sweetGreen, Italic: true}
-	FaceModeline = Face{Fg: sweetMono1, Bg: sweetBg1, Bold: true}
+	FaceModeline = Face{Fg: sweetMono1, Bg: sweetBlack, Bold: true}
 	FaceMinibuffer = Face{Fg: sweetFg, Bg: sweetBg}
 	FaceRegion = Face{Fg: sweetBlack, Bg: sweetGreen}
 	FaceIsearch = Face{Fg: sweetBlack, Bg: sweetOrange1}
 	FaceCandidate = Face{Fg: sweetFg, Bg: sweetBg}
 	FaceSelected = Face{Fg: sweetBlack, Bg: sweetGreen}
+	FaceCompletionBorder = Face{Fg: sweetMono3, Bg: sweetBg}
 	FaceCompilationOK = Face{Fg: sweetGreen, Bold: true}
 	FaceCompilationFail = Face{Fg: sweetRed1, Bold: true}
 }

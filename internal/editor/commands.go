@@ -760,6 +760,10 @@ func (e *Editor) cmdBackwardDeleteChar() {
 		buf.Delete(pt-n, n)
 		buf.SetPoint(pt - n)
 	}
+	// After deleting, re-check whether completion should still be shown
+	// (e.g. the user removed one char but is still at "os." which triggers).
+	e.lspCompDismiss()
+	e.lspMaybeTriggerCompletion()
 }
 
 func (e *Editor) cmdKillLine() {

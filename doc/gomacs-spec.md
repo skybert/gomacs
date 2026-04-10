@@ -87,16 +87,19 @@ When files in `gomacs`, it should offer an auto completion box
 (intellisense) after the user has typed three characters (including
 ".") under the following circumstances:
 
-- When being in a mode with LSP support, like `go-mode`, the LSP
+When being in a mode with LSP support, like `go-mode`, the LSP
 server should provide the completion candidates. By default, `gomacs`
 should display the menu after `3` characters, i.e. when the user has
 typed `os.` to list the functions available in the `os` Go package.
 
-- When editing a file which does not have an LSP backend, offer
+When editing a file which does not have an LSP backend, offer
 completion candidates based on words in the current buffer. e.g. when
 the user edits an `.md` file, in which it somewhere says "beautiful",
 when the user types "bea", `gomacs` should offer the completion menu
-with the candidate "beautiful".
+with the candidate "beautiful".  When showing the completion menu in
+non-programming modes, or in comments in programming buffers, the
+completion menu shouldn't show immediately as it'll break the flow of
+someone touch typing (fast) into the buffer.
 
 The number of characters the user has to type before triggering the
 completion menu can be specified with:
@@ -104,9 +107,9 @@ completion menu can be specified with:
 (setq completion-menu-trigger-chars 3)
 ```
 
-The completion box should have a thin green border, using the green
+The completion box should have a thin grey border, using the grey
 colour defined in the current them, to differentiate it from the rest
-of the buffer.
+of the buffer while not overwhelming the user interface.
 
 The user can navigate up and down in the completion with either the
 arrow up and down keys, or with `M-n` (next) and `M-p` (previous).
