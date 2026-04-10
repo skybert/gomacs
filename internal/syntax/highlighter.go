@@ -40,6 +40,9 @@ var (
 	FaceCandidate = Face{Fg: "default", Bg: "default"}
 	// FaceSelected is used for the highlighted completion candidate.
 	FaceSelected = Face{Reverse: true}
+	// FaceCompletionBorder is the face for the thin border around the
+	// inline completion popup. Muted so it doesn't overwhelm the content.
+	FaceCompletionBorder = Face{Fg: "bright-black"}
 	// FaceCompilationOK is used for the *compilation* buffer name on the
 	// modeline when the last build succeeded.
 	FaceCompilationOK = Face{Fg: "green", Bold: true}
