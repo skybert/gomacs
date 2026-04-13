@@ -316,8 +316,8 @@ func init() {
 		"Pop back to the position before the last lsp-find-definition jump.")
 	registerCommand("lsp-find-references", (*Editor).cmdLSPFindReferences,
 		"Find all references to the symbol at point and show them in *LSP References*.")
-	registerCommand("lsp-hover", (*Editor).cmdLSPHover,
-		"Show documentation for the symbol at point from the LSP server.")
+	registerCommand("lsp-show-doc", (*Editor).cmdLSPShowDoc,
+		"Show documentation for the symbol at point in a floating popup (press any key to dismiss).")
 
 	registerCommand("imenu", (*Editor).cmdImenu,
 		"Navigate to a definition in the current buffer by name.")

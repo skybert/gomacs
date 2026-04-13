@@ -263,7 +263,7 @@ func (e *Editor) cmdHelp() {
 			"spell", "ispell-word",
 		}},
 		{"LSP", []string{
-			"lsp-find-definition", "lsp-pop-definition", "lsp-find-references", "lsp-hover",
+			"lsp-find-definition", "lsp-pop-definition", "lsp-find-references", "lsp-show-doc",
 		}},
 		{"Keyboard Macros", []string{
 			"start-kbd-macro", "end-kbd-macro", "call-last-kbd-macro",

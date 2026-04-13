@@ -206,6 +206,9 @@ type Editor struct {
 	lastHoverPoint int
 	hoverInflight  bool
 
+	// lsp-show-doc popup state.
+	lspDocLines []string // non-nil while doc popup is visible
+
 	// LSP inline completion popup state.
 	lspCompActive         bool
 	lspCompItems          []lsp.CompletionItem
@@ -622,7 +625,7 @@ func (e *Editor) setupKeymaps() {
 
 	// ---- C-c prefix (mode-specific / LSP) ----------------------------------
 	gk.BindPrefix(keymap.CtrlKey('c'), cc)
-	cc.Bind(keymap.PlainKey('h'), "lsp-hover")
+	cc.Bind(keymap.PlainKey('h'), "lsp-show-doc")
 	cc.Bind(keymap.PlainKey(','), "imenu")
 
 	// ---- C-h prefix (help) -------------------------------------------------
@@ -1416,6 +1419,11 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	if e.minibufActive {
 		e.dispatchMinibufKey(ke)
 		return
+	}
+
+	// Dismiss lsp-show-doc popup on any key.
+	if e.lspDocLines != nil {
+		e.lspDocLines = nil
 	}
 
 	// LSP completion popup: navigation keys go to the popup; other keys
@@ -2395,6 +2403,15 @@ func (e *Editor) Redraw() {
 	e.applyVisualLines()
 	// Notify LSP of any buffered changes before rendering.
 	e.lspMaybeDidChange(e.ActiveBuffer())
+	// Reflow window heights to reserve space for the minibuffer footer:
+	// one row for the prompt plus one row per visible candidate, so the
+	// popup sits between the modeline and the prompt (never above it).
+	tw, th := e.term.Size()
+	footer := 1
+	if e.minibufActive {
+		footer = 1 + min(len(e.minibufCandidates), minibufPopupMaxVisible)
+	}
+	e.relayoutWindows(tw, th-footer)
 	e.term.Clear()
 	for _, w := range e.windows {
 		if w.Buf().Mode() == "shell" {
@@ -2424,6 +2441,8 @@ func (e *Editor) Redraw() {
 	}
 	// LSP completion popup (rendered over the text, below the cursor).
 	e.renderLSPCompletionPopup()
+	// LSP doc popup (lsp-show-doc), rendered over the text near the cursor.
+	e.renderLSPDocPopup()
 	// Position the hardware cursor.
 	e.placeCursor()
 	e.term.Show()
@@ -2770,8 +2789,8 @@ func (e *Editor) renderModeline(w *window.Window) {
 }
 
 // renderMinibuffer draws the minibuffer / message area.
-// When a completion popup is active the prompt shifts up by nVisible rows
-// and the candidates are drawn immediately below it.
+// When a completion popup is active it is drawn above the prompt row,
+// which stays at the last terminal row.
 func (e *Editor) renderMinibuffer() {
 	baseRow := e.minibufWin.Top() // always the last terminal row
 	width := e.minibufWin.Width()
@@ -2789,12 +2808,8 @@ func (e *Editor) renderMinibuffer() {
 		}
 		nVisible := min(len(e.minibufCandidates), minibufPopupMaxVisible)
 		if nVisible > 0 {
-			promptRow = baseRow - nVisible
-			if promptRow < 0 {
-				promptRow = 0
-			}
+			e.renderCandidatePopup(baseRow-nVisible, width)
 		}
-		e.renderCandidatePopup(promptRow, width)
 	} else if e.message != "" {
 		// Expire messages after 5 seconds.
 		age := time.Now().UnixNano() - e.messageTime
@@ -2846,9 +2861,9 @@ func (e *Editor) renderMinibuffer() {
 // at once in the minibuffer popup.
 const minibufPopupMaxVisible = 5
 
-// renderCandidatePopup draws the fuzzy-completion popup below the prompt row.
+// renderCandidatePopup draws the fuzzy-completion popup starting at startRow.
 // Scroll indicators (▲/▼) appear in the first/last visible row when needed.
-func (e *Editor) renderCandidatePopup(promptRow, width int) {
+func (e *Editor) renderCandidatePopup(startRow, width int) {
 	cands := e.minibufCandidates
 	if len(cands) == 0 {
 		return
@@ -2860,7 +2875,7 @@ func (e *Editor) renderCandidatePopup(promptRow, width int) {
 	nVisible := len(visible)
 
 	for i, cand := range visible {
-		row := promptRow + 1 + i
+		row := startRow + i
 		face := syntax.FaceCandidate
 		if offset+i == e.minibufSelectedIdx {
 			face = syntax.FaceSelected
@@ -2898,15 +2913,7 @@ func (e *Editor) renderCandidatePopup(promptRow, width int) {
 func (e *Editor) placeCursor() {
 	if e.minibufActive {
 		col := len([]rune(e.minibufPrompt)) + e.minibufBuf.Point()
-		baseRow := e.minibufWin.Top()
-		nVisible := min(len(e.minibufCandidates), minibufPopupMaxVisible)
-		row := baseRow
-		if nVisible > 0 {
-			row = baseRow - nVisible
-			if row < 0 {
-				row = 0
-			}
-		}
+		row := e.minibufWin.Top()
 		e.term.ShowCursor(col, row)
 		return
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/lsp"
+	"github.com/skybert/gomacs/internal/syntax"
 	"github.com/skybert/gomacs/internal/terminal"
 )
 
@@ -323,9 +324,10 @@ func (e *Editor) cmdLSPPopDefinition() {
 	e.activeWin.SetPoint(top.point)
 }
 
-// cmdLSPHover shows documentation for the symbol under point (C-c h).
+// cmdLSPShowDoc shows documentation for the symbol under point (C-c h).
 // The LSP call runs in a goroutine; C-g cancels it.
-func (e *Editor) cmdLSPHover() {
+// The result is shown in a floating popup that dismisses on any key.
+func (e *Editor) cmdLSPShowDoc() {
 	e.clearArg()
 	buf := e.ActiveBuffer()
 	conn := e.lspConns[buf.Mode()]
@@ -350,7 +352,7 @@ func (e *Editor) cmdLSPHover() {
 			if ctx.Err() != nil {
 				return func() { e.Message("Cancelled") }
 			}
-			return func() { e.Message("lsp-hover: %v", err) }
+			return func() { e.Message("lsp-show-doc: %v", err) }
 		}
 		if result == nil || string(result) == "null" {
 			return func() { e.Message("No documentation found") }
@@ -360,23 +362,9 @@ func (e *Editor) cmdLSPHover() {
 			return func() { e.Message("No documentation found") }
 		}
 		return func() {
-			if len(text) < 120 && !strings.Contains(text, "\n") {
-				e.Message("%s", text)
-				return
-			}
-			helpBuf := e.FindBuffer("*LSP Help*")
-			if helpBuf == nil {
-				helpBuf = buffer.NewWithContent("*LSP Help*", text+"\n")
-				e.buffers = append(e.buffers, helpBuf)
-			} else {
-				helpBuf.SetReadOnly(false)
-				helpBuf.Delete(0, helpBuf.Len())
-				helpBuf.InsertString(0, text+"\n")
-				helpBuf.SetReadOnly(true)
-			}
-			helpBuf.SetReadOnly(true)
-			helpBuf.SetPoint(0)
-			e.activeWin.SetBuf(helpBuf)
+			e.message = ""
+			e.lspDocLines = wrapDocText(text, 70)
+			e.Redraw()
 		}
 	})
 }
@@ -747,4 +735,118 @@ func extractHoverText(raw json.RawMessage) string {
 		return strings.TrimSpace(s)
 	}
 	return ""
+}
+
+// wrapDocText word-wraps text to maxW columns, splitting on existing newlines
+// and then re-wrapping long lines.
+func wrapDocText(text string, maxW int) []string {
+	var out []string
+	for _, para := range strings.Split(text, "\n") {
+		if para == "" {
+			out = append(out, "")
+			continue
+		}
+		words := strings.Fields(para)
+		line := ""
+		for _, w := range words {
+			if line == "" {
+				line = w
+			} else if len(line)+1+len(w) <= maxW {
+				line += " " + w
+			} else {
+				out = append(out, line)
+				line = w
+			}
+		}
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	// Trim trailing blank lines.
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+// renderLSPDocPopup draws the lsp-show-doc popup as a bordered box positioned
+// below the cursor (or above if there is no room below).
+func (e *Editor) renderLSPDocPopup() {
+	if len(e.lspDocLines) == 0 || e.term == nil {
+		return
+	}
+	lines := e.lspDocLines
+
+	// Determine popup width from widest line (capped at 72).
+	popupW := 20
+	for _, l := range lines {
+		if n := len([]rune(l)); n+2 > popupW {
+			popupW = n + 2
+		}
+	}
+	if popupW > 72 {
+		popupW = 72
+	}
+
+	totalW, totalH := e.term.Size()
+
+	// Cursor position.
+	w := e.activeWin
+	buf := w.Buf()
+	docLine, col := buf.LineCol(buf.Point())
+	cursorRow := w.Top() + (docLine - w.ScrollLine())
+	cursorCol := w.Left() + col
+
+	nLines := len(lines)
+	popupH := nLines + 2 // +2 for top and bottom borders
+
+	// Try to place below the cursor; flip above if not enough room.
+	borderTop := cursorRow + 1
+	if borderTop+popupH > totalH-1 {
+		borderTop = cursorRow - popupH
+	}
+	if borderTop < 0 {
+		borderTop = 0
+	}
+
+	// Clamp left so the popup fits horizontally.
+	left := max(0, min(cursorCol, totalW-popupW-2))
+
+	border := syntax.FaceCompletionBorder
+	text := syntax.FaceCandidate
+
+	// Top border.
+	e.term.SetCell(left, borderTop, '╭', border)
+	for j := 1; j <= popupW; j++ {
+		e.term.SetCell(left+j, borderTop, '─', border)
+	}
+	e.term.SetCell(left+popupW+1, borderTop, '╮', border)
+
+	// Content rows.
+	for i, docLine := range lines {
+		row := borderTop + 1 + i
+		if row >= totalH-1 {
+			break
+		}
+		runes := []rune(docLine)
+		e.term.SetCell(left, row, '│', border)
+		for j := 0; j < popupW; j++ {
+			ch := ' '
+			if j < len(runes) {
+				ch = runes[j]
+			}
+			e.term.SetCell(left+1+j, row, ch, text)
+		}
+		e.term.SetCell(left+popupW+1, row, '│', border)
+	}
+
+	// Bottom border.
+	borderBot := borderTop + 1 + nLines
+	if borderBot < totalH-1 {
+		e.term.SetCell(left, borderBot, '╰', border)
+		for j := 1; j <= popupW; j++ {
+			e.term.SetCell(left+j, borderBot, '─', border)
+		}
+		e.term.SetCell(left+popupW+1, borderBot, '╯', border)
+	}
 }
