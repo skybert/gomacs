@@ -256,8 +256,6 @@ func init() {
 		"Switch to the *messages* buffer showing recent editor messages.")
 	registerCommand("gomacs-version", (*Editor).cmdGomacsVersion,
 		"Display gomacs version, Go runtime version, and uptime.")
-	registerCommand("screenshot", (*Editor).cmdScreenshot,
-		"Save a PNG screenshot of the current editor state to the screenshot directory.")
 
 	// ---- narrowing ---------------------------------------------------------
 	registerCommand("narrow-to-region", (*Editor).cmdNarrowToRegion,

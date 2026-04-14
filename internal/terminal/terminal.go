@@ -88,23 +88,6 @@ func (t *Terminal) CaptureSize() (width, height int) {
 	return t.captureW, t.captureH
 }
 
-// EnableCapture activates capture mode on a live terminal, sizing the grid
-// from the current screen dimensions.  Subsequent drawing calls write to the
-// capture grid instead of the real screen until DisableCapture is called.
-// Has no effect if the terminal is already in capture mode.
-func (t *Terminal) EnableCapture() {
-	if t.captureCells != nil {
-		return
-	}
-	w, h := t.screen.Size()
-	t.captureCells = make([]captureCell, w*h)
-	for i := range t.captureCells {
-		t.captureCells[i] = captureCell{ch: ' '}
-	}
-	t.captureW = w
-	t.captureH = h
-}
-
 // DisableCapture deactivates capture mode, freeing the in-memory grid.
 // Has no effect if the terminal is not in capture mode.
 func (t *Terminal) DisableCapture() {

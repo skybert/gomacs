@@ -243,12 +243,6 @@ type Editor struct {
 	version string
 	// startTime is when the editor was started (for uptime display).
 	startTime time.Time
-	// startDir is the working directory when the editor was started.
-	// Used as the default output directory for M-x screenshot.
-	startDir string
-	// screenshotDir overrides the default screenshot output directory.
-	// Set via (setq screenshot-dir "~/pictures/screenshots").
-	screenshotDir string
 
 	// dabbrev state: last expansion prefix and list of remaining candidates.
 	dabbrevPrefix     string
@@ -338,7 +332,6 @@ func New(opts Options) (*Editor, error) {
 		lspCbs:                     make(chan func(), 16),
 		version:                    opts.Version,
 		startTime:                  time.Now(),
-		startDir:                   func() string { d, _ := os.Getwd(); return d }(),
 		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
 		autoRevert:                 true,
 		autoRevertMtimes:           make(map[*buffer.Buffer]time.Time),
@@ -526,78 +519,6 @@ func New(opts Options) (*Editor, error) {
 	}
 
 	return e, nil
-}
-
-// NewForScreenshot creates a headless editor backed by the given capture
-// terminal.  It applies the default theme, sets up keymaps, and sizes windows
-// to (width × height) but skips loading the user init file.  Intended for use
-// by cmd/picgen.
-func NewForScreenshot(t *terminal.Terminal, width, height int) (*Editor, error) {
-	_, nopCancel := context.WithCancel(context.Background())
-	scratch := buffer.NewWithContent("*scratch*",
-		";; This buffer is for text that is not saved, and for Lisp evaluation.\n")
-	scratch.SetMode(modeElisp)
-
-	e := &Editor{
-		term:                       t,
-		universalArg:               1,
-		lisp:                       elisp.NewEvaluator(),
-		registers:                  make(map[rune]register),
-		diredStates:                make(map[*buffer.Buffer]*diredState),
-		vcLogRoots:                 make(map[*buffer.Buffer]string),
-		vcLogFiles:                 make(map[*buffer.Buffer]string),
-		vcParent:                   make(map[*buffer.Buffer]*buffer.Buffer),
-		vcCommitRoots:              make(map[*buffer.Buffer]string),
-		fillColumn:                 70,
-		isSearchCaseFold:           true,
-		subwordMode:                true,
-		saveBufferDeleteTrailingWS: true,
-		visualLines:                false, // off for screenshots (consistent layout)
-		spellCommand:               "aspell",
-		spellLanguage:              "en",
-		lspConns:                   make(map[string]*lspConn),
-		lspOpCancel:                nopCancel,
-		lspCompDelayCancel:         nopCancel,
-		lspCbs:                     make(chan func(), 16),
-		startTime:                  time.Now(),
-		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
-		autoRevert:                 false,
-		autoRevertMtimes:           make(map[*buffer.Buffer]time.Time),
-		shellStates:                make(map[*buffer.Buffer]*shellState),
-		minibufHistory:             make(map[string][]string),
-		buffers:                    []*buffer.Buffer{scratch},
-	}
-
-	syntax.LoadTheme("sweet")
-	e.minibufBuf = buffer.New(" *minibuf*")
-	e.setupKeymaps()
-
-	mainWin := window.New(scratch, 0, 0, width, height-1)
-	e.windows = append(e.windows, mainWin)
-	e.activeWin = mainWin
-	e.minibufWin = window.New(e.minibufBuf, height-1, 0, width, 1)
-
-	return e, nil
-}
-
-// OpenDiredPath opens a dired buffer for the given directory path.
-func (e *Editor) OpenDiredPath(path string) {
-	e.openDired(path)
-}
-
-// RunCommand executes a named editor command.
-func (e *Editor) RunCommand(name string) {
-	e.execCommand(name)
-}
-
-// SetupShellPreview creates a read-only *shell* buffer pre-filled with content
-// for screenshot/preview purposes (no real PTY is opened).
-func (e *Editor) SetupShellPreview(content string) {
-	b := buffer.NewWithContent("*shell*", content)
-	b.SetMode("shell")
-	b.SetReadOnly(true)
-	e.buffers = append(e.buffers, b)
-	e.activeWin.SetBuf(b)
 }
 
 func (e *Editor) setupKeymaps() {
@@ -877,11 +798,6 @@ func (e *Editor) applyElispConfig() {
 			e.autoRevert = val.V
 		case elisp.Nil:
 			e.autoRevert = false
-		}
-	}
-	if v, ok := e.lisp.GetGlobalVar("screenshot-dir"); ok {
-		if s, ok := v.(elisp.StringVal); ok {
-			e.screenshotDir = s.V
 		}
 	}
 	e.applyVisualLines()

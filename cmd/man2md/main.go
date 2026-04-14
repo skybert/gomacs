@@ -27,31 +27,11 @@ func main() {
 	shots, _ := filepath.Glob("doc/*.png")
 	sort.Strings(shots)
 
-	platShots, _ := filepath.Glob("doc/*/*.png")
-	sort.Strings(platShots)
-	platMap := map[string][]string{}
-	var platOrder []string
-	for _, s := range platShots {
-		dir := filepath.Base(filepath.Dir(s))
-		if _, seen := platMap[dir]; !seen {
-			platOrder = append(platOrder, dir)
-		}
-		platMap[dir] = append(platMap[dir], s)
-	}
-
-	if len(shots) > 0 || len(platShots) > 0 {
+	if len(shots) > 0 {
 		md += "\n## Screenshots\n\n"
 		for _, s := range shots {
 			name := strings.TrimSuffix(filepath.Base(s), ".png")
 			md += fmt.Sprintf("<img src=\"%s\" alt=\"%s\"/>\n\n", filepath.Base(s), name)
-		}
-		for _, plat := range platOrder {
-			md += fmt.Sprintf("\n### %s\n\n", strings.ToTitle(plat[:1])+plat[1:])
-			for _, s := range platMap[plat] {
-				name := strings.TrimSuffix(filepath.Base(s), ".png")
-				rel := plat + "/" + filepath.Base(s)
-				md += fmt.Sprintf("<img src=\"%s\" alt=\"%s\"/>\n\n", rel, name)
-			}
 		}
 	}
 
