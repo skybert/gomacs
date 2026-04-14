@@ -123,6 +123,39 @@ point at where the user was typing before the menu was triggered.
 
 `lsp-find-references`. By default bound to `M-?`.
 
+# DAP - debugger support
+
+`gomacs` should support the DAP protocol and provide a good, out of
+the box experience for a pre-defined list of debuggers. The following
+should work out of the box:
+- `go-mode`: [dlv](https://github.com/go-delve/delve)
+- `java-mode`:
+[jdtls](https://github.com/eclipse-jdtls/eclipse.jdt.ls)
+
+The following commands should be available:
+- `dap-toggle-breakpoint`
+- `dap-step-next`, `n`
+- `dap-step-in`, `i`
+- `dap-step-out`, `o`
+- `dap-continue`, `c`
+- `dap-eval`, `e`, which evaluates the thing at point, or if the
+  region is active, the region.
+- `dap-exit`, `q`, exits the debugging session.
+
+When the debugger is active, invoked with `dap-run`, the source
+buffers should be switched to read only, so that the user can use
+single letter shortcuts to navigate.
+
+Invoking `dap-start` in a unit test, `foo_test.go`, it should run the
+test method in which the cursor is. If the cursor is on a class, or
+outside any function, the entire file is debugged. In the same way,
+when starting the debugger in a main class, like `main.go` or a Java
+file with `void main(String args[])`, it should understand that.
+
+The third context in which it should be aware, is to start a micro
+server with appropriate debug flags so that it can break on the break
+points set.
+
 # Performance
 
 `gomacs` should be very fast. It should provide a great the user
