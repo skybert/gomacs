@@ -117,6 +117,21 @@ Pressing `Tab` or `Enter` selects the current candidate. `C-g` closes
 the completion menu without inserting any candidate, but leaving the
 point at where the user was typing before the menu was triggered.
 
+# conf-mode
+
+`gomacs` should have `conf-mode` for editing configuration files. It
+shouldn't have any indentation logic, but should provide syntax
+highlighting. `conf-mode` should by default be enabled for these
+files:
+
+- `.conf`
+- Files ending with `rc`
+- `.toml`
+
+`conf-mode`, like other programming modes, should enable on the fly
+spell checking of comments. Comments are lines starting with a `#`
+symbol.
+
 # LSP - language server protocol
 
 ## lsp-find-references
