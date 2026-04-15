@@ -389,3 +389,11 @@ func (e *Editor) cmdGomacsVersion() {
 	uptime := time.Since(e.startTime).Round(time.Second)
 	e.Message("gomacs %s  Go: %s  Uptime: %v", v, runtime.Version(), uptime)
 }
+
+// cmdWhatKey intercepts the next key press and reports its raw details in the
+// message line.  Useful for diagnosing terminal key-delivery issues (e.g.
+// whether Option+v arrives as M-v or as the dead-key character '√').
+func (e *Editor) cmdWhatKey() {
+	e.Message("Press key to identify: ")
+	e.whatKeyPending = true
+}

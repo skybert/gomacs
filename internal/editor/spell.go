@@ -59,7 +59,7 @@ func spellCheckAll(mode string) bool {
 // spellCheckComments returns true for modes where only comments are spell-checked.
 func spellCheckComments(mode string) bool {
 	switch mode {
-	case "go", "python", "java", "bash", "elisp":
+	case "go", "python", "java", "bash", "elisp", "conf":
 		return true
 	default:
 		return false

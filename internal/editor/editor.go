@@ -72,6 +72,9 @@ type Editor struct {
 	describeKeySeq     string
 	describeKeyMap     *keymap.Keymap
 
+	// what-key state: intercepts the next key and reports raw details.
+	whatKeyPending bool
+
 	// readChar: when set, the next key press delivers its rune to the callback
 	// instead of normal dispatch (used by register commands).
 	readCharPending  bool
@@ -1291,6 +1294,8 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 		b.SetMode("text")
 	case ext == ".sh" || ext == ".bash" || base == ".bashrc" || base == ".zshrc":
 		b.SetMode("bash")
+	case ext == ".conf" || ext == ".toml" || strings.HasSuffix(base, "rc"):
+		b.SetMode("conf")
 	case ext == ".json":
 		b.SetMode("json")
 	case ext == ".yaml" || ext == ".yml":
@@ -1392,11 +1397,19 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		// If ESC prefix is pending, fold it into the key as ModAlt before describing.
 		if e.escPending {
 			e.escPending = false
-			if ke.Key == tcell.KeyRune {
-				ke.Mod |= tcell.ModAlt
-			}
+			ke.Mod |= tcell.ModAlt
 		}
 		e.handleDescribeKey(ke)
+		return
+	}
+
+	// what-key mode: report raw key details then cancel.
+	if e.whatKeyPending {
+		e.whatKeyPending = false
+		mk := keymap.MakeKey(ke.Key, ke.Rune, ke.Mod)
+		e.Message("key=%d rune=%d(%s) mod=%d → %s",
+			int(ke.Key), int(ke.Rune), string(ke.Rune),
+			int(ke.Mod), keymap.FormatKey(mk))
 		return
 	}
 
@@ -1410,9 +1423,9 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 			e.Message("")
 			return
 		}
-		if ke.Key == tcell.KeyRune {
-			ke.Mod |= tcell.ModAlt
-		}
+		// Apply ModAlt to all key types (rune and special keys alike) so
+		// that ESC + <special> (e.g. ESC + Delete = M-DEL) works uniformly.
+		ke.Mod |= tcell.ModAlt
 		// Re-enter dispatch with the augmented key (no re-recording needed).
 		e.dispatchParsedKey(ke)
 		return
@@ -2426,8 +2439,12 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return hl
 	case mode == "vc-commit":
 		return syntax.VcCommitHighlighter{}
+	case mode == "conf":
+		return syntax.ConfHighlighter{}
 	case mode == "makefile":
 		return syntax.MakefileHighlighter{}
+	case mode == "help":
+		return syntax.HelpHighlighter{}
 	default:
 		return syntax.NilHighlighter{}
 	}

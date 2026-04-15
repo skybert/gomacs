@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1428,6 +1429,79 @@ func TestIsearchAltKeyExitsIsearch(t *testing.T) {
 	e.isearchHandleKey(keRune('x', tcell.ModAlt))
 	if e.isearching {
 		t.Fatal("isearch should exit on Alt+key")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ESC-prefix Meta (escPending) dispatch
+// ---------------------------------------------------------------------------
+
+// keEscape builds a KeyEvent for the Escape key.
+func keEscape() terminal.KeyEvent {
+	return terminal.KeyEvent{Key: tcell.KeyEscape}
+}
+
+// newScrollableEditor creates a test editor with keymaps and a buffer large
+// enough to scroll.  The window is pre-scrolled so M-v (scroll-down) has
+// visible effect.
+func newScrollableEditor() *Editor {
+	// Build a buffer with 60 lines so the 24-line window can scroll.
+	var lines []string
+	for i := range 60 {
+		lines = append(lines, fmt.Sprintf("line %d", i+1))
+	}
+	content := strings.Join(lines, "\n")
+	e := newTestEditor(content)
+	e.setupKeymaps()
+	// Pre-scroll to line 30 so scroll-down has room to go back.
+	e.activeWin.SetScrollLine(30)
+	e.ActiveBuffer().SetPoint(e.ActiveBuffer().LineStart(30))
+	return e
+}
+
+// TestEscPendingSetOnEscape verifies that a plain Escape key sets escPending.
+func TestEscPendingSetOnEscape(t *testing.T) {
+	e := newScrollableEditor()
+	e.dispatchParsedKey(keEscape())
+	if !e.escPending {
+		t.Fatal("escPending should be true after ESC key")
+	}
+}
+
+// TestEscPendingScrollDown verifies that ESC+v triggers scroll-down (M-v).
+func TestEscPendingScrollDown(t *testing.T) {
+	e := newScrollableEditor()
+	beforeScroll := e.activeWin.ScrollLine()
+
+	// Two separate events simulate a terminal that sends ESC and v separately
+	// (e.g. kitty on macOS with no macos_option_as_alt setting).
+	e.dispatchParsedKey(keEscape())
+	if !e.escPending {
+		t.Fatal("escPending should be true after ESC key")
+	}
+	e.dispatchParsedKey(keRune('v', 0))
+
+	if e.escPending {
+		t.Fatal("escPending should be cleared after consuming the Meta key")
+	}
+	afterScroll := e.activeWin.ScrollLine()
+	if afterScroll >= beforeScroll {
+		t.Errorf("M-v (scroll-down) did not scroll: before=%d after=%d",
+			beforeScroll, afterScroll)
+	}
+}
+
+// TestEscPendingScrollDownDirectAlt verifies that a single Alt+v event
+// (as delivered by tcell when kitty keyboard protocol is active) also
+// triggers scroll-down.
+func TestEscPendingScrollDownDirectAlt(t *testing.T) {
+	e := newScrollableEditor()
+	beforeScroll := e.activeWin.ScrollLine()
+	e.dispatchParsedKey(keRune('v', tcell.ModAlt))
+	afterScroll := e.activeWin.ScrollLine()
+	if afterScroll >= beforeScroll {
+		t.Errorf("M-v via ModAlt did not scroll: before=%d after=%d",
+			beforeScroll, afterScroll)
 	}
 }
 

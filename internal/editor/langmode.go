@@ -30,6 +30,7 @@ var langModes = []langModeInfo{
 	{modeName: "json", rootMarkers: []string{}},
 	{modeName: "yaml", rootMarkers: []string{}},
 	{modeName: "makefile", rootMarkers: []string{}},
+	{modeName: "conf", rootMarkers: []string{}},
 	{modeName: "text", rootMarkers: []string{}},
 	{modeName: "fundamental", rootMarkers: []string{}},
 }
@@ -128,6 +129,13 @@ func (e *Editor) cmdMakefileMode() {
 	e.clearArg()
 	e.setLangMode(e.ActiveBuffer(), "makefile")
 	e.Message("makefile-mode")
+}
+
+// cmdConfMode activates Conf mode on the current buffer.
+func (e *Editor) cmdConfMode() {
+	e.clearArg()
+	e.setLangMode(e.ActiveBuffer(), "conf")
+	e.Message("conf-mode")
 }
 
 // modeIndentStr returns the per-level indent string for the given major mode.

@@ -256,6 +256,8 @@ func init() {
 		"Switch to the *messages* buffer showing recent editor messages.")
 	registerCommand("gomacs-version", (*Editor).cmdGomacsVersion,
 		"Display gomacs version, Go runtime version, and uptime.")
+	registerCommand("what-key", (*Editor).cmdWhatKey,
+		"Intercept the next key press and display its raw key code, rune, and modifier in the message line.")
 
 	// ---- narrowing ---------------------------------------------------------
 	registerCommand("narrow-to-region", (*Editor).cmdNarrowToRegion,
@@ -329,6 +331,8 @@ func init() {
 		"Activate JSON mode on the current buffer.")
 	registerCommand("yaml-mode", (*Editor).cmdYamlMode,
 		"Activate YAML mode on the current buffer.")
+	registerCommand("conf-mode", (*Editor).cmdConfMode,
+		"Activate Conf mode on the current buffer (conf/ini/toml files).")
 
 	// ---- spell checking ----------------------------------------------------
 	registerCommand("ispell-word", (*Editor).cmdIspellWord,
