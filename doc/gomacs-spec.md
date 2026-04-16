@@ -51,6 +51,24 @@ buffer. `ispell-word` should only spell check the current word.
 When copying text in `gomacs`, it SHOULD go on the OS clipboard as
 well. It MUST support Linux/Xorg, Linux/Wayland and macOS.
 
+# Search
+
+`C-s` should trigger `isearch` (incremental) search. It should jump to
+the first match as the user types. Consecutive invocations of `C-s`
+should jump to the next occurrence in the buffer.
+
+When having focus on a search hit, hitting `C-w` will include one more
+word in the search. So, if the `C-s` for the word "Camel" takes the
+point to the first word in "CamelCase", hitting `C-w` will bring the
+next compound word "Case" into the search, as if the user had typed
+"CamelCase" to begin with.  Continuously hitting `C-w` will include more
+and more words into the search.
+
+Hitting `C-r` will search for the current query backwards, or upwards,
+in the buffer.
+
+Once the search hits top or bottom, it should write so in the
+minibuffer.
 # Project commands
 
 ## project-find-file
