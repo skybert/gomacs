@@ -210,6 +210,25 @@ The same should go for:
 - `python`, including binaries with major and minor version in them:
   `python3.10`
   
+# Gherkin mode
+
+`gomacs` should understand `.feature` files and enable `gherkin-mode`
+for these. 
+
+It should wire into the xref system, with `M-.` and `M-,`, so that
+when the user is on a step definition like: "Given user logs in", it
+should jump to the corresponding implementation of that step. For
+Go/gocuke, this means jumping to a function in the same package called
+`UserLogsIn()`.
+
+In addition to support for gocuke/Go, add support for the default Java
+Gherkin framework where there are annotations like `@Given("user logs
+in")`.
+
+If there are more than one, list them in a regular `grep` buffer, with
+links that can be cycled with the `next-error` system, bound to "C-x
+`".
+
 # Text modes
 
 In pure text modes, like `text` and `markdown`, lines should be
