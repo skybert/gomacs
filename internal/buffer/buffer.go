@@ -53,10 +53,10 @@ type Buffer struct {
 	lcacheCol   int
 	lcacheGen   int
 
-	// LineCount cache: avoids O(n) scan every frame from ViewLines.
-	lcountValid bool
-	lcountGen   int
-	lcountValue int
+	// Incremental line count: maintained by insertRunes/deleteRunes so that
+	// LineCount() is O(1) after the first call instead of O(buffer_size).
+	lineCountDelta int  // number of '\n' runes currently in the buffer
+	lineCountReady bool // true after first LineCount() call seeds the delta
 }
 
 // New creates an empty buffer with the given name.
@@ -82,6 +82,9 @@ func NewWithContent(name, content string) *Buffer {
 		b.changeGen = 0
 		b.savedChangeGen = 0
 		b.undo.Reset()
+		// The InsertString above incremented lineCountDelta; reset so the
+		// next LineCount() re-seeds from the actual buffer content.
+		b.lineCountReady = false
 	}
 	return b
 }
@@ -116,7 +119,7 @@ func (b *Buffer) SetReadOnly(v bool) { b.readOnly = v }
 // SetMode sets the buffer's major mode.
 func (b *Buffer) SetMode(mode string) {
 	switch mode {
-	case "go", "markdown", "elisp", "python", "java", "bash", "json", "yaml", "makefile", "conf", "text", "diff", "dired", "vc-log", "vc-status", "vc-grep", "vc-commit", "vc-show", "vc-fixup-select", "buffer-list", "help", "compilation", "man", "lsp-refs", "shell", modeFundamental:
+	case "go", "markdown", "elisp", "python", "java", "bash", "perl", "gherkin", "json", "yaml", "makefile", "conf", "text", "diff", "dired", "vc-log", "vc-status", "vc-grep", "vc-commit", "vc-show", "vc-fixup-select", "buffer-list", "help", "compilation", "man", "lsp-refs", "shell", modeFundamental:
 		b.mode = mode
 	default:
 		b.mode = modeFundamental
@@ -241,6 +244,13 @@ func (b *Buffer) ReplaceString(pos, count int, s string) {
 
 // insertRunes is the raw (no undo) insertion primitive.
 func (b *Buffer) insertRunes(pos int, runes []rune) {
+	if b.lineCountReady {
+		for _, r := range runes {
+			if r == '\n' {
+				b.lineCountDelta++
+			}
+		}
+	}
 	n := len(runes)
 	b.growGap(n)
 	b.moveGap(pos)
@@ -283,6 +293,13 @@ func (b *Buffer) Delete(pos, count int) string {
 
 // deleteRunes is the raw (no undo) deletion primitive.
 func (b *Buffer) deleteRunes(pos, count int) {
+	if b.lineCountReady {
+		for i := pos; i < pos+count; i++ {
+			if b.RuneAt(i) == '\n' {
+				b.lineCountDelta--
+			}
+		}
+	}
 	b.moveGap(pos)
 	b.gapEnd += count
 	// Adjust point and mark.
@@ -441,23 +458,23 @@ func (b *Buffer) NarrowMax() int {
 // ---- line / column helpers -------------------------------------------------
 
 // LineCount returns the number of lines (newlines + 1).
-// The result is cached by changeGen so repeated calls within the same frame
-// are O(1) instead of O(n).
+// The result is maintained incrementally by insertRunes/deleteRunes so that
+// after the first call (which seeds the delta with an O(n) scan) all
+// subsequent calls are O(1) regardless of edits.
 func (b *Buffer) LineCount() int {
-	if b.lcountValid && b.lcountGen == b.changeGen {
-		return b.lcountValue
+	if b.lineCountReady {
+		return b.lineCountDelta + 1
 	}
-	n := 1
-	length := b.Len()
-	for i := range length {
+	// First call: O(n) scan to seed the incremental delta.
+	n := 0
+	for i := range b.Len() {
 		if b.RuneAt(i) == '\n' {
 			n++
 		}
 	}
-	b.lcountValid = true
-	b.lcountGen = b.changeGen
-	b.lcountValue = n
-	return n
+	b.lineCountDelta = n
+	b.lineCountReady = true
+	return n + 1
 }
 
 // LineCol returns the 1-based line number and 0-based column for pos.

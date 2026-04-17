@@ -245,6 +245,10 @@ func (e *Editor) lspDiagSummary(buf *buffer.Buffer) string {
 func (e *Editor) cmdLSPFindDefinition() {
 	e.clearArg()
 	buf := e.ActiveBuffer()
+	if buf.Mode() == "gherkin" {
+		e.cmdGherkinFindDefinition()
+		return
+	}
 	conn := e.lspConns[buf.Mode()]
 	if conn == nil {
 		e.Message("No LSP server for mode %q", buf.Mode())

@@ -333,6 +333,10 @@ func init() {
 		"Activate YAML mode on the current buffer.")
 	registerCommand("conf-mode", (*Editor).cmdConfMode,
 		"Activate Conf mode on the current buffer (conf/ini/toml files).")
+	registerCommand("perl-mode", (*Editor).cmdPerlMode,
+		"Activate Perl mode on the current buffer.")
+	registerCommand("gherkin-mode", (*Editor).cmdGherkinMode,
+		"Activate Gherkin mode on the current buffer (.feature files).")
 
 	// ---- spell checking ----------------------------------------------------
 	registerCommand("ispell-word", (*Editor).cmdIspellWord,
@@ -703,7 +707,7 @@ func (e *Editor) cmdNewline() {
 	}
 	// Auto-indent for programming modes that have an indent engine.
 	switch buf.Mode() {
-	case "go", "java", "python", "bash", "json", "yaml":
+	case "go", "java", "python", "bash", "perl", "json", "yaml":
 		indentCurrentLine(buf, e.modeIndentStr(buf.Mode()))
 	}
 }
@@ -1581,6 +1585,7 @@ func (e *Editor) cmdDeleteOtherWindows() {
 		e.activeWin.SetRegion(0, 0, w, h-1)
 		e.minibufWin.SetRegion(h-1, 0, w, 1)
 	}
+	e.invalidateLayout()
 }
 
 // cmdSplitWindowBelow splits the active window into two windows stacked
@@ -1603,6 +1608,7 @@ func (e *Editor) cmdSplitWindowBelow() {
 	newWin := window.New(w.Buf(), top+topH, left, width, botH)
 	newWin.SetPoint(w.Point())
 	e.windows = append(e.windows, newWin)
+	e.invalidateLayout()
 }
 
 // cmdSplitWindowRight splits the active window into two side-by-side windows
@@ -1626,6 +1632,7 @@ func (e *Editor) cmdSplitWindowRight() {
 	newWin := window.New(w.Buf(), top, left+leftW+1, rightW, height)
 	newWin.SetPoint(w.Point())
 	e.windows = append(e.windows, newWin)
+	e.invalidateLayout()
 }
 
 // cmdOtherWindow switches focus to the next window (C-x o).

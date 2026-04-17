@@ -49,7 +49,7 @@ var FaceSpellError = syntax.Face{Underline: true, UnderlineColor: "red"}
 // spellCheckAll returns true for modes where the whole buffer is spell-checked.
 func spellCheckAll(mode string) bool {
 	switch mode {
-	case "markdown", "text", "fundamental", "":
+	case "markdown", "text", "fundamental", "gherkin", "":
 		return true
 	default:
 		return false
@@ -59,7 +59,7 @@ func spellCheckAll(mode string) bool {
 // spellCheckComments returns true for modes where only comments are spell-checked.
 func spellCheckComments(mode string) bool {
 	switch mode {
-	case "go", "python", "java", "bash", "elisp", "conf":
+	case "go", "python", "java", "bash", "perl", "elisp", "conf":
 		return true
 	default:
 		return false
@@ -177,6 +177,10 @@ func computeSpellSpansForMode(spellCmd, spellLang, text, mode string) []syntax.S
 	var virtual []rune
 	for _, sp := range syntaxSpans {
 		if sp.Face != syntax.FaceComment {
+			continue
+		}
+		// Skip the shebang line (#! at position 0) — it is not natural language.
+		if sp.Start == 0 && sp.End >= 2 && runes[0] == '#' && runes[1] == '!' {
 			continue
 		}
 		length := sp.End - sp.Start

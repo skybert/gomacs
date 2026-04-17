@@ -101,3 +101,94 @@ func TestCommonPrefix_NoCommon(t *testing.T) {
 		t.Errorf("got %q, want \"\"", got)
 	}
 }
+
+func TestModeFromShebang(t *testing.T) {
+	cases := []struct {
+		shebang string
+		want    string
+	}{
+		{"#!/bin/bash\necho hi\n", "bash"},
+		{"#!/usr/bin/env bash\necho hi\n", "bash"},
+		{"#! /bin/bash\necho hi\n", "bash"},
+		{"#! /usr/bin/env bash\necho hi\n", "bash"},
+		{"#!/bin/sh\n", "bash"},
+		{"#!/usr/bin/env sh\n", "bash"},
+		{"#!/usr/bin/perl\n", "perl"},
+		{"#!/usr/bin/env perl\n", "perl"},
+		{"#!/usr/bin/python\n", "python"},
+		{"#!/usr/bin/python3\n", "python"},
+		{"#!/usr/bin/python2\n", "python"},
+		{"#!/usr/bin/python3.10\n", "python"},
+		{"#!/usr/bin/env python3.10\n", "python"},
+		{"#!/usr/bin/env python3.12\n", "python"},
+		{"# not a shebang\n", ""},
+		{"", ""},
+		{"no shebang at all", ""},
+	}
+	for _, tc := range cases {
+		got := modeFromShebang(tc.shebang)
+		if got != tc.want {
+			t.Errorf("modeFromShebang(%q) = %q, want %q", tc.shebang, got, tc.want)
+		}
+	}
+}
+
+func TestStepToCamelCase(t *testing.T) {
+	cases := []struct {
+		step string
+		want string
+	}{
+		{"user logs in", "UserLogsIn"},
+		{"the user is logged in", "TheUserIsLoggedIn"},
+		{"user enters \"admin\" as the username", "UserEntersAsTheUsername"},
+		{"the user has 42 apples", "TheUserHasApples"},
+		{"user is logged in as <role>", "UserIsLoggedInAs"},
+		{"I am on the login page", "IAmOnTheLoginPage"},
+	}
+	for _, tc := range cases {
+		got := stepToCamelCase(tc.step)
+		if got != tc.want {
+			t.Errorf("stepToCamelCase(%q) = %q, want %q", tc.step, got, tc.want)
+		}
+	}
+}
+
+func TestGherkinStepAtPoint(t *testing.T) {
+	cases := []struct {
+		content string
+		want    string
+	}{
+		{"Given user logs in\n", "user logs in"},
+		{"  When I click submit\n", "I click submit"},
+		{"  Then the response is 200\n", "the response is 200"},
+		{"  And the cookie is set\n", "the cookie is set"},
+		{"Feature: login\n", ""},
+		{"  Scenario: test\n", ""},
+		{"  | col1 | col2 |\n", ""},
+		{"  # a comment\n", ""},
+	}
+	for _, tc := range cases {
+		buf := newTestEditor(tc.content).ActiveBuffer()
+		buf.SetPoint(0)
+		got := gherkinStepAtPoint(buf)
+		if got != tc.want {
+			t.Errorf("gherkinStepAtPoint(%q) = %q, want %q", tc.content, got, tc.want)
+		}
+	}
+}
+
+func TestParseGrepLines(t *testing.T) {
+	root := "/project"
+	output := "./steps/login.go:42:func (s *Suite) UserLogsIn() error {\n" +
+		"./steps/login.go:43:	// implementation\n"
+	matches := parseGrepLines(output, root)
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(matches))
+	}
+	if matches[0].File != "/project/steps/login.go" {
+		t.Errorf("File = %q, want \"/project/steps/login.go\"", matches[0].File)
+	}
+	if matches[0].Line != 42 {
+		t.Errorf("Line = %d, want 42", matches[0].Line)
+	}
+}

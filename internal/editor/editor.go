@@ -59,6 +59,14 @@ type Editor struct {
 	isearchStr   string
 	isearchStart int // buffer position where isearch was initiated
 
+	// isearch rune caches: avoid O(n) buf.String()/[]rune conversions on every
+	// keystroke during incremental search.
+	isearchRunes     []rune
+	isearchRunesGen  int
+	isearchRunesBuf  *buffer.Buffer
+	isearchNeedle    []rune
+	isearchNeedleStr string
+
 	// prefix key state (non-nil while processing a multi-key sequence)
 	prefixKeymap *keymap.Keymap
 	// prefixKeySeq accumulates the human-readable prefix typed so far
@@ -274,6 +282,16 @@ type Editor struct {
 
 	// shellStates maps shell buffers (mode=="shell") to their live PTY state.
 	shellStates map[*buffer.Buffer]*shellState
+
+	// Layout cache: skip relayoutWindows when terminal size and footer haven't
+	// changed since the last layout pass.
+	lastLayoutW      int
+	lastLayoutH      int
+	lastLayoutFooter int
+
+	// visualLinesSynced tracks whether applyVisualLines has been applied for
+	// the current visualLines setting and window configuration.
+	visualLinesSynced bool
 }
 
 // spanCache holds pre-computed highlighting data for a buffer.  It is
@@ -687,6 +705,7 @@ func (e *Editor) setupKeymaps() {
 	cx.Bind(keymap.PlainKey('('), "start-kbd-macro")
 	cx.Bind(keymap.PlainKey(')'), "end-kbd-macro")
 	cx.Bind(keymap.PlainKey('e'), "call-last-kbd-macro")
+	cx.Bind(keymap.PlainKey('`'), "next-error")
 
 	// ---- C-x v prefix (version control) ------------------------------------
 	cx.BindPrefix(keymap.PlainKey('v'), cxv)
@@ -784,6 +803,7 @@ func (e *Editor) applyElispConfig() {
 		case elisp.Nil:
 			e.visualLines = false
 		}
+		e.markVisualLinesDirty()
 	}
 	if v, ok := e.lisp.GetGlobalVar("spell-command"); ok {
 		if s, ok := v.(elisp.StringVal); ok && s.V != "" {
@@ -815,30 +835,44 @@ func (e *Editor) Run() {
 	defer e.term.Close()
 	e.Redraw()
 	for !e.quit {
-		ev := e.term.PollEvent()
-		switch ev := ev.(type) {
-		case *tcell.EventResize:
-			e.handleResize()
-		case *tcell.EventKey:
-			e.dispatchKey(ev)
-			// Sync window-local point from the buffer before scrolling.
-			e.syncWindowPoint(e.activeWin)
-			e.activeWin.EnsurePointVisible()
-		case *tcell.EventInterrupt:
-			// Drain all pending LSP callbacks posted by async goroutines.
-			for {
-				select {
-				case fn := <-e.lspCbs:
-					fn()
-				default:
-					goto drained
-				}
+		ev := e.term.PollEvent() // block until at least one event arrives
+		e.processEvent(ev)
+		// Drain any additional events that arrived while we were processing
+		// the first one.  This coalesces rapid key-repeat, paste bursts, and
+		// macro playback into a single Redraw() at the end.
+		for !e.quit {
+			next := e.term.TryPollEvent()
+			if next == nil {
+				break
 			}
-		drained:
+			e.processEvent(next)
 		}
 		e.Redraw()
 		e.lspMaybeHover()
 		e.maybeAutoRevert()
+	}
+}
+
+// processEvent handles a single tcell event.
+func (e *Editor) processEvent(ev tcell.Event) {
+	switch ev := ev.(type) {
+	case *tcell.EventResize:
+		e.handleResize()
+	case *tcell.EventKey:
+		e.dispatchKey(ev)
+		// Sync window-local point from the buffer before scrolling.
+		e.syncWindowPoint(e.activeWin)
+		e.activeWin.EnsurePointVisible()
+	case *tcell.EventInterrupt:
+		// Drain all pending LSP callbacks posted by async goroutines.
+		for {
+			select {
+			case fn := <-e.lspCbs:
+				fn()
+			default:
+				return
+			}
+		}
 	}
 }
 
@@ -894,6 +928,14 @@ func (e *Editor) handleResize() {
 	w, h := e.term.Size()
 	e.minibufWin.SetRegion(h-1, 0, w, 1)
 	e.relayoutWindows(w, h-1)
+	e.invalidateLayout()
+}
+
+// invalidateLayout forces the next Redraw to re-run relayoutWindows even if
+// the terminal size hasn't changed.  Call this after split/delete-window ops.
+func (e *Editor) invalidateLayout() {
+	e.lastLayoutW = -1
+	e.markVisualLinesDirty()
 }
 
 // relayoutWindows redistributes the available screen area (totalW×totalH)
@@ -1022,6 +1064,7 @@ func (e *Editor) showBuf(b *buffer.Buffer) {
 		}
 	}
 	e.activeWin.SetBuf(b)
+	e.markVisualLinesDirty()
 }
 
 // SwitchToBuffer displays the buffer with name in the active window,
@@ -1294,6 +1337,10 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 		b.SetMode("text")
 	case ext == ".sh" || ext == ".bash" || base == ".bashrc" || base == ".zshrc":
 		b.SetMode("bash")
+	case ext == ".pl" || ext == ".pm" || ext == ".t":
+		b.SetMode("perl")
+	case ext == ".feature":
+		b.SetMode("gherkin")
 	case ext == ".conf" || ext == ".toml" || strings.HasSuffix(base, "rc"):
 		b.SetMode("conf")
 	case ext == ".json":
@@ -1303,7 +1350,11 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 	case ext == ".mk" || base == "makefile" || base == "gnumakefile" || base == "bsdmakefile":
 		b.SetMode("makefile")
 	default:
-		b.SetMode("fundamental")
+		if mode := modeFromShebang(b.String()); mode != "" {
+			b.SetMode(mode)
+		} else {
+			b.SetMode("fundamental")
+		}
 	}
 
 	e.buffers = append(e.buffers, b)
@@ -2178,11 +2229,13 @@ func (e *Editor) isearchHandleKey(ke terminal.KeyEvent) {
 		buf.SetPoint(e.isearchStart)
 		e.isearching = false
 		e.isearchStr = ""
+		e.isearchClearCaches()
 		e.Message("Quit")
 
 	case tcell.KeyEnter:
 		// Accept current match position.
 		e.isearching = false
+		e.isearchClearCaches()
 
 	case tcell.KeyBackspace:
 		if len(e.isearchStr) > 0 {
@@ -2212,18 +2265,49 @@ func (e *Editor) isearchHandleKey(ke terminal.KeyEvent) {
 		} else {
 			// Any other key (motion commands, etc.) exits isearch and executes the key.
 			e.isearching = false
+			e.isearchClearCaches()
 			e.Message("")
 			e.dispatchParsedKey(ke)
 		}
 	}
 }
 
+// isearchGetRunes returns the buffer content as []rune, reusing the cached
+// slice when the buffer has not changed since the last call.
+func (e *Editor) isearchGetRunes(buf *buffer.Buffer) []rune {
+	gen := buf.ChangeGen()
+	if e.isearchRunes != nil && e.isearchRunesGen == gen && e.isearchRunesBuf == buf {
+		return e.isearchRunes
+	}
+	e.isearchRunes = []rune(buf.String())
+	e.isearchRunesGen = gen
+	e.isearchRunesBuf = buf
+	return e.isearchRunes
+}
+
+// isearchGetNeedle returns the current search string as []rune, reusing the
+// cached slice when isearchStr hasn't changed.
+func (e *Editor) isearchGetNeedle() []rune {
+	if e.isearchNeedleStr != e.isearchStr {
+		e.isearchNeedle = []rune(e.isearchStr)
+		e.isearchNeedleStr = e.isearchStr
+	}
+	return e.isearchNeedle
+}
+
+// isearchClearCaches releases the isearch rune caches.  Called when isearch exits.
+func (e *Editor) isearchClearCaches() {
+	e.isearchRunes = nil
+	e.isearchRunesBuf = nil
+	e.isearchNeedle = nil
+	e.isearchNeedleStr = ""
+}
+
 // isearchFind searches for e.isearchStr from e.isearchStart.
 func (e *Editor) isearchFind() {
 	buf := e.ActiveBuffer()
-	text := buf.String()
-	runes := []rune(text)
-	needle := []rune(e.isearchStr)
+	runes := e.isearchGetRunes(buf)
+	needle := e.isearchGetNeedle()
 
 	if len(needle) == 0 {
 		buf.SetPoint(e.isearchStart)
@@ -2257,9 +2341,8 @@ func (e *Editor) isearchFind() {
 // isearchFindNext finds the next occurrence after the current point.
 func (e *Editor) isearchFindNext() {
 	buf := e.ActiveBuffer()
-	text := buf.String()
-	runes := []rune(text)
-	needle := []rune(e.isearchStr)
+	runes := e.isearchGetRunes(buf)
+	needle := e.isearchGetNeedle()
 
 	if len(needle) == 0 {
 		return
@@ -2340,7 +2423,12 @@ func (e *Editor) Redraw() {
 	if e.minibufActive {
 		footer = 1 + min(len(e.minibufCandidates), minibufPopupMaxVisible)
 	}
-	e.relayoutWindows(tw, th-footer)
+	if tw != e.lastLayoutW || th-footer != e.lastLayoutH || footer != e.lastLayoutFooter {
+		e.relayoutWindows(tw, th-footer)
+		e.lastLayoutW = tw
+		e.lastLayoutH = th - footer
+		e.lastLayoutFooter = footer
+	}
 	e.term.Clear()
 	for _, w := range e.windows {
 		if w.Buf().Mode() == "shell" {
@@ -2401,6 +2489,45 @@ func (e *Editor) getSpanCache(buf *buffer.Buffer) *spanCache {
 	return c
 }
 
+// modeFromShebang inspects the first line of content for a shebang (#!) and
+// returns the corresponding major mode name, or "" if none is recognised.
+// It handles both "#!" and "#! " variants and both direct paths and env-style
+// invocations (e.g. "#!/usr/bin/env python3.10").
+func modeFromShebang(content string) string {
+	if len(content) < 2 || content[0] != '#' || content[1] != '!' {
+		return ""
+	}
+	// Extract the first line.
+	line := content
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	// Grab the interpreter name: the last path component after optional "env".
+	fields := strings.Fields(line[2:]) // skip "#!"
+	if len(fields) == 0 {
+		return ""
+	}
+	interp := fields[len(fields)-1]
+	// Strip the directory component.
+	if i := strings.LastIndexByte(interp, '/'); i >= 0 {
+		interp = interp[i+1:]
+	}
+	switch {
+	case interp == "bash":
+		return "bash"
+	case interp == "sh":
+		return "bash"
+	case interp == "perl":
+		return "perl"
+	case interp == "python" || interp == "python3" || interp == "python2":
+		return "python"
+	case strings.HasPrefix(interp, "python"):
+		// e.g. python3.10, python3.12
+		return "python"
+	}
+	return ""
+}
+
 // highlighterFor returns the appropriate syntax highlighter for buf.
 func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 	mode := buf.Mode()
@@ -2441,6 +2568,10 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.VcCommitHighlighter{}
 	case mode == "conf":
 		return syntax.ConfHighlighter{}
+	case mode == "perl":
+		return syntax.PerlHighlighter{}
+	case mode == "gherkin":
+		return syntax.GherkinHighlighter{}
 	case mode == "makefile":
 		return syntax.MakefileHighlighter{}
 	case mode == "help":
@@ -2539,7 +2670,7 @@ func (e *Editor) renderWindow(w *window.Window) {
 	// isearch match boundaries (highlight the match).
 	isearchMatchStart, isearchMatchEnd := -1, -1
 	if e.isearching && e.isearchStr != "" {
-		needle := []rune(e.isearchStr)
+		needle := e.isearchGetNeedle()
 		cur := buf.Point()
 		isMatch := runesMatch
 		if e.isSearchCaseFold {
@@ -2589,6 +2720,10 @@ func (e *Editor) renderWindow(w *window.Window) {
 	}
 
 	viewLines := w.ViewLines()
+	// spanIdx is a monotonic cursor into spans used to look up the syntax face
+	// for each character.  Since we iterate pos in strictly increasing order,
+	// we advance spanIdx forward rather than binary-searching from the start.
+	spanIdx := 0
 	// ViewLines returns height rows; only use the text rows (not the modeline row).
 	for rowIdx := 0; rowIdx < textH && rowIdx < len(viewLines); rowIdx++ {
 		vl := viewLines[rowIdx]
@@ -2613,7 +2748,17 @@ func (e *Editor) renderWindow(w *window.Window) {
 				break
 			}
 			pos := vl.StartPos + bufOffset
-			face := faceAtPos(spans, pos)
+			// Advance spanIdx forward past spans that start before pos.
+			for spanIdx+1 < len(spans) && spans[spanIdx+1].Start <= pos {
+				spanIdx++
+			}
+			var face syntax.Face
+			if spanIdx < len(spans) {
+				sp := spans[spanIdx]
+				if pos >= sp.Start && pos < sp.End {
+					face = sp.Face
+				}
+			}
 			// Overlay spell-error underline (skip word currently being typed).
 			if isSpellErrorAt(spellSpans, pos) && (pos < curWordStart || pos >= curWordEnd) {
 				face.Underline = true
@@ -2903,6 +3048,9 @@ func screenColForPoint(buf *buffer.Buffer, pt int) int {
 // applyVisualLines sets the wrapCol on all non-minibuffer windows according to
 // the current visualLines setting (80 when enabled, 0 when disabled).
 func (e *Editor) applyVisualLines() {
+	if e.visualLinesSynced {
+		return
+	}
 	col := 0
 	if e.visualLines {
 		col = 80
@@ -2917,6 +3065,14 @@ func (e *Editor) applyVisualLines() {
 		}
 		w.SetWrapCol(col)
 	}
+	e.visualLinesSynced = true
+}
+
+// markVisualLinesDirty forces the next applyVisualLines call to re-apply wrap
+// columns to all windows.  Call this whenever visualLines or any window's
+// buffer mode changes.
+func (e *Editor) markVisualLinesDirty() {
+	e.visualLinesSynced = false
 }
 
 // OpenFile loads path into a buffer and makes it current.

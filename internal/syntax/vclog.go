@@ -403,6 +403,10 @@ func LangToHighlighter(lang string) Highlighter {
 		return JavaHighlighter{}
 	case "bash":
 		return BashHighlighter{}
+	case "perl":
+		return PerlHighlighter{}
+	case "gherkin":
+		return GherkinHighlighter{}
 	case "json":
 		return JSONHighlighter{}
 	case "yaml":

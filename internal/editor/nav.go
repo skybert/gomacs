@@ -269,7 +269,7 @@ func (e *Editor) cmdHelp() {
 			"start-kbd-macro", "end-kbd-macro", "call-last-kbd-macro",
 		}},
 		{"Major Modes", []string{
-			"go-mode", "python-mode", "java-mode", "bash-mode", "markdown-mode",
+			"go-mode", "python-mode", "java-mode", "bash-mode", "perl-mode", "gherkin-mode", "markdown-mode",
 			"elisp-mode", "text-mode", "fundamental-mode", "json-mode", "yaml-mode",
 			"makefile-mode", "load-theme",
 		}},
@@ -348,6 +348,7 @@ func (e *Editor) cmdHelp() {
 		{"completion-menu-trigger-chars", "Minimum chars typed before completion menu appears. Default: 3."},
 		{"lsp-completion-min-chars", "Alias for completion-menu-trigger-chars (deprecated name)."},
 		{"markdown-indent", "Indent string or width for Markdown mode. Default: 2."},
+		{"perl-indent", "Indent string or width for Perl mode. Default: 2."},
 		{"python-indent", "Indent string or width for Python mode. Default: 4."},
 		{"sh-indent", "Indent string or width for Bash mode. Default: 2."},
 		{"spell-command", "Path to spell-checker executable. Default: \"aspell\"."},

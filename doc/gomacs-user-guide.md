@@ -348,6 +348,12 @@ Default: two spaces.
 Example: **(setq markdown-indent 4)**
 
 
+**perl-indent**  
+Per-level indentation string for Perl buffers.
+Default: two spaces.
+Example: **(setq perl-indent 4)**
+
+
 **save-buffer-delete-trailing-whitespace**  
 When non-nil (the default), trailing whitespace is deleted automatically
 when a buffer is saved.  Set to
@@ -469,7 +475,7 @@ Torstein Krause Johansen <torstein@skybert.net>
 
 ## VERSION
 
-v1.7.0-6-g7038f0e-dirty
+v1.7.1-6-g0aabbf0
 
 ## Screenshots
 
@@ -478,36 +484,4 @@ v1.7.0-6-g7038f0e-dirty
 <img src="gomacs-m-x.png" alt="gomacs-m-x"/>
 
 <img src="gomacs-screenshot.png" alt="gomacs-screenshot"/>
-
-
-### Android
-
-<img src="android/gomacs-android-git-diff.png" alt="gomacs-android-git-diff"/>
-
-<img src="android/gomacs-android-go-lsp-landscape.png" alt="gomacs-android-go-lsp-landscape"/>
-
-<img src="android/gomacs-android-go-lsp.png" alt="gomacs-android-go-lsp"/>
-
-<img src="android/gomacs-android-man-ls.png" alt="gomacs-android-man-ls"/>
-
-<img src="android/gomacs-android-markdown.png" alt="gomacs-android-markdown"/>
-
-<img src="android/gomacs-android-top.png" alt="gomacs-android-top"/>
-
-
-### Darwin
-
-<img src="darwin/bash-mode.png" alt="bash-mode"/>
-
-<img src="darwin/dired.png" alt="dired"/>
-
-<img src="darwin/elisp-mode.png" alt="elisp-mode"/>
-
-<img src="darwin/go-mode.png" alt="go-mode"/>
-
-<img src="darwin/markdown-mode.png" alt="markdown-mode"/>
-
-<img src="darwin/shell.png" alt="shell"/>
-
-<img src="darwin/vc-status.png" alt="vc-status"/>
 

@@ -45,6 +45,8 @@ func calcIndent(mode string, lines []string, lineIdx int, unit string) string {
 		return calcIndentBraced(lines, lineIdx, unit, "//")
 	case "java":
 		return calcIndentBraced(lines, lineIdx, unit, "//")
+	case "perl":
+		return calcIndentBraced(lines, lineIdx, unit, "#")
 	case "python":
 		return calcIndentPython(lines, lineIdx, unit)
 	case "bash":

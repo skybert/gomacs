@@ -184,6 +184,21 @@ func (t *Terminal) PollEvent() tcell.Event {
 	return <-t.screen.EventQ()
 }
 
+// TryPollEvent returns the next pending event without blocking.
+// Returns nil if no event is immediately available.
+// Used by the event loop to drain buffered events before redrawing.
+func (t *Terminal) TryPollEvent() tcell.Event {
+	if t.screen == nil {
+		return nil
+	}
+	select {
+	case ev := <-t.screen.EventQ():
+		return ev
+	default:
+		return nil
+	}
+}
+
 // PostWakeup injects a synthetic EventInterrupt to unblock PollEvent.
 // Used by background goroutines to notify the main event loop of pending work.
 func (t *Terminal) PostWakeup() {

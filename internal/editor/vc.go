@@ -1196,6 +1196,10 @@ func langForExt(ext string) string {
 		return "java"
 	case ".sh", ".bash":
 		return "bash"
+	case ".pl", ".pm", ".t":
+		return "perl"
+	case ".feature":
+		return "gherkin"
 	case ".conf", ".toml":
 		return "conf"
 	case ".json":

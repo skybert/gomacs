@@ -25,6 +25,8 @@ var langModes = []langModeInfo{
 	{modeName: "python", rootMarkers: []string{"pyproject.toml", "setup.py", "setup.cfg"}},
 	{modeName: "java", rootMarkers: []string{"pom.xml", "build.gradle"}},
 	{modeName: "bash", rootMarkers: []string{}},
+	{modeName: "perl", rootMarkers: []string{}},
+	{modeName: "gherkin", rootMarkers: []string{}},
 	{modeName: "markdown", rootMarkers: []string{}},
 	{modeName: "elisp", rootMarkers: []string{}},
 	{modeName: "json", rootMarkers: []string{}},
@@ -52,6 +54,7 @@ func (e *Editor) setLangMode(buf *buffer.Buffer, mode string) {
 	if buf.Filename() != "" {
 		e.lspActivate(buf)
 	}
+	e.markVisualLinesDirty()
 }
 
 // cmdGoMode activates Go mode on the current buffer.
@@ -136,6 +139,20 @@ func (e *Editor) cmdConfMode() {
 	e.clearArg()
 	e.setLangMode(e.ActiveBuffer(), "conf")
 	e.Message("conf-mode")
+}
+
+// cmdPerlMode activates Perl mode on the current buffer.
+func (e *Editor) cmdPerlMode() {
+	e.clearArg()
+	e.setLangMode(e.ActiveBuffer(), "perl")
+	e.Message("perl-mode")
+}
+
+// cmdGherkinMode activates Gherkin mode on the current buffer.
+func (e *Editor) cmdGherkinMode() {
+	e.clearArg()
+	e.setLangMode(e.ActiveBuffer(), "gherkin")
+	e.Message("gherkin-mode")
 }
 
 // modeIndentStr returns the per-level indent string for the given major mode.

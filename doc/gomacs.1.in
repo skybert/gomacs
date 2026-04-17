@@ -290,6 +290,11 @@ Per\-level indentation string for Markdown buffers.
 Default: two spaces.
 Example: \fB(setq markdown\-indent 4)\fR
 .TP
+.B perl\-indent
+Per\-level indentation string for Perl buffers.
+Default: two spaces.
+Example: \fB(setq perl\-indent 4)\fR
+.TP
 .B save\-buffer\-delete\-trailing\-whitespace
 When non\-nil (the default), trailing whitespace is deleted automatically
 when a buffer is saved.  Set to
