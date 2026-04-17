@@ -193,6 +193,23 @@ corresponding `_test.go` files of the file they're testing.
 `M-x man` should offer tab completion of the available man pages in
 `$MANPATH`.
 
+# Shebang detection
+
+`gomacs` should detect file type and mode by reading the shebang. 
+
+It should enable `bash-mode` for files with either of these shebangs:
+
+- `#!/usr/bin/env bash`
+- `#!/bin/bash`
+- `#! /usr/bin/env bash`
+- `#! /bin/bash`
+
+The same should go for:
+- `perl`
+- `sh`
+- `python`, including binaries with major and minor version in them:
+  `python3.10`
+  
 # Text modes
 
 In pure text modes, like `text` and `markdown`, lines should be
