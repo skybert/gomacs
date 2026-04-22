@@ -208,17 +208,18 @@ func (h PerlHighlighter) Highlight(text string, start, end int) []Span {
 			j := i
 			if r == '0' && j+1 < n {
 				next := runes[j+1]
-				if next == 'x' || next == 'X' {
+				switch next {
+				case 'x', 'X':
 					j += 2
 					for j < n && (isHexRune(runes[j]) || runes[j] == '_') {
 						j++
 					}
-				} else if next == 'b' || next == 'B' {
+				case 'b', 'B':
 					j += 2
 					for j < n && (runes[j] == '0' || runes[j] == '1' || runes[j] == '_') {
 						j++
 					}
-				} else {
+				default:
 					for j < n && (runes[j] >= '0' && runes[j] <= '9' ||
 						runes[j] == '.' || runes[j] == '_' ||
 						runes[j] == 'e' || runes[j] == 'E') {

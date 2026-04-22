@@ -166,20 +166,20 @@ should work out of the box:
 [jdtls](https://github.com/eclipse-jdtls/eclipse.jdt.ls)
 
 The following commands should be available:
-- `dap-toggle-breakpoint`
-- `dap-step-next`, `n`
-- `dap-step-in`, `i`
-- `dap-step-out`, `o`
-- `dap-continue`, `c`
-- `dap-eval`, `e`, which evaluates the thing at point, or if the
+- `debug-toggle-breakpoint`
+- `debug-step-next`, `n`
+- `debug-step-in`, `i`
+- `debug-step-out`, `o`
+- `debug-continue`, `c`
+- `debug-eval`, `e`, which evaluates the thing at point, or if the
   region is active, the region.
-- `dap-exit`, `q`, exits the debugging session.
+- `debug-exit`, `q`, exits the debugging session.
 
-When the debugger is active, invoked with `dap-run`, the source
+When the debugger is active, invoked with `debug-start`, the source
 buffers should be switched to read only, so that the user can use
 single letter shortcuts to navigate.
 
-Invoking `dap-start` in a unit test, `foo_test.go`, it should run the
+Invoking `debug-start` in a unit test, `foo_test.go`, it should run the
 test method in which the cursor is. If the cursor is on a class, or
 outside any function, the entire file is debugged. In the same way,
 when starting the debugger in a main class, like `main.go` or a Java
@@ -189,7 +189,7 @@ The third context in which it should be aware, is to start a micro
 server with appropriate debug flags so that it can break on the break
 points set.
 
-Break points should be enabled with `M-x dap-toggle-breakpoint`. Active
+Break points should be enabled with `M-x debug-toggle-breakpoint`. Active
 break points should be shown in a gutter on the left. This gutter should
 be updated when stepping through the code, using a Unicode right arrow
 symbol, or similar.
@@ -199,7 +199,7 @@ where each of these are under each other, thus only occupying one column
 on the right.
 - Local browser, with expandable structs/objects. Where there data
   structure isn't too deep (configurable with `(setq
-  dap-locals-auto-expand-depth)`, the browser should auto expand them.
+  debug-locals-auto-expand-depth)`, the browser should auto expand them.
 - Call stack browser, for all threads.
 
 At the bottom of the screen, one large buffer with a REPL should be

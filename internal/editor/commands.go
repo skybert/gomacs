@@ -353,6 +353,24 @@ func init() {
 		"Move forward past the next balanced list delimiter or closing bracket.")
 	registerCommand("backward-list", (*Editor).cmdBackwardList,
 		"Move backward past the previous balanced list delimiter or opening bracket.")
+
+	// ---- Debugger commands ----------------------------------------------------
+	registerCommand("debug-toggle-breakpoint", (*Editor).cmdDebugToggleBreakpoint,
+		"Toggle a breakpoint at the current line.")
+	registerCommand("debug-start", (*Editor).cmdDebugStart,
+		"Start a debug session. Detects context: test file, main program, or server.")
+	registerCommand("debug-continue", (*Editor).cmdDebugContinue,
+		"Continue execution until the next breakpoint.")
+	registerCommand("debug-step-next", (*Editor).cmdDebugStepNext,
+		"Step to the next line (step over).")
+	registerCommand("debug-step-in", (*Editor).cmdDebugStepIn,
+		"Step into the function call on the current line.")
+	registerCommand("debug-step-out", (*Editor).cmdDebugStepOut,
+		"Step out of the current function.")
+	registerCommand("debug-eval", (*Editor).cmdDebugEval,
+		"Evaluate the expression at point (or active region) in the debugger.")
+	registerCommand("debug-exit", (*Editor).cmdDebugExit,
+		"Exit the current debug session and restore the window layout.")
 }
 
 // ---------------------------------------------------------------------------
@@ -1991,7 +2009,7 @@ func filePathCompletions(prefix string) []string {
 	var results []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if base != "" && !fuzzyMatch(name, base) {
+		if base != "" && !strings.HasPrefix(name, base) {
 			continue
 		}
 		// Reconstruct the full completion using the original prefix's directory.
@@ -2006,15 +2024,7 @@ func filePathCompletions(prefix string) []string {
 		}
 		results = append(results, full)
 	}
-	// Sort by match quality (prefix > substring > subsequence), then alphabetically.
-	sort.Slice(results, func(i, j int) bool {
-		si := fuzzyScore(filepath.Base(results[i]), base)
-		sj := fuzzyScore(filepath.Base(results[j]), base)
-		if si != sj {
-			return si < sj
-		}
-		return results[i] < results[j]
-	})
+	sort.Strings(results)
 	return results
 }
 

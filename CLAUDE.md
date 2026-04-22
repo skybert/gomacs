@@ -83,6 +83,7 @@ tcell event → terminal.ParseKey → keymap.Lookup → execCommand(name) → cm
 | `json-indent` | integer or string | `"  "` | Per-level indent for JSON |
 | `markdown-indent` | integer or string | `"  "` | Per-level indent for Markdown |
 | `screenshot-dir` | string | `""` (startup cwd) | Directory for `M-x screenshot` PNG output; created if absent |
+| `debug-locals-auto-expand-depth` | integer | `1` | Depth to auto-expand struct variables in the Debug Locals panel |
 
 Example `~/.gomacs`:
 ```elisp
