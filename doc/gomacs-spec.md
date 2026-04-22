@@ -189,6 +189,23 @@ The third context in which it should be aware, is to start a micro
 server with appropriate debug flags so that it can break on the break
 points set.
 
+Break points should be enabled with `M-x dap-toggle-breakpoint`. Active
+break points should be shown in a gutter on the left. This gutter should
+be updated when stepping through the code, using a Unicode right arrow
+symbol, or similar.
+
+When running the debugger, additonal buffers should be added to the UI,
+where each of these are under each other, thus only occupying one column
+on the right.
+- Local browser, with expandable structs/objects. Where there data
+  structure isn't too deep (configurable with `(setq
+  dap-locals-auto-expand-depth)`, the browser should auto expand them.
+- Call stack browser, for all threads.
+
+At the bottom of the screen, one large buffer with a REPL should be
+visible. The REPL should have syntax highlighting and auto completion,
+similar to what's in the regular code buffer.
+
 # Performance
 
 `gomacs` should be very fast. It should provide a great the user
@@ -213,7 +230,7 @@ corresponding `_test.go` files of the file they're testing.
 
 # Shebang detection
 
-`gomacs` should detect file type and mode by reading the shebang. 
+`gomacs` should detect file type and mode by reading the shebang.
 
 It should enable `bash-mode` for files with either of these shebangs:
 
@@ -227,11 +244,11 @@ The same should go for:
 - `sh`
 - `python`, including binaries with major and minor version in them:
   `python3.10`
-  
+
 # Gherkin mode
 
 `gomacs` should understand `.feature` files and enable `gherkin-mode`
-for these. 
+for these.
 
 It should wire into the xref system, with `M-.` and `M-,`, so that
 when the user is on a step definition like: "Given user logs in", it
