@@ -36,6 +36,7 @@ func gherkinStepAtPoint(buf *buffer.Buffer) string {
 // the remaining words are title-cased and concatenated.
 func stepToCamelCase(step string) string {
 	step = gherkinParamRe.ReplaceAllString(step, " ")
+	step = strings.ToLower(step) // normalise before title-casing
 	parts := gherkinNonAlphaRe.Split(step, -1)
 	var sb strings.Builder
 	for _, p := range parts {
@@ -49,9 +50,41 @@ func stepToCamelCase(step string) string {
 	return sb.String()
 }
 
-// gherkinGrep runs grep in root (searching ".") and returns stdout.
-// pattern is an extended regular expression; glob is the --include glob.
+// gherkinGrep searches for pattern in files matching glob under root.
+// When root is inside a git repository it delegates to "git grep" (fast,
+// searches only tracked files); otherwise it falls back to plain "grep -rEn".
+// pattern is an extended regular expression; ignoreCase adds the -i flag.
 func gherkinGrep(root, pattern, glob string, ignoreCase bool) string {
+	if isGitRepo(root) {
+		return gherkinGitGrep(root, pattern, glob, ignoreCase)
+	}
+	return gherkinPlainGrep(root, pattern, glob, ignoreCase)
+}
+
+// isGitRepo reports whether root is inside a git repository by running
+// "git -C root rev-parse --git-dir".
+func isGitRepo(root string) bool {
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--git-dir")
+	return cmd.Run() == nil
+}
+
+// gherkinGitGrep uses "git grep" — searches only tracked files and is
+// significantly faster than a recursive filesystem walk.
+// Output format: "path/to/file:linenum:content" (relative to root, no ./ prefix).
+func gherkinGitGrep(root, pattern, glob string, ignoreCase bool) string {
+	args := []string{"-C", root, "grep", "-En"}
+	if ignoreCase {
+		args = append(args, "-i")
+	}
+	args = append(args, pattern, "--", glob)
+	cmd := exec.Command("git", args...)
+	out, _ := cmd.Output()
+	return string(out)
+}
+
+// gherkinPlainGrep falls back to "grep -rEn" for non-git trees.
+// Output format: "./path/to/file:linenum:content" (relative to root).
+func gherkinPlainGrep(root, pattern, glob string, ignoreCase bool) string {
 	args := []string{"-rEn", "--include=" + glob}
 	if ignoreCase {
 		args = append(args, "-i")
@@ -67,7 +100,7 @@ func gherkinGrep(root, pattern, glob string, ignoreCase bool) string {
 // compilationErrors with absolute paths rooted at root.
 func parseGrepLines(output, root string) []compilationError {
 	var errs []compilationError
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
 		if line == "" {
 			continue
 		}
@@ -123,7 +156,7 @@ func (e *Editor) cmdGherkinFindDefinition() {
 
 	e.lspAsync(func() func() {
 		// Go/gocuke: function name contains the CamelCase step identifier.
-		goOut := gherkinGrep(root, `func.*`+regexp.QuoteMeta(camel), "*.go", false)
+		goOut := gherkinGrep(root, `func.*`+regexp.QuoteMeta(camel), "*.go", true)
 
 		// Java: @Given/@When/@Then/@And/@But annotation whose string contains
 		// the step text (case-insensitive).

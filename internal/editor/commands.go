@@ -1218,6 +1218,14 @@ func (e *Editor) cmdProjectFindFile() {
 	e.SetMinibufCompletions(func(query string) []string {
 		return e.projectFileCompletions(root, files, query)
 	})
+	e.SetMinibufPreferTyped(func(s string) bool {
+		if filepath.IsAbs(s) {
+			_, err := os.Stat(s)
+			return err == nil
+		}
+		_, err := os.Stat(filepath.Join(root, s))
+		return err == nil
+	})
 }
 
 // projectFileCompletions returns relative file paths from root that fuzzy-match

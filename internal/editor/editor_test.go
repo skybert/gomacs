@@ -144,6 +144,10 @@ func TestStepToCamelCase(t *testing.T) {
 		{"the user has 42 apples", "TheUserHasApples"},
 		{"user is logged in as <role>", "UserIsLoggedInAs"},
 		{"I am on the login page", "IAmOnTheLoginPage"},
+		// Mixed / upper case input must normalise to the same result.
+		{"User Logs In", "UserLogsIn"},
+		{"USER LOGS IN", "UserLogsIn"},
+		{"The USER is LOGGED IN", "TheUserIsLoggedIn"},
 	}
 	for _, tc := range cases {
 		got := stepToCamelCase(tc.step)
