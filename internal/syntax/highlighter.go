@@ -49,6 +49,11 @@ var (
 	// FaceCompilationFail is used for the *compilation* buffer name on the
 	// modeline when the last build failed.
 	FaceCompilationFail = Face{Fg: "red", Bold: true}
+
+	// FaceBreakpoint is the face for breakpoint indicators (●) in the debug gutter.
+	FaceBreakpoint = Face{Fg: "#00c800", Bold: true}
+	// FaceExecPos is the face for the current execution position (→) in the debug gutter.
+	FaceExecPos = Face{Fg: "yellow", Bold: true}
 )
 
 // Span is a highlighted range in the buffer

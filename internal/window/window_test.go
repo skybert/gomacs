@@ -197,7 +197,22 @@ func TestSetScrollLineClamping(t *testing.T) {
 	}
 }
 
-// TestRecenterTopPutsPointAtFirstRow verifies that RecenterTop makes the
+// TestGutterWidth verifies that GutterWidth and SetGutterWidth work correctly.
+func TestGutterWidth(t *testing.T) {
+	w, _ := newFiveLineWindow(5)
+	if w.GutterWidth() != 0 {
+		t.Errorf("expected initial GutterWidth=0, got %d", w.GutterWidth())
+	}
+	w.SetGutterWidth(2)
+	if w.GutterWidth() != 2 {
+		t.Errorf("expected GutterWidth=2, got %d", w.GutterWidth())
+	}
+	w.SetGutterWidth(0)
+	if w.GutterWidth() != 0 {
+		t.Errorf("expected GutterWidth=0 after reset, got %d", w.GutterWidth())
+	}
+}
+
 // line containing the point the first visible line.
 func TestRecenterTopPutsPointAtFirstRow(t *testing.T) {
 	w, buf := newFiveLineWindow(3)

@@ -14,6 +14,9 @@ type langModeInfo struct {
 	// lspCmd is the command and arguments to start the LSP server.
 	// Empty means no LSP support for this mode.
 	lspCmd []string
+	// dapCmd is the command and arguments to start the DAP debug adapter.
+	// Empty means no DAP support for this mode.
+	dapCmd []string
 	// rootMarkers are filenames that indicate the project root when walking
 	// upward from the file's directory (e.g. "go.mod", "pyproject.toml").
 	rootMarkers []string
@@ -21,9 +24,9 @@ type langModeInfo struct {
 
 // langModes lists every supported language mode.
 var langModes = []langModeInfo{
-	{modeName: "go", lspCmd: []string{"gopls"}, rootMarkers: []string{"go.mod", "go.work"}},
+	{modeName: "go", lspCmd: []string{"gopls"}, dapCmd: []string{"dlv", "dap"}, rootMarkers: []string{"go.mod", "go.work"}},
 	{modeName: "python", rootMarkers: []string{"pyproject.toml", "setup.py", "setup.cfg"}},
-	{modeName: "java", rootMarkers: []string{"pom.xml", "build.gradle"}},
+	{modeName: "java", dapCmd: []string{}, rootMarkers: []string{"pom.xml", "build.gradle"}},
 	{modeName: "bash", rootMarkers: []string{}},
 	{modeName: "perl", rootMarkers: []string{}},
 	{modeName: "gherkin", rootMarkers: []string{}},

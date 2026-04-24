@@ -43,6 +43,7 @@ type Editor struct {
 	ctrlXPKeymap *keymap.Keymap // C-x p (project)
 	metaGKeymap  *keymap.Keymap // M-g (goto)
 	ctrlCKeymap  *keymap.Keymap // C-c prefix map
+	ctrlDKeymap  *keymap.Keymap // C-c d (DAP debug)
 
 	killRing []string // yank ring; [0] is most recent
 	yankIdx  int      // current yank-pop index
@@ -192,6 +193,14 @@ type Editor struct {
 	lspOpCancel context.CancelFunc
 	// lspCbs carries callbacks from async LSP goroutines back to the main loop.
 	lspCbs chan func()
+
+	// dap is the active debug session state; nil when no session is running.
+	dap *dapState
+	// dapBreakpoints stores breakpoints set by the user, keyed by absolute file
+	// path → set of 1-based line numbers.  Persists across debug sessions.
+	dapBreakpoints map[string]map[int]struct{}
+	// dapCbs carries callbacks from async DAP goroutines back to the main loop.
+	dapCbs chan func()
 
 	// fillColumn is the target column for fill-paragraph (default 70).
 	fillColumn int
@@ -351,6 +360,8 @@ func New(opts Options) (*Editor, error) {
 		lspOpCancel:                nopCancel,
 		lspCompDelayCancel:         nopCancel,
 		lspCbs:                     make(chan func(), 16),
+		dapBreakpoints:             make(map[string]map[int]struct{}),
+		dapCbs:                     make(chan func(), 16),
 		version:                    opts.Version,
 		startTime:                  time.Now(),
 		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
@@ -552,6 +563,7 @@ func (e *Editor) setupKeymaps() {
 	e.ctrlXPKeymap = keymap.New("C-x p")
 	e.metaGKeymap = keymap.New("M-g")
 	e.ctrlCKeymap = keymap.New("C-c")
+	e.ctrlDKeymap = keymap.New("C-c d")
 
 	gk := e.globalKeymap
 	cx := e.ctrlXKeymap
@@ -569,6 +581,18 @@ func (e *Editor) setupKeymaps() {
 	gk.BindPrefix(keymap.CtrlKey('c'), cc)
 	cc.Bind(keymap.PlainKey('h'), "lsp-show-doc")
 	cc.Bind(keymap.PlainKey(','), "imenu")
+
+	// ---- C-c d prefix (DAP debug) ------------------------------------------
+	cd := e.ctrlDKeymap
+	cc.BindPrefix(keymap.PlainKey('d'), cd)
+	cd.Bind(keymap.PlainKey('b'), "debug-toggle-breakpoint")
+	cd.Bind(keymap.PlainKey('d'), "debug-start")
+	cd.Bind(keymap.PlainKey('c'), "debug-continue")
+	cd.Bind(keymap.PlainKey('n'), "debug-step-next")
+	cd.Bind(keymap.PlainKey('i'), "debug-step-in")
+	cd.Bind(keymap.PlainKey('o'), "debug-step-out")
+	cd.Bind(keymap.PlainKey('e'), "debug-eval")
+	cd.Bind(keymap.PlainKey('q'), "debug-exit")
 
 	// ---- C-h prefix (help) -------------------------------------------------
 	gk.BindPrefix(keymap.CtrlKey('h'), ch)
@@ -823,6 +847,11 @@ func (e *Editor) applyElispConfig() {
 			e.autoRevert = false
 		}
 	}
+	if v, ok := e.lisp.GetGlobalVar("debug-locals-auto-expand-depth"); ok {
+		if i, ok := v.(elisp.Int); ok && i.V > 0 && e.dap != nil {
+			e.dap.localsAutoExpandDepth = int(i.V)
+		}
+	}
 	e.applyVisualLines()
 }
 
@@ -868,6 +897,8 @@ func (e *Editor) processEvent(ev tcell.Event) {
 		for {
 			select {
 			case fn := <-e.lspCbs:
+				fn()
+			case fn := <-e.dapCbs:
 				fn()
 			default:
 				return
@@ -945,6 +976,11 @@ func (e *Editor) invalidateLayout() {
 func (e *Editor) relayoutWindows(totalW, totalH int) {
 	n := len(e.windows)
 	if n == 0 {
+		return
+	}
+	// DAP mode uses a fixed 4-window layout managed separately.
+	if e.dap != nil && n == 4 {
+		e.dapRelayoutWindows(totalW, totalH)
 		return
 	}
 	if n == 1 {
@@ -1605,6 +1641,29 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		}
 	}
 
+	// Debug: single-letter shortcuts in source buffers when session active.
+	if e.prefixKeymap == nil && e.dap != nil {
+		mode := e.ActiveBuffer().Mode()
+		switch mode {
+		case "debug-locals":
+			if e.debugLocalsDispatch(ke) {
+				return
+			}
+		case "debug-stack":
+			if e.debugStackDispatch(ke) {
+				return
+			}
+		case "debug-repl":
+			if e.debugReplDispatch(ke) {
+				return
+			}
+		default:
+			if e.debugSourceDispatch(ke) {
+				return
+			}
+		}
+	}
+
 	// When in a *VC Commit* buffer, C-c C-c submits and C-c C-k aborts.
 	if e.ActiveBuffer().Mode() == "vc-commit" {
 		if e.vcCommitDispatch(ke) {
@@ -1814,15 +1873,10 @@ func (e *Editor) dispatchMinibufKey(ke terminal.KeyEvent) {
 			e.refreshMinibufCandidates()
 		}
 	case tcell.KeyTab:
-		if len(e.minibufCandidates) > 0 {
-			// Insert the currently selected candidate.
-			cand := e.minibufCandidates[e.minibufSelectedIdx]
-			buf.Delete(0, buf.Len())
-			buf.InsertString(0, cand)
-			buf.SetPoint(len([]rune(cand)))
-			e.refreshMinibufCandidates()
-		} else {
-			e.minibufComplete()
+		prev := buf.String()
+		e.minibufComplete() // extends common prefix and shows hint; inserts only on unique match
+		if buf.String() != prev {
+			e.refreshMinibufCandidates() // update popup after prefix extension
 		}
 	case tcell.KeyDown:
 		if len(e.minibufCandidates) > 0 {
@@ -2576,6 +2630,12 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.MakefileHighlighter{}
 	case mode == "help":
 		return syntax.HelpHighlighter{}
+	case mode == "debug-locals":
+		return syntax.DapLocalsHighlighter{}
+	case mode == "debug-stack":
+		return syntax.DapStackHighlighter{}
+	case mode == "debug-repl":
+		return syntax.GoHighlighter{}
 	default:
 		return syntax.NilHighlighter{}
 	}
@@ -2705,6 +2765,18 @@ func (e *Editor) renderWindow(w *window.Window) {
 	_, winY, winW, winH := w.Left(), w.Top(), w.Width(), w.Height()
 	textH := max(winH-1, 1)
 
+	// Gutter: columns reserved at the left for breakpoint/exec-pos indicators.
+	// Always show a 2-column gutter when the file has any breakpoints set OR a
+	// debug session is active (even before dapSetupLayout has run).
+	gutterW := w.GutterWidth()
+	if gutterW == 0 && buf.Filename() != "" {
+		absName, _ := filepath.Abs(buf.Filename())
+		if len(e.dapBreakpoints[absName]) > 0 || e.dap != nil {
+			gutterW = 2
+		}
+	}
+	textW := winW - gutterW // effective columns available for buffer text
+
 	// Spell-check spans (nil when disabled or mode not applicable).
 	spellSpans := e.getSpellSpans(buf)
 	// Compute the word bounds around the cursor so we can suppress spell
@@ -2742,9 +2814,24 @@ func (e *Editor) renderWindow(w *window.Window) {
 		lineRunes := cache.runes[vl.StartPos:vl.EndPos]
 		screenCol := 0
 
+		// Gutter phase: draw breakpoint/exec-pos indicators in the reserved columns.
+		if gutterW >= 2 {
+			bpCh, bpFace := ' ', syntax.FaceDefault
+			if e.dapHasBreakpoint(buf.Filename(), vl.Line) {
+				bpCh, bpFace = '●', syntax.FaceBreakpoint
+			}
+			e.term.SetCell(w.Left(), screenRow, rune(bpCh), bpFace)
+
+			epCh, epFace := ' ', syntax.FaceDefault
+			if e.dap != nil && e.dap.stoppedFile == buf.Filename() && e.dap.stoppedLine == vl.Line {
+				epCh, epFace = '→', syntax.FaceExecPos
+			}
+			e.term.SetCell(w.Left()+1, screenRow, rune(epCh), epFace)
+		}
+
 		// Phase 1: render actual line content, expanding tabs.
 		for bufOffset, ch := range lineRunes {
-			if screenCol >= winW {
+			if screenCol >= textW {
 				break
 			}
 			pos := vl.StartPos + bufOffset
@@ -2777,24 +2864,24 @@ func (e *Editor) renderWindow(w *window.Window) {
 				face = syntax.FaceIsearch
 			}
 			if ch == '\t' {
-				for j := 0; j < tabWidth && screenCol < winW; j++ {
-					e.term.SetCell(w.Left()+screenCol, screenRow, ' ', face)
+				for j := 0; j < tabWidth && screenCol < textW; j++ {
+					e.term.SetCell(w.Left()+gutterW+screenCol, screenRow, ' ', face)
 					screenCol++
 				}
 			} else {
-				e.term.SetCell(w.Left()+screenCol, screenRow, ch, face)
+				e.term.SetCell(w.Left()+gutterW+screenCol, screenRow, ch, face)
 				screenCol++
 			}
 		}
 
 		// Phase 2: fill the rest of the row with spaces (possibly region-highlighted).
 		eolPos := vl.StartPos + len(lineRunes)
-		for screenCol < winW {
+		for screenCol < textW {
 			face := syntax.FaceDefault
 			if regionActive && eolPos >= regionStart && eolPos < regionEnd {
 				face = syntax.FaceRegion
 			}
-			e.term.SetCell(w.Left()+screenCol, screenRow, ' ', face)
+			e.term.SetCell(w.Left()+gutterW+screenCol, screenRow, ' ', face)
 			screenCol++
 		}
 	}

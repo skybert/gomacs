@@ -32,6 +32,11 @@ type Window struct {
 	cachedScrollLine int
 	cachedScrollPos  int
 	cachedChangeGen  int
+
+	// gutterWidth is the number of columns reserved at the left edge for gutter
+	// decorations such as breakpoint indicators (●) and execution position (→).
+	// 0 means no gutter; the minimum meaningful value is 2.
+	gutterWidth int
 }
 
 // ViewLine describes the content of one rendered row.
@@ -162,6 +167,13 @@ func (w *Window) WrapCol() int { return w.wrapCol }
 
 // SetWrapCol sets the visual wrap column.  0 disables wrapping.
 func (w *Window) SetWrapCol(col int) { w.wrapCol = col }
+
+// GutterWidth returns the number of columns reserved at the left for gutter
+// decorations (0 = no gutter).
+func (w *Window) GutterWidth() int { return w.gutterWidth }
+
+// SetGutterWidth sets the number of gutter columns.  Use 0 to remove the gutter.
+func (w *Window) SetGutterWidth(n int) { w.gutterWidth = n }
 
 // ScrollUp scrolls the view down by n lines (scrollLine increases), revealing
 // later content.

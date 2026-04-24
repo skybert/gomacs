@@ -1522,3 +1522,57 @@ func TestIsearchHyphenFindsMatch(t *testing.T) {
 		t.Errorf("point after \"sort-\" = %d, want %d", got, want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tab key: never auto-insert first candidate
+// ---------------------------------------------------------------------------
+
+// tabKey builds a KeyEvent for the Tab key.
+func tabKey() terminal.KeyEvent { return terminal.KeyEvent{Key: tcell.KeyTab} }
+
+// TestMinibufTabDoesNotAutoInsert verifies that pressing Tab when multiple
+// candidates are present does NOT insert the first candidate.  It should
+// extend the common prefix (or leave the text unchanged) and display a hint.
+func TestMinibufTabDoesNotAutoInsert(t *testing.T) {
+	e := newTestEditor("")
+	e.ReadMinibuffer("Find file: ", func(string) {})
+	e.SetMinibufCompletions(func(_ string) []string {
+		return []string{"file.txt", "foo.txt"}
+	})
+	// Simulate typing "f".
+	e.minibufBuf.InsertString(0, "f")
+	e.minibufBuf.SetPoint(1)
+	e.refreshMinibufCandidates() // as dispatchMinibufKey would do
+
+	// Press Tab.
+	e.dispatchMinibufKey(tabKey())
+
+	got := e.minibufBuf.String()
+	// "file.txt" must NOT have been auto-inserted; common prefix of
+	// ["file.txt","foo.txt"] is "f", so text should remain "f".
+	if got == "file.txt" {
+		t.Fatalf("Tab auto-inserted first candidate %q — should not auto-insert", got)
+	}
+	// The hint must list both candidates.
+	if !strings.Contains(e.minibufHint, "file.txt") || !strings.Contains(e.minibufHint, "foo.txt") {
+		t.Errorf("hint %q should list both file.txt and foo.txt", e.minibufHint)
+	}
+}
+
+// TestMinibufTabExtendsCommonPrefix verifies that Tab extends the typed text
+// to the longest common prefix when it can.
+func TestMinibufTabExtendsCommonPrefix(t *testing.T) {
+	e := newTestEditor("")
+	e.ReadMinibuffer("Find file: ", func(string) {})
+	e.SetMinibufCompletions(func(_ string) []string {
+		return []string{"forward-char", "forward-word", "forward-line"}
+	})
+	e.minibufBuf.InsertString(0, "fo")
+	e.minibufBuf.SetPoint(2)
+
+	e.dispatchMinibufKey(tabKey())
+
+	if got := e.minibufBuf.String(); got != "forward-" {
+		t.Errorf("Tab common prefix: want \"forward-\", got %q", got)
+	}
+}
