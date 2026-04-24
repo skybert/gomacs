@@ -156,7 +156,7 @@ symbol.
 
 `lsp-find-references`. By default bound to `M-?`.
 
-# DAP - debugger support
+# Debugger support
 
 `gomacs` should support the DAP protocol and provide a good, out of
 the box experience for a pre-defined list of debuggers. The following
@@ -194,7 +194,7 @@ break points should be shown in a gutter on the left. This gutter should
 be updated when stepping through the code, using a Unicode right arrow
 symbol, or similar.
 
-When running the debugger, additonal buffers should be added to the UI,
+When running the debugger, additional buffers should be added to the UI,
 where each of these are under each other, thus only occupying one column
 on the right.
 - Local browser, with expandable structs/objects. Where there data
@@ -204,7 +204,21 @@ on the right.
 
 At the bottom of the screen, one large buffer with a REPL should be
 visible. The REPL should have syntax highlighting and auto completion,
-similar to what's in the regular code buffer.
+similar to what's in the regular code buffer. Lines in the REPL,
+locals or stack buffers should not be wrapped.
+
+# One letter window jump
+
+`M-o` should enable one letter jump to any visible window.
+
+When the user invokes `M-o`, the contents of all visible windows
+should be without syntax highlighting and one letter in green should
+visible in an overlay in each window. The letters should be one of
+asdfghkl (home row keys on QUERY). Pressing any of these letters, will
+take the point to that window. The window splits stay the same as they
+were. After jumping, the syntax highlighting should be re-enabled.
+
+Pressing `C-g` cancels the jump options.
 
 # Performance
 
