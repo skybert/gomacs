@@ -10,6 +10,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// closeAndIgnoreErr closes the file, and ignores any errors it may
+// throw. Useful when we're already in an error situation.
+func closeAndIgnoreErr(fd int) {
+	_ = unix.Close(fd)
+}
+
 // openPTY opens a master/slave PTY pair and returns them as *os.File.
 func openPTY() (*os.File, *os.File, error) {
 	masterFd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
@@ -29,14 +35,14 @@ func openPTY() (*os.File, *os.File, error) {
 	var n uint32
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(masterFd),
 		unix.TIOCGPTN, uintptr(unsafe.Pointer(&n))); errno != 0 {
-		unix.Close(masterFd)
+		closeAndIgnoreErr(masterFd)
 		return nil, nil, fmt.Errorf("TIOCGPTN: %w", errno)
 	}
 	slaveName := fmt.Sprintf("/dev/pts/%d", n)
 
 	slaveFd, err := unix.Open(slaveName, unix.O_RDWR|unix.O_NOCTTY, 0)
 	if err != nil {
-		unix.Close(masterFd)
+		closeAndIgnoreErr(masterFd)
 		return nil, nil, fmt.Errorf("open slave PTY %s: %w", slaveName, err)
 	}
 
