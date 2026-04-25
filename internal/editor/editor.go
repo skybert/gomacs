@@ -1363,7 +1363,7 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 		b.SetMode("go")
 	case ext == ".md" || ext == ".markdown":
 		b.SetMode("markdown")
-	case ext == ".el":
+	case ext == ".el" || ext == ".emacs" || ext == ".gomacs":
 		b.SetMode(modeElisp)
 	case ext == ".py":
 		b.SetMode("python")
