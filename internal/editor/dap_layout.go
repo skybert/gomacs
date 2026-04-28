@@ -93,6 +93,8 @@ func (e *Editor) debugTeardownLayout() {
 
 	// Restore active window.
 	e.activeWin = src
+	// Reset split tree to a single window after DAP teardown.
+	e.layoutRoot = leafNode(src)
 
 	e.invalidateLayout()
 }

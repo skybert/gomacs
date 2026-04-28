@@ -250,6 +250,7 @@ func (e *Editor) cmdHelp() {
 		}},
 		{"Windows", []string{
 			"split-window-below", "split-window-right", "delete-other-windows", "other-window",
+			"window-jump",
 		}},
 		{"Shell & Build", []string{
 			"shell-command", "shell-command-on-region", "man",

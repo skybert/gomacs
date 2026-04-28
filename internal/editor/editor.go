@@ -301,6 +301,15 @@ type Editor struct {
 	// visualLinesSynced tracks whether applyVisualLines has been applied for
 	// the current visualLines setting and window configuration.
 	visualLinesSynced bool
+
+	// window-jump (M-o ace-window style) state.
+	windowJumpActive bool
+	windowJumpMap    map[rune]*window.Window
+
+	// layoutRoot is the root of the window split tree.  It is used by
+	// relayoutWindows to correctly redistribute screen area after mixed
+	// horizontal + vertical splits.
+	layoutRoot *layoutNode
 }
 
 // spanCache holds pre-computed highlighting data for a buffer.  It is
@@ -525,6 +534,7 @@ func New(opts Options) (*Editor, error) {
 	mainWin := window.New(scratch, 0, 0, w, h-1)
 	e.windows = append(e.windows, mainWin)
 	e.activeWin = mainWin
+	e.layoutRoot = leafNode(mainWin)
 
 	// Minibuffer window is the very last row.
 	e.minibufWin = window.New(e.minibufBuf, h-1, 0, w, 1)
@@ -690,6 +700,7 @@ func (e *Editor) setupKeymaps() {
 	gk.Bind(keymap.MetaKey('a'), "beginning-of-sentence")
 	gk.Bind(keymap.MetaKey('e'), "end-of-sentence")
 	gk.Bind(keymap.MetaKey('k'), "kill-sentence")
+	gk.Bind(keymap.MetaKey('o'), "window-jump")
 
 	// Word-case commands (M-u / M-l / M-c)
 	gk.Bind(keymap.MetaKey('u'), "upcase-word")
@@ -970,9 +981,7 @@ func (e *Editor) invalidateLayout() {
 }
 
 // relayoutWindows redistributes the available screen area (totalW×totalH)
-// equally among all non-minibuffer windows.  Two windows are assumed to share
-// the area: if their tops differ they are stacked vertically; otherwise they
-// are placed side by side horizontally.
+// among all non-minibuffer windows using the split tree (e.layoutRoot).
 func (e *Editor) relayoutWindows(totalW, totalH int) {
 	n := len(e.windows)
 	if n == 0 {
@@ -983,45 +992,28 @@ func (e *Editor) relayoutWindows(totalW, totalH int) {
 		e.dapRelayoutWindows(totalW, totalH)
 		return
 	}
-	if n == 1 {
-		e.windows[0].SetRegion(0, 0, totalW, totalH)
+	if e.layoutRoot == nil {
+		// Safety fallback: rebuild a flat tree from current windows.
+		e.rebuildLayoutTree()
+	}
+	e.layoutRoot.applyLayout(0, 0, totalW, totalH)
+}
+
+// rebuildLayoutTree constructs a flat horizontal split tree from the current
+// window slice.  This is only used as a safety fallback; normally layoutRoot
+// is maintained incrementally by the split/delete commands.
+func (e *Editor) rebuildLayoutTree() {
+	if len(e.windows) == 0 {
 		return
 	}
-	// Determine split orientation from current positions.
-	// If windows share the same top row → vertical (side-by-side) split.
-	// Otherwise → horizontal (stacked) split.
-	sameLine := true
+	root := leafNode(e.windows[0])
 	for _, w := range e.windows[1:] {
-		if w.Top() != e.windows[0].Top() {
-			sameLine = false
-			break
+		root = &layoutNode{
+			dir:      layoutHoriz,
+			children: [2]*layoutNode{root, leafNode(w)},
 		}
 	}
-	if sameLine {
-		// Vertical split: divide width equally, leaving 1 col per separator.
-		// n windows → n-1 separator columns.
-		available := max(totalW-(n-1), n) // leave 1 col per separator, min 1 col/window
-		each := available / n
-		for i, w := range e.windows {
-			left := i*each + i // i separator columns to the left
-			width := each
-			if i == n-1 {
-				width = available - i*each
-			}
-			w.SetRegion(0, left, width, totalH)
-		}
-	} else {
-		// Horizontal split: divide height equally (leave 1 row for modeline per window).
-		each := totalH / n
-		for i, w := range e.windows {
-			top := i * each
-			height := each
-			if i == n-1 {
-				height = totalH - top
-			}
-			w.SetRegion(top, 0, totalW, height)
-		}
-	}
+	e.layoutRoot = root
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,19 +1058,13 @@ func (e *Editor) removeWindowShowingBuf(buf *buffer.Buffer) {
 		return
 	}
 	toRemove := e.windows[idx]
-	// Give the removed window's rows to the neighbour: prefer the window
-	// immediately above (idx-1), otherwise take idx+1.
-	neighbourIdx := idx - 1
-	if neighbourIdx < 0 {
-		neighbourIdx = idx + 1
+	// Remove from the layout tree and trigger a full relayout.
+	if e.layoutRoot != nil {
+		e.layoutRoot = e.layoutRoot.removeLeaf(toRemove)
 	}
-	neighbour := e.windows[neighbourIdx]
-	// Compute the combined region that both windows occupied.
-	top := min(toRemove.Top(), neighbour.Top())
-	totalH := toRemove.Height() + neighbour.Height()
-	neighbour.SetRegion(top, neighbour.Left(), neighbour.Width(), totalH)
 	// Remove toRemove from the slice.
 	e.windows = append(e.windows[:idx], e.windows[idx+1:]...)
+	e.invalidateLayout()
 }
 
 // showBuf displays b in the active window and records the previous buffer
@@ -1545,6 +1531,13 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 	}
 
 	// Determine which keymap to look up in (global or current prefix).
+	// Window-jump mode: at this point ESC-prefix Meta has already been assembled,
+	// so the key arriving here is the real intended key (plain letter or C-g).
+	if e.windowJumpActive {
+		e.windowJumpHandleKey(ke)
+		return
+	}
+
 	activeMap := e.globalKeymap
 	if e.prefixKeymap != nil {
 		activeMap = e.prefixKeymap
@@ -2514,6 +2507,10 @@ func (e *Editor) Redraw() {
 	e.renderLSPCompletionPopup()
 	// LSP doc popup (lsp-show-doc), rendered over the text near the cursor.
 	e.renderLSPDocPopup()
+	// Window-jump overlays: drawn last so they appear on top of everything.
+	if e.windowJumpActive {
+		e.renderWindowJumpOverlays()
+	}
 	// Position the hardware cursor.
 	e.placeCursor()
 	e.term.Show()
@@ -3146,7 +3143,8 @@ func (e *Editor) applyVisualLines() {
 		mode := w.Buf().Mode()
 		if mode == "vc-grep" || mode == "lsp-refs" || mode == "vc-status" ||
 			mode == "vc-log" || mode == "vc-show" || mode == "diff" ||
-			mode == "compilation" || mode == "vc-fixup-select" || mode == "shell" {
+			mode == "compilation" || mode == "vc-fixup-select" || mode == "shell" ||
+			mode == "debug-locals" || mode == "debug-stack" || mode == "debug-repl" {
 			w.SetWrapCol(0)
 			continue
 		}

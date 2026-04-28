@@ -29,6 +29,7 @@ func newTestEditor(content string) *Editor {
 		buffers:      []*buffer.Buffer{buf},
 		windows:      []*window.Window{win},
 		activeWin:    win,
+		layoutRoot:   leafNode(win),
 		minibufBuf:   buffer.New(" *minibuf*"),
 		globalKeymap: keymap.New("global"),
 		ctrlXKeymap:  keymap.New("C-x"),

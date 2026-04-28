@@ -154,6 +154,8 @@ func init() {
 		"Split the selected window into two windows side by side.")
 	registerCommand("other-window", (*Editor).cmdOtherWindow,
 		"Select another window in cyclic ordering of windows.")
+	registerCommand("window-jump", (*Editor).cmdWindowJump,
+		"Jump to a visible window by pressing its displayed letter (M-o).")
 	registerCommand("eval-last-sexp", (*Editor).cmdEvalLastSexp,
 		"Evaluate the sexp before point and show the result in the echo area.")
 
@@ -1606,6 +1608,7 @@ func (e *Editor) cmdDeleteOtherWindows() {
 	}
 	// Keep only the active window; resize it to fill the full available area.
 	e.windows = []*window.Window{e.activeWin}
+	e.layoutRoot = leafNode(e.activeWin)
 	if e.term != nil {
 		w, h := e.term.Size()
 		e.activeWin.SetRegion(0, 0, w, h-1)
@@ -1634,6 +1637,7 @@ func (e *Editor) cmdSplitWindowBelow() {
 	newWin := window.New(w.Buf(), top+topH, left, width, botH)
 	newWin.SetPoint(w.Point())
 	e.windows = append(e.windows, newWin)
+	e.layoutRoot = e.layoutRoot.splitLeaf(w, newWin, layoutHoriz)
 	e.invalidateLayout()
 }
 
@@ -1658,6 +1662,7 @@ func (e *Editor) cmdSplitWindowRight() {
 	newWin := window.New(w.Buf(), top, left+leftW+1, rightW, height)
 	newWin.SetPoint(w.Point())
 	e.windows = append(e.windows, newWin)
+	e.layoutRoot = e.layoutRoot.splitLeaf(w, newWin, layoutVert)
 	e.invalidateLayout()
 }
 
