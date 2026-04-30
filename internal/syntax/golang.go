@@ -51,11 +51,6 @@ var builtinFuncs = map[string]bool{
 	"recover": true,
 }
 
-// byteOffsetToRuneOffset converts a byte offset in s to a rune offset.
-func byteOffsetToRuneOffset(s string, byteOff int) int {
-	return utf8.RuneCountInString(s[:byteOff])
-}
-
 // Highlight tokenizes text using go/scanner and returns face spans for
 // tokens whose rune positions overlap [start, end).
 func (g GoHighlighter) Highlight(text string, start, end int) []Span {
@@ -65,6 +60,22 @@ func (g GoHighlighter) Highlight(text string, start, end int) []Span {
 	var s scanner.Scanner
 	// Collect errors silently — partial / in-progress source is common.
 	s.Init(file, []byte(text), nil /* no error handler */, scanner.ScanComments)
+
+	// curByte and curRune form a monotonically-advancing cursor that converts
+	// byte offsets to rune offsets without rescanning from position 0 each time.
+	// Since go/scanner emits tokens in strictly increasing byte-offset order
+	// this is O(len(text)) overall instead of O(len(text) × num_tokens).
+	curByte := 0
+	curRune := 0
+
+	advanceTo := func(target int) int {
+		for curByte < target {
+			_, size := utf8.DecodeRuneInString(text[curByte:])
+			curByte += size
+			curRune++
+		}
+		return curRune
+	}
 
 	var spans []Span
 
@@ -94,9 +105,9 @@ func (g GoHighlighter) Highlight(text string, start, end int) []Span {
 			byteEnd = len(text)
 		}
 
-		// Convert byte offsets to rune offsets.
-		runeStart := byteOffsetToRuneOffset(text, byteStart)
-		runeEnd := byteOffsetToRuneOffset(text, byteEnd)
+		// Advance cursor to byteStart, then byteEnd — never backward.
+		runeStart := advanceTo(byteStart)
+		runeEnd := advanceTo(byteEnd)
 
 		// Only emit spans that overlap [start, end).
 		if runeEnd <= start || runeStart >= end {

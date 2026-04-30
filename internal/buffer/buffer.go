@@ -581,12 +581,40 @@ func (b *Buffer) LineStartsFromPos(from int, bufPos int, count int) []int {
 	out[0] = bufPos
 	length := b.Len()
 	filled := 1
-	for i := bufPos; i < length && filled < count; i++ {
-		if b.RuneAt(i) == '\n' {
-			out[filled] = i + 1
-			filled++
+
+	// Iterate directly over the two contiguous segments of the gap buffer,
+	// avoiding the per-character gap-index arithmetic of RuneAt(i).
+	//
+	// Physical layout: data[0..gapStart) | gap[gapStart..gapEnd) | data[gapEnd..len(data))
+	// Logical mapping: pos < gapStart → data[pos]; pos >= gapStart → data[pos+gapSize]
+	gapSize := b.gapEnd - b.gapStart
+	logPos := bufPos
+
+	// Segment 1: data before the gap (logical range [bufPos, gapStart)).
+	if bufPos < b.gapStart {
+		for phys := bufPos; phys < b.gapStart && filled < count; phys++ {
+			if b.data[phys] == '\n' {
+				out[filled] = logPos + 1
+				filled++
+			}
+			logPos++
 		}
 	}
+
+	// Segment 2: data after the gap.
+	// Physical start: gapEnd (when bufPos < gapStart) or bufPos+gapSize (when bufPos >= gapStart).
+	seg2Start := b.gapEnd
+	if bufPos >= b.gapStart {
+		seg2Start = bufPos + gapSize
+	}
+	for phys := seg2Start; phys < len(b.data) && filled < count; phys++ {
+		if b.data[phys] == '\n' {
+			out[filled] = logPos + 1
+			filled++
+		}
+		logPos++
+	}
+
 	for filled < count {
 		out[filled] = length
 		filled++

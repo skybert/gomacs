@@ -28,6 +28,7 @@ func (e *Editor) startQueryReplace(from, to string) {
 		return
 	}
 	e.queryReplaceFrom = from
+	e.queryReplaceFromRunes = []rune(from)
 	e.queryReplaceTo = to
 	e.queryReplaceCursor = e.ActiveBuffer().Point()
 	e.queryReplaceMatch = -1

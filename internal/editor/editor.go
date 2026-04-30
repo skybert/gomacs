@@ -97,6 +97,11 @@ type Editor struct {
 	// transient status message shown in the minibuffer area
 	message     string
 	messageTime int64 // Unix nano; message expires after 5 s
+	// Cached syntax-highlight result for the last rendered message.
+	// Avoids re-highlighting on every frame when the message hasn't changed.
+	lastMsgHighlightText  string
+	lastMsgHighlightMode  string
+	lastMsgHighlightSpans []syntax.Span
 
 	// Elisp evaluator
 	lisp *elisp.Evaluator
@@ -156,11 +161,12 @@ type Editor struct {
 	escPending bool // ESC pressed — next key becomes Meta chord
 
 	// Query replace state.
-	queryReplaceActive bool
-	queryReplaceFrom   string
-	queryReplaceTo     string
-	queryReplaceCursor int // position to search from for next match
-	queryReplaceMatch  int // start of current highlighted match (-1 if none)
+	queryReplaceActive    bool
+	queryReplaceFrom      string
+	queryReplaceFromRunes []rune // cached []rune of queryReplaceFrom; avoids per-frame alloc
+	queryReplaceTo        string
+	queryReplaceCursor    int // position to search from for next match
+	queryReplaceMatch     int // start of current highlighted match (-1 if none)
 
 	// Dired state keyed by buffer pointer.
 	diredStates map[*buffer.Buffer]*diredState
@@ -1543,122 +1549,77 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 		activeMap = e.prefixKeymap
 	}
 
-	// When in a dired buffer, check the dired keymap first (before prefix maps).
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "dired" {
-		if e.diredDispatch(ke) {
+	// Cache the active buffer mode once — used by every mode-dispatch branch below.
+	mode := e.ActiveBuffer().Mode()
+
+	// Mode-specific dispatch when no prefix key is pending.
+	// Extracting mode once and switching avoids 12+ redundant Mode() calls per keystroke.
+	if e.prefixKeymap == nil {
+		var consumed bool
+		switch mode {
+		case "dired":
+			consumed = e.diredDispatch(ke)
+		case "buffer-list":
+			consumed = e.bufferListDispatch(ke)
+		case "vc-log":
+			consumed = e.vcLogDispatch(ke)
+		case "diff", "vc-show":
+			consumed = e.vcDiffDispatch(ke)
+		case "vc-status":
+			consumed = e.vcStatusDispatch(ke)
+		case "compilation":
+			consumed = e.compilationDispatch(ke)
+		case "vc-grep":
+			consumed = e.vcGrepDispatch(ke)
+		case "lsp-refs":
+			consumed = e.lspRefsDispatch(ke)
+		case "help":
+			consumed = e.helpDispatch(ke)
+		case "man":
+			consumed = e.manDispatch(ke)
+		case "shell":
+			consumed = e.shellDispatch(ke)
+		default:
+			if strings.HasPrefix(mode, "vc-annotate") {
+				consumed = e.vcAnnotateDispatch(ke)
+			}
+		}
+		if consumed {
 			return
+		}
+
+		// Debug session: mode-specific single-letter shortcuts.
+		if e.dap != nil {
+			switch mode {
+			case "debug-locals":
+				if e.debugLocalsDispatch(ke) {
+					return
+				}
+			case "debug-stack":
+				if e.debugStackDispatch(ke) {
+					return
+				}
+			case "debug-repl":
+				if e.debugReplDispatch(ke) {
+					return
+				}
+			default:
+				if e.debugSourceDispatch(ke) {
+					return
+				}
+			}
 		}
 	}
 
-	// When in a *Buffer List* buffer, handle navigation and selection.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "buffer-list" {
-		if e.bufferListDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *VC Log* buffer, handle q and Enter.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-log" {
-		if e.vcLogDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *VC Fixup Select* buffer, handle q / C-c C-c.
-	if (e.prefixKeymap == nil || e.prefixKeymap == e.ctrlCKeymap) && e.ActiveBuffer().Mode() == "vc-fixup-select" {
+	// vc-fixup-select: active in both no-prefix and C-c prefix contexts.
+	if (e.prefixKeymap == nil || e.prefixKeymap == e.ctrlCKeymap) && mode == "vc-fixup-select" {
 		if e.vcFixupSelectDispatch(ke) {
 			return
 		}
 	}
 
-	// When in a diff-mode buffer (*vc diff*, *vc show*), handle q/n/p/Enter.
-	if e.prefixKeymap == nil && (e.ActiveBuffer().Mode() == "diff" || e.ActiveBuffer().Mode() == "vc-show") {
-		if e.vcDiffDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *vc status* buffer, handle q and Enter.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-status" {
-		if e.vcStatusDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *compilation* buffer, handle q/g/n/p.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "compilation" {
-		if e.compilationDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *vc grep* buffer, handle q and Enter.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "vc-grep" {
-		if e.vcGrepDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *LSP References* buffer, handle q and Enter.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "lsp-refs" {
-		if e.lspRefsDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *vc-annotate* buffer, handle l/d/q.
-	if e.prefixKeymap == nil && strings.HasPrefix(e.ActiveBuffer().Mode(), "vc-annotate") {
-		if e.vcAnnotateDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *Help* buffer, q closes it.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "help" {
-		if e.helpDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *Man ...* buffer, q closes it.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "man" {
-		if e.manDispatch(ke) {
-			return
-		}
-	}
-
-	// When in a *shell* buffer, forward most keys to the PTY.
-	if e.prefixKeymap == nil && e.ActiveBuffer().Mode() == "shell" {
-		if e.shellDispatch(ke) {
-			return
-		}
-	}
-
-	// Debug: single-letter shortcuts in source buffers when session active.
-	if e.prefixKeymap == nil && e.dap != nil {
-		mode := e.ActiveBuffer().Mode()
-		switch mode {
-		case "debug-locals":
-			if e.debugLocalsDispatch(ke) {
-				return
-			}
-		case "debug-stack":
-			if e.debugStackDispatch(ke) {
-				return
-			}
-		case "debug-repl":
-			if e.debugReplDispatch(ke) {
-				return
-			}
-		default:
-			if e.debugSourceDispatch(ke) {
-				return
-			}
-		}
-	}
-
-	// When in a *VC Commit* buffer, C-c C-c submits and C-c C-k aborts.
-	if e.ActiveBuffer().Mode() == "vc-commit" {
+	// vc-commit: C-c C-c submits, C-c C-k aborts (no prefix restriction).
+	if mode == "vc-commit" {
 		if e.vcCommitDispatch(ke) {
 			return
 		}
@@ -2750,7 +2711,7 @@ func (e *Editor) renderWindow(w *window.Window) {
 	// Query-replace match highlight.
 	qrMatchStart, qrMatchEnd := -1, -1
 	if e.queryReplaceActive && e.queryReplaceMatch >= 0 {
-		needle := []rune(e.queryReplaceFrom)
+		needle := e.queryReplaceFromRunes // pre-cached; avoids allocation on every frame
 		ms := e.queryReplaceMatch
 		me := ms + len(needle)
 		if me <= len(runes) && runesMatch(runes[ms:], needle) {
@@ -2987,9 +2948,16 @@ func (e *Editor) renderMinibuffer() {
 
 	// When showing a plain message (not in minibuf), try to syntax-highlight it
 	// using the active buffer's mode — this makes LSP eldoc signatures readable.
+	// The result is cached by (line, mode) so repeated identical frames cost O(1).
 	if !e.minibufActive && line != "" {
 		hl := highlighterFor(e.ActiveBuffer())
-		spans := hl.Highlight(line, 0, len(runes))
+		mode := e.ActiveBuffer().Mode()
+		if line != e.lastMsgHighlightText || mode != e.lastMsgHighlightMode {
+			e.lastMsgHighlightSpans = hl.Highlight(line, 0, len(runes))
+			e.lastMsgHighlightText = line
+			e.lastMsgHighlightMode = mode
+		}
+		spans := e.lastMsgHighlightSpans
 		for col := range width {
 			ch := rune(' ')
 			face := syntax.FaceMinibuffer
