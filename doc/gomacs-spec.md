@@ -315,3 +315,17 @@ create a new one, then an additional shell is created with the VC repo
 name, e.g. `*shell/gomacs*`. If the current buffer is not in a VC
 repo, use the basename of the current directory. If the
 `*shell/<repo>*` already exists, jump to that buffer.
+
+# Build system
+
+The build tool should be `make` and a `Makefile` in the root
+directory.
+
+`make coverage` should check the code test coverage of `gomacs`. The
+build should fail if the test coverage is below `90%`. Any code
+coverage report or build files should be written to the `build`
+directory. Instead of inline shell for total calculation with bash,
+`sed` and `awk`, put this code in `bin/check-code-coverage.sh` which
+reads `build/coverage.out`. All bash code should be in functions. The
+`awk` code in `bin/<file.awk>`, choose a name that describes what it
+does.
