@@ -18,7 +18,10 @@ const (
 	TokenEOF       TokenType = iota
 	TokenLParen              // (
 	TokenRParen              // )
+	TokenLBracket            // [
+	TokenRBracket            // ]
 	TokenQuote               // '
+	TokenSharpQuote          // #'
 	TokenBackquote           // `
 	TokenComma               // ,
 	TokenCommaAt             // ,@
@@ -152,6 +155,12 @@ func (l *Lexer) readToken() Token {
 	case ')':
 		l.advance()
 		return Token{Type: TokenRParen, Value: ")", Line: line, Column: col}
+	case '[':
+		l.advance()
+		return Token{Type: TokenLBracket, Value: "[", Line: line, Column: col}
+	case ']':
+		l.advance()
+		return Token{Type: TokenRBracket, Value: "]", Line: line, Column: col}
 	case '\'':
 		l.advance()
 		return Token{Type: TokenQuote, Value: "'", Line: line, Column: col}
@@ -182,6 +191,13 @@ func (l *Lexer) readToken() Token {
 	}
 	if (r == '-' || r == '+') && l.pos+1 < len(l.src) && unicode.IsDigit(l.src[l.pos+1]) {
 		return l.readNumber(line, col)
+	}
+
+	// #' is the function reader macro (sharp-quote)
+	if r == '#' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '\'' {
+		l.advance() // consume '#'
+		l.advance() // consume '\''
+		return Token{Type: TokenSharpQuote, Value: "#'", Line: line, Column: col}
 	}
 
 	// Symbol

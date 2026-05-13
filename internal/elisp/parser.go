@@ -207,6 +207,8 @@ func (p *parser) parseForm() (Value, error) {
 		return nil, fmt.Errorf("unexpected EOF")
 	case TokenLParen:
 		return p.parseList()
+	case TokenLBracket:
+		return p.parseVector()
 	case TokenQuote:
 		p.lexer.Next()
 		inner, err := p.parseForm()
@@ -214,6 +216,13 @@ func (p *parser) parseForm() (Value, error) {
 			return nil, err
 		}
 		return List(Symbol{Name: "quote"}, inner), nil
+	case TokenSharpQuote:
+		p.lexer.Next()
+		inner, err := p.parseForm()
+		if err != nil {
+			return nil, err
+		}
+		return List(Symbol{Name: "function"}, inner), nil
 	case TokenBackquote:
 		p.lexer.Next()
 		inner, err := p.parseForm()
@@ -287,6 +296,27 @@ func (p *parser) parseList() (Value, error) {
 		result = Cons{Car: elems[i], Cdr: result}
 	}
 	return result, nil
+}
+
+func (p *parser) parseVector() (Value, error) {
+	p.lexer.Next() // consume '['
+	var elems []Value
+	for {
+		tok := p.lexer.Peek()
+		if tok.Type == TokenEOF {
+			return nil, fmt.Errorf("unterminated vector")
+		}
+		if tok.Type == TokenRBracket {
+			p.lexer.Next()
+			break
+		}
+		v, err := p.parseForm()
+		if err != nil {
+			return nil, err
+		}
+		elems = append(elems, v)
+	}
+	return Vector{Elems: elems}, nil
 }
 
 func (p *parser) parseAtom() (Value, error) {

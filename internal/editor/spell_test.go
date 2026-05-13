@@ -122,3 +122,27 @@ func TestSpellCheckCommentsModes(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// blankHTMLTags
+// ---------------------------------------------------------------------------
+
+func TestBlankHTMLTags(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"hello world", "hello world"},
+		{"<b>bold</b>", "   bold    "},
+		{"no tags here", "no tags here"},
+		{"<br/>", "     "},
+		{"text <em>em</em> text", "text     em      text"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		got := string(blankHTMLTags([]rune(tc.input)))
+		if got != tc.want {
+			t.Errorf("blankHTMLTags(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}

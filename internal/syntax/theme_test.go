@@ -25,7 +25,7 @@ func TestApplySweetTheme_Colors(t *testing.T) {
 		{"header1", &FaceHeader1, "#06c993", ""},
 		{"header2", &FaceHeader2, "#e17df3", ""},
 		{"header3", &FaceHeader3, "#a3a3ff", ""},
-		{"modeline", &FaceModeline, "#a2a9ba", "#13131e"},
+		{"modeline", &FaceModeline, "#06c993", "#13131e"},
 		{"minibuffer", &FaceMinibuffer, "#b8c0d4", "#222235"},
 		{"region", &FaceRegion, "#13131e", "#06c993"},
 		{"isearch", &FaceIsearch, "#13131e", "#f6ce55"},

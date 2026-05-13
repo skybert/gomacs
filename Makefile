@@ -8,7 +8,9 @@ VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "de
 AUTHORS  := $(shell awk 'NR>1{printf ", "} {gsub(/[<>]/, "\\\\&"); printf "%s", $$0} END{print ""}' AUTHORS 2>/dev/null)
 DATE     := $(shell date +%Y-%m-%d)
 
-.PHONY: all build test lint vulncheck fmt clean install man doc dist
+COVERAGE_THRESHOLD := 90
+
+.PHONY: all build test lint vulncheck fmt clean install man doc dist coverage
 
 all: fmt lint test vulncheck build man
 
@@ -27,6 +29,12 @@ run: build
 
 test:
 	go test ./...
+
+coverage:
+	mkdir -p $(BUILDDIR)
+	go test ./... -coverprofile=$(BUILDDIR)/coverage.out
+	go tool cover -html=$(BUILDDIR)/coverage.out -o $(BUILDDIR)/coverage.html
+	bin/check-code-coverage.sh $(COVERAGE_THRESHOLD)
 
 lint:
 	golangci-lint run ./...

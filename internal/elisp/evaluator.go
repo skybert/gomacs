@@ -239,6 +239,10 @@ func (ev *Evaluator) evalCons(c Cons, env *Env) (Value, error) {
 		return ev.evalAnd(c.Cdr, env)
 	case "or":
 		return ev.evalOr(c.Cdr, env)
+	case "while":
+		return ev.evalWhile(c.Cdr, env)
+	case "function":
+		return ev.evalFunction(c.Cdr, env)
 	case "quasiquote":
 		args, ok2 := ToSlice(c.Cdr)
 		if !ok2 || len(args) != 1 {
@@ -606,6 +610,47 @@ func (ev *Evaluator) evalUnless(args Value, env *Env) (Value, error) {
 		}
 	}
 	return result, nil
+}
+
+func (ev *Evaluator) evalWhile(args Value, env *Env) (Value, error) {
+	s, ok := ToSlice(args)
+	if !ok || len(s) < 1 {
+		return nil, fmt.Errorf("while: expected condition and body")
+	}
+	for {
+		cond, err := ev.Eval(s[0], env)
+		if err != nil {
+			return nil, err
+		}
+		if !isTruthy(cond) {
+			return Nil{}, nil
+		}
+		for _, f := range s[1:] {
+			if _, err := ev.Eval(f, env); err != nil {
+				return nil, err
+			}
+		}
+	}
+}
+
+// evalFunction implements (function NAME) — the #' reader macro expands to this.
+// It looks up NAME in the function namespace (env then goFns).
+func (ev *Evaluator) evalFunction(args Value, env *Env) (Value, error) {
+	s, ok := ToSlice(args)
+	if !ok || len(s) != 1 {
+		return nil, fmt.Errorf("function: expected 1 argument")
+	}
+	sym, ok2 := s[0].(Symbol)
+	if !ok2 {
+		return ev.Eval(s[0], env)
+	}
+	if v, ok3 := env.Get(sym.Name); ok3 {
+		return v, nil
+	}
+	if fn, ok3 := ev.goFns[sym.Name]; ok3 {
+		return Builtin{Name: sym.Name, Fn: fn}, nil
+	}
+	return nil, fmt.Errorf("function's definition is void: %s", sym.Name)
 }
 
 func (ev *Evaluator) evalLambda(args Value, env *Env) (Value, error) {
@@ -1219,9 +1264,6 @@ func formatString(args []Value) (string, error) {
 		// No format string: just convert to string
 		return args[0].String(), nil
 	}
-	if len(args) == 1 {
-		return fmtStr.V, nil
-	}
 
 	var sb strings.Builder
 	argIdx := 1
@@ -1232,6 +1274,10 @@ func formatString(args []Value) (string, error) {
 			continue
 		}
 		i++
+		if runes[i] == '%' {
+			sb.WriteRune('%')
+			continue
+		}
 		if argIdx >= len(args) {
 			sb.WriteRune('%')
 			sb.WriteRune(runes[i])
@@ -1265,9 +1311,6 @@ func formatString(args []Value) (string, error) {
 			default:
 				sb.WriteString(v.String())
 			}
-		case '%':
-			sb.WriteRune('%')
-			argIdx-- // no arg consumed
 		default:
 			sb.WriteRune('%')
 			sb.WriteRune(runes[i])
