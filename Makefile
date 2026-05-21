@@ -10,7 +10,7 @@ DATE     := $(shell date +%Y-%m-%d)
 
 COVERAGE_THRESHOLD := 90
 
-.PHONY: all build test lint vulncheck fmt clean install man doc dist coverage
+.PHONY: all build test lint vulncheck fmt clean install man doc dist coverage upgrade
 
 all: fmt lint test vulncheck build man
 
@@ -47,6 +47,10 @@ fmt:
 
 clean:
 	rm -rf $(BUILDDIR) $(DISTDIR)
+
+upgrade:
+	go get -u
+	go mod tidy
 
 install: build
 	mkdir -p ~/.local/bin
