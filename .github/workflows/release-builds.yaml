@@ -38,7 +38,7 @@ jobs:
       - name: gomacs-setup-go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          go-version: '1.25.x'
 
       - name: gomacs-build-dist
         run: make dist

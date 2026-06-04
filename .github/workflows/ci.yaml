@@ -1,0 +1,58 @@
+name: gomacs-ci
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: gomacs-setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: gomacs-fmt-check
+        run: |
+          make fmt
+          if ! git diff --exit-code; then
+            echo "::error::Files are not formatted. Run 'make fmt' and commit the result."
+            exit 1
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: gomacs-setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: gomacs-install-tools
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: gomacs-lint
+        run: make lint
+
+      - name: gomacs-test
+        run: make test
+
+      - name: gomacs-vulncheck
+        run: make vulncheck
+
+      - name: gomacs-build
+        run: make build
