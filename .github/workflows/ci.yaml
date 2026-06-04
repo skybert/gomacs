@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOVULNCHECK_VERSION: v1.3.0
+
 jobs:
   fmt:
     runs-on: ubuntu-latest
@@ -29,6 +32,22 @@ jobs:
             exit 1
           fi
 
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: gomacs-setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: gomacs-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+
   build:
     runs-on: ubuntu-latest
 
@@ -40,13 +59,17 @@ jobs:
         with:
           go-version: '1.25.x'
 
-      - name: gomacs-install-tools
-        run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: gomacs-cache-govulncheck
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin/govulncheck
+          key: govulncheck-${{ runner.os }}-${{ env.GOVULNCHECK_VERSION }}
 
-      - name: gomacs-lint
-        run: make lint
+      - name: gomacs-install-govulncheck
+        run: |
+          if [ ! -x "$(go env GOPATH)/bin/govulncheck" ]; then
+            go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+          fi
 
       - name: gomacs-test
         run: make test
