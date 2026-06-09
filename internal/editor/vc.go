@@ -852,30 +852,41 @@ func (e *Editor) vcDiffGotoSource(buf *buffer.Buffer) bool {
 	filePath := ""
 	newFileLineNum := 0
 
+	// Find the nearest hunk header (@@ …) above the current line; it carries
+	// the new-file starting line for the hunk.
+	hunkIdx := -1
 	for i := curIdx - 1; i >= 0; i-- {
-		l := lines[i]
-		if filePath == "" && strings.HasPrefix(l, "+++ ") {
-			rel := strings.TrimPrefix(l[4:], "b/")
-			filePath = filepath.Join(root, rel)
+		if strings.HasPrefix(lines[i], "@@ ") {
+			hunkIdx = i
+			break
 		}
-		if strings.HasPrefix(l, "@@ ") {
-			fields := strings.Fields(l)
-			if len(fields) >= 3 {
-				newPart := strings.TrimPrefix(fields[2], "+")
-				newPart = strings.Split(newPart, ",")[0]
-				start, _ := strconv.Atoi(newPart)
-				newLine := start
-				for j := i + 1; j < curIdx; j++ {
-					if !strings.HasPrefix(lines[j], "-") {
-						newLine++
-					}
-				}
-				if strings.HasPrefix(curLine, "+") {
+	}
+	if hunkIdx >= 0 {
+		fields := strings.Fields(lines[hunkIdx])
+		if len(fields) >= 3 {
+			newPart := strings.TrimPrefix(fields[2], "+")
+			newPart = strings.Split(newPart, ",")[0]
+			start, _ := strconv.Atoi(newPart)
+			// The current line's new-file number is the hunk start plus the
+			// count of lines present in the new file (i.e. everything except
+			// deletions) between the header and the current line.
+			newLine := start
+			for j := hunkIdx + 1; j < curIdx; j++ {
+				if !strings.HasPrefix(lines[j], "-") {
 					newLine++
 				}
-				newFileLineNum = newLine
 			}
-			break
+			newFileLineNum = newLine
+		}
+		// The file a hunk belongs to is named by the nearest "+++ b/…" header
+		// above the hunk (the +++ line sits above the @@, so we must keep
+		// scanning past the hunk header to find it).
+		for i := hunkIdx - 1; i >= 0; i-- {
+			if strings.HasPrefix(lines[i], "+++ ") {
+				rel := strings.TrimPrefix(lines[i][4:], "b/")
+				filePath = filepath.Join(root, rel)
+				break
+			}
 		}
 	}
 

@@ -76,6 +76,21 @@ func Start(command string, args ...string) (*Client, error) {
 	return c, nil
 }
 
+// NewConnClient builds a Client that speaks LSP over an already-connected pair
+// of streams (stdin to write requests, stdout to read replies).  Unlike Start
+// it does not spawn a server process; it is used to attach to a server reached
+// over existing pipes (and by tests).
+func NewConnClient(stdin io.WriteCloser, stdout io.Reader) *Client {
+	c := &Client{
+		stdin:   stdin,
+		stdout:  bufio.NewReaderSize(stdout, 1<<16),
+		pending: make(map[int]chan callResult),
+		closed:  make(chan struct{}),
+	}
+	go c.readLoop()
+	return c
+}
+
 // SetNotifyHandler installs a callback invoked for every server notification.
 // It is called from the read goroutine; keep it non-blocking.
 func (c *Client) SetNotifyHandler(fn func(method string, params json.RawMessage)) {
@@ -132,7 +147,9 @@ func (c *Client) Close() {
 		_ = c.Notify("exit", nil)
 		close(c.closed)
 		_ = c.stdin.Close()
-		_ = c.cmd.Wait()
+		if c.cmd != nil {
+			_ = c.cmd.Wait()
+		}
 	})
 }
 

@@ -83,3 +83,60 @@ func TestJavaHighlightEmpty(t *testing.T) {
 		t.Errorf("empty input: want no spans, got %d", len(spans))
 	}
 }
+
+func TestJavaHighlightCharLiteral(t *testing.T) {
+	h := JavaHighlighter{}
+	src := "char c = 'a';"
+	spans := h.Highlight(src, 0, len([]rune(src)))
+	if !spanCoversText(spans, src, "'a'") {
+		t.Error("char literal 'a' not highlighted as string")
+	}
+}
+
+func TestJavaHighlightCharLiteralEscape(t *testing.T) {
+	h := JavaHighlighter{}
+	src := "char c = '\\n';"
+	spans := h.Highlight(src, 0, len([]rune(src)))
+	var found bool
+	for _, sp := range spans {
+		if sp.Face == FaceString {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("escaped char literal not highlighted as string")
+	}
+}
+
+func TestJavaHighlightUnterminatedBlockComment(t *testing.T) {
+	h := JavaHighlighter{}
+	src := "/* never closed"
+	spans := h.Highlight(src, 0, len([]rune(src)))
+	if len(spans) == 0 || spans[0].Face != FaceComment {
+		t.Errorf("expected FaceComment for unterminated block comment, got %v", spans)
+	}
+}
+
+func TestJavaHighlightPlainIdentifier(t *testing.T) {
+	h := JavaHighlighter{}
+	src := "myLocalVariable"
+	spans := h.Highlight(src, 0, len([]rune(src)))
+	if len(spans) != 0 {
+		t.Errorf("plain identifier should not be highlighted, got %v", spans)
+	}
+}
+
+func TestJavaHighlightHexNumber(t *testing.T) {
+	h := JavaHighlighter{}
+	src := "int x = 0xCAFE_BABEL;"
+	spans := h.Highlight(src, 0, len([]rune(src)))
+	var found bool
+	for _, sp := range spans {
+		if sp.Face == FaceNumber {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected FaceNumber for hex literal")
+	}
+}

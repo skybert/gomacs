@@ -90,6 +90,10 @@ func TestLangToHighlighter(t *testing.T) {
 		{"markdown", true},
 		{"elisp", true},
 		{"makefile", true},
+		{"perl", true},
+		{"gherkin", true},
+		{"yaml", true},
+		{"GO", true}, // case-insensitive
 		{"unknown", false},
 		{"", false},
 	}
@@ -202,4 +206,98 @@ func TestVcShowHighlighterWithDiff(t *testing.T) {
 	if !foundRemoved {
 		t.Error("expected removed diff line span")
 	}
+}
+
+func TestVcStatusHighlighter(t *testing.T) {
+	h := VcStatusHighlighter{}
+	text := "On branch main\n" +
+		"Your branch is up to date with 'origin/main'.\n" +
+		"\n" +
+		"Changes to be committed:\n" +
+		"  (use \"git restore --staged <file>...\" to unstage)\n" +
+		"\tmodified:   foo.go\n" +
+		"\tnew file:   bar.go\n" +
+		"\tdeleted:    baz.go\n" +
+		"\trenamed:    old.go -> new.go\n" +
+		"\tboth modified: merge.go\n"
+	runes := []rune(text)
+	spans := h.Highlight(text, 0, len(runes))
+
+	// Helper: does any span with the given face cover text containing substr?
+	hasFaceFor := func(substr string, face Face) bool {
+		for _, sp := range spans {
+			s := string(runes[sp.Start:sp.End])
+			if sp.Face == face && containsStr(s, substr) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasFaceFor("On branch main", FaceHeader1) {
+		t.Error("expected FaceHeader1 for 'On branch' line")
+	}
+	if !hasFaceFor("Your branch", FaceComment) {
+		t.Error("expected FaceComment for 'Your branch' line")
+	}
+	if !hasFaceFor("Changes to be committed:", FaceKeyword) {
+		t.Error("expected FaceKeyword for section header line")
+	}
+	if !hasFaceFor("(use", FaceComment) {
+		t.Error("expected FaceComment for '(use ...' hint line")
+	}
+	if !hasFaceFor("modified:", FaceFunction) {
+		t.Error("expected FaceFunction for 'modified:' label")
+	}
+	if !hasFaceFor("new file:", FaceString) {
+		t.Error("expected FaceString for 'new file:' label")
+	}
+	if !hasFaceFor("deleted:", FaceNumber) {
+		t.Error("expected FaceNumber for 'deleted:' label")
+	}
+	if !hasFaceFor("renamed:", FaceType) {
+		t.Error("expected FaceType for 'renamed:' label")
+	}
+	if !hasFaceFor("both modified:", FaceNumber) {
+		t.Error("expected FaceNumber for 'both modified:' label")
+	}
+}
+
+func TestVcStatusHighlighterHeadDetachedAndClean(t *testing.T) {
+	h := VcStatusHighlighter{}
+	text := "HEAD detached at abc1234\n" +
+		"nothing to commit, working tree clean\n"
+	runes := []rune(text)
+	spans := h.Highlight(text, 0, len(runes))
+
+	var foundDetached, foundClean bool
+	for _, sp := range spans {
+		s := string(runes[sp.Start:sp.End])
+		if sp.Face == FaceHeader1 && containsStr(s, "HEAD detached") {
+			foundDetached = true
+		}
+		if sp.Face == FaceComment && containsStr(s, "nothing to commit") {
+			foundClean = true
+		}
+	}
+	if !foundDetached {
+		t.Error("expected FaceHeader1 for 'HEAD detached' line")
+	}
+	if !foundClean {
+		t.Error("expected FaceComment for 'nothing to commit' line")
+	}
+}
+
+// containsStr reports whether s contains substr (small local helper to avoid
+// importing strings in the test file).
+func containsStr(s, substr string) bool {
+	if len(substr) > len(s) {
+		return false
+	}
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

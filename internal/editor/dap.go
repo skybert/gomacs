@@ -37,10 +37,7 @@ func (e *Editor) cmdDebugToggleBreakpoint() {
 		e.Message("debug-toggle-breakpoint: buffer has no file")
 		return
 	}
-	abs, err := filepath.Abs(fname)
-	if err != nil {
-		abs = fname
-	}
+	abs := canonPath(fname)
 	line, _ := buf.LineCol(buf.Point())
 
 	if e.dapBreakpoints[abs] == nil {
@@ -73,7 +70,7 @@ func (e *Editor) dapSyncBreakpoints(absFile string) {
 	client := e.dap.client
 	e.dapAsync(func() func() {
 		_, err := client.Request("setBreakpoints", dap.SetBreakpointsArgs{
-			Source:      dap.Source{Path: absFile, Name: filepath.Base(absFile)},
+			Source:      dap.Source{Path: canonPath(absFile), Name: filepath.Base(absFile)},
 			Breakpoints: bps,
 		})
 		if err != nil {
@@ -98,7 +95,7 @@ func (e *Editor) cmdDebugStart() {
 		return
 	}
 
-	launchArgs, err := e.dapLaunchArgs(buf)
+	launchArgs, runDir, err := e.dapLaunchArgs(buf)
 	if err != nil {
 		e.Message("debug-start: %v", err)
 		return
@@ -116,7 +113,7 @@ func (e *Editor) cmdDebugStart() {
 	}
 
 	e.dapAsync(func() func() {
-		c, startErr := dap.Start(cmd, args...)
+		c, startErr := dap.Start(runDir, cmd, args...)
 		if startErr != nil {
 			return func() {
 				e.dap = nil
@@ -163,7 +160,7 @@ func (e *Editor) cmdDebugStart() {
 				bps = append(bps, dap.SourceBreakpoint{Line: l})
 			}
 			_, _ = c.Request("setBreakpoints", dap.SetBreakpointsArgs{
-				Source:      dap.Source{Path: file, Name: filepath.Base(file)},
+				Source:      dap.Source{Path: canonPath(file), Name: filepath.Base(file)},
 				Breakpoints: bps,
 			})
 		}
@@ -192,23 +189,38 @@ func (e *Editor) cmdDebugStart() {
 	})
 }
 
+// canonPath returns a canonical absolute path for p, resolving symlinks.  This
+// matters because debug adapters (delve) canonicalize their module and DWARF
+// source paths — on macOS the temp/working dirs reached via /var resolve to
+// /private/var, and a mismatch breaks both the build ("outside main module")
+// and breakpoint binding.  Falls back to filepath.Abs, then the original.
+func canonPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	if a, err := filepath.Abs(p); err == nil {
+		return a
+	}
+	return p
+}
+
 // dapLaunchArgs returns the launch arguments for the current buffer, detecting
-// whether it should run as a test, a main program, or a headless server.
-func (e *Editor) dapLaunchArgs(buf *buffer.Buffer) (dap.LaunchArgs, error) {
+// whether it should run as a test, a main program, or a headless server.  It
+// also returns the directory the adapter process should run in (the module
+// root), so that delve's `go build` runs inside the target's module.
+func (e *Editor) dapLaunchArgs(buf *buffer.Buffer) (dap.LaunchArgs, string, error) {
 	fname := buf.Filename()
 	if fname == "" {
-		return nil, fmt.Errorf("buffer has no associated file")
+		return nil, "", fmt.Errorf("buffer has no associated file")
 	}
-	abs, err := filepath.Abs(fname)
-	if err != nil {
-		abs = fname
-	}
+	abs := canonPath(fname)
 
 	info := langModeByName(buf.Mode())
 	root := ""
 	if info != nil {
 		root = findProjectRoot(abs, info.rootMarkers)
-	} else {
+	}
+	if root == "" {
 		root = filepath.Dir(abs)
 	}
 
@@ -219,20 +231,20 @@ func (e *Editor) dapLaunchArgs(buf *buffer.Buffer) (dap.LaunchArgs, error) {
 			"mode":    "test",
 			"program": filepath.Dir(abs), // package dir, not module root
 			"args":    []string{"-test.run", testName},
-		}, nil
+		}, root, nil
 
 	case bufContainsMainFunc(buf):
 		return dap.LaunchArgs{
 			"mode":    "debug",
 			"program": filepath.Dir(abs),
-		}, nil
+		}, root, nil
 
 	default:
 		// Server / library: start headless.
 		return dap.LaunchArgs{
 			"mode":    "debug",
 			"program": root,
-		}, nil
+		}, root, nil
 	}
 }
 
@@ -534,8 +546,10 @@ func (e *Editor) dapFetchStoppedInfo(ev dap.StoppedEvent) {
 				e.dap.stoppedLine = top.Line
 				if e.dap.prevActiveWin != nil {
 					win := e.dap.prevActiveWin
-					// If we stepped into a different file, load it.
-					if top.Source.Path != "" && win.Buf().Filename() != top.Source.Path {
+					// If we stepped into a different file, load it.  Compare
+					// canonical paths so the same file under a different spelling
+					// (e.g. /var vs /private/var) is not reloaded into a dup buffer.
+					if top.Source.Path != "" && canonPath(win.Buf().Filename()) != canonPath(top.Source.Path) {
 						if fileBuf, err := e.openFileIntoBuffer(top.Source.Path); err == nil {
 							win.SetBuf(fileBuf)
 						}

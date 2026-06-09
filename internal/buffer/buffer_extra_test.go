@@ -444,3 +444,193 @@ func TestGrowGapPreservesContent(t *testing.T) {
 		t.Errorf("content mismatch after forced growGap (len=%d, want %d)", b.Len(), len([]rune(want)))
 	}
 }
+
+// growGap: when the buffer is large, grow is driven by len(data)/4 rather than
+// the small requested extra.
+func TestGrowGapQuarterDriven(t *testing.T) {
+	b := New("t")
+	base := strings.Repeat("z", initialGapSize*8)
+	b.InsertString(0, base)
+	// Buffer now large with a small remaining gap; insert one rune at a time
+	// to force a growGap where len(data)/4 exceeds the requested extra.
+	b.InsertString(b.Len(), "tail")
+	if !strings.HasSuffix(b.String(), "tail") {
+		t.Errorf("growGap quarter-driven: content corrupted, suffix=%q", b.String()[len(b.String())-4:])
+	}
+}
+
+// ---- SetMode ---------------------------------------------------------------
+
+func TestSetModeValid(t *testing.T) {
+	b := New("t")
+	b.SetMode("go")
+	if b.Mode() != "go" {
+		t.Errorf("SetMode go = %q, want go", b.Mode())
+	}
+}
+
+func TestSetModeVcAnnotatePrefix(t *testing.T) {
+	b := New("t")
+	b.SetMode("vc-annotate+go")
+	if b.Mode() != "vc-annotate+go" {
+		t.Errorf("SetMode vc-annotate+go = %q, want vc-annotate+go", b.Mode())
+	}
+}
+
+func TestSetModeInvalidFallsBackToFundamental(t *testing.T) {
+	b := New("t")
+	b.SetMode("go") // start from a non-default mode
+	b.SetMode("nonsense-mode")
+	if b.Mode() != modeFundamental {
+		t.Errorf("SetMode invalid = %q, want %q", b.Mode(), modeFundamental)
+	}
+}
+
+// ---- rawIndex (post-gap branch) --------------------------------------------
+
+func TestRuneAtAfterGap(t *testing.T) {
+	b := NewWithContent("t", "abcdef")
+	// Move gap to the middle by inserting mid-buffer; positions >= gapStart
+	// exercise the post-gap branch of rawIndex.
+	b.Insert(2, 'X')
+	// Now "abXcdef"; position 5 (>= gapStart) exercises the post-gap branch.
+	if got := b.RuneAt(5); got != 'e' {
+		t.Errorf("RuneAt(5) after gap = %q, want 'e'", got)
+	}
+}
+
+// ---- InsertString empty ----------------------------------------------------
+
+func TestInsertStringEmptyNoOp(t *testing.T) {
+	b := NewWithContent("t", "hello")
+	mc := b.ModCount()
+	b.InsertString(2, "")
+	if b.String() != "hello" {
+		t.Errorf("InsertString empty changed content: %q", b.String())
+	}
+	if b.ModCount() != mc {
+		t.Errorf("InsertString empty bumped ModCount: %d, want %d", b.ModCount(), mc)
+	}
+}
+
+// ---- insertRunes / deleteRunes incremental line count ----------------------
+
+func TestInsertUpdatesLineCountDelta(t *testing.T) {
+	b := NewWithContent("t", "a\nb")
+	if b.LineCount() != 2 { // seeds lineCountReady
+		t.Fatalf("initial LineCount = %d, want 2", b.LineCount())
+	}
+	b.InsertString(b.Len(), "\nc\nd")
+	if b.LineCount() != 4 {
+		t.Errorf("LineCount after inserting newlines = %d, want 4", b.LineCount())
+	}
+}
+
+func TestDeleteUpdatesLineCountDelta(t *testing.T) {
+	b := NewWithContent("t", "a\nb\nc")
+	if b.LineCount() != 3 { // seeds lineCountReady
+		t.Fatalf("initial LineCount = %d, want 3", b.LineCount())
+	}
+	b.Delete(1, 2) // remove "\nb"
+	if b.LineCount() != 2 {
+		t.Errorf("LineCount after deleting a newline = %d, want 2", b.LineCount())
+	}
+}
+
+// ---- insertRunes / deleteRunes mark adjustment -----------------------------
+
+func TestInsertShiftsMark(t *testing.T) {
+	b := NewWithContent("t", "hello")
+	b.SetMark(3)
+	b.InsertString(0, "AB")
+	if b.Mark() != 5 {
+		t.Errorf("mark after insert before it = %d, want 5", b.Mark())
+	}
+}
+
+func TestDeleteShiftsMarkBeyondRange(t *testing.T) {
+	b := NewWithContent("t", "hello world")
+	b.SetMark(9)
+	b.Delete(0, 6) // delete "hello "
+	if b.Mark() != 3 {
+		t.Errorf("mark after delete before it = %d, want 3", b.Mark())
+	}
+}
+
+func TestDeleteClampsMarkInsideRange(t *testing.T) {
+	b := NewWithContent("t", "hello world")
+	b.SetMark(3) // inside the deleted range
+	b.Delete(1, 5)
+	if b.Mark() != 1 {
+		t.Errorf("mark inside deleted range = %d, want 1 (clamped to pos)", b.Mark())
+	}
+}
+
+// ---- Delete edge cases -----------------------------------------------------
+
+func TestDeleteNegativePosClamped(t *testing.T) {
+	b := NewWithContent("t", "hello")
+	got := b.Delete(-3, 2)
+	if got != "he" {
+		t.Errorf("Delete(-3,2) = %q, want %q", got, "he")
+	}
+}
+
+func TestDeletePosBeyondLen(t *testing.T) {
+	b := NewWithContent("t", "hello")
+	if got := b.Delete(100, 2); got != "" {
+		t.Errorf("Delete past end = %q, want empty", got)
+	}
+}
+
+// ---- Narrow clamping -------------------------------------------------------
+
+func TestNarrowClampsNegativeMin(t *testing.T) {
+	b := NewWithContent("t", "0123456789")
+	b.Narrow(-5, 4)
+	if b.NarrowMin() != 0 {
+		t.Errorf("Narrow negative min = %d, want 0", b.NarrowMin())
+	}
+}
+
+func TestNarrowClampsMaxBeyondLen(t *testing.T) {
+	b := NewWithContent("t", "0123456789")
+	b.Narrow(2, 100)
+	if b.NarrowMax() != b.Len() {
+		t.Errorf("Narrow max beyond len = %d, want %d", b.NarrowMax(), b.Len())
+	}
+}
+
+// ---- LineCount cached path -------------------------------------------------
+
+func TestLineCountCachedSecondCall(t *testing.T) {
+	b := NewWithContent("t", "a\nb\nc")
+	first := b.LineCount()
+	second := b.LineCount() // hits the lineCountReady fast path
+	if first != second || second != 3 {
+		t.Errorf("LineCount cached = %d/%d, want 3", first, second)
+	}
+}
+
+// ---- LineCol cache hit + clamp ---------------------------------------------
+
+func TestLineColCacheHit(t *testing.T) {
+	b := NewWithContent("t", "ab\ncd")
+	l1, c1 := b.LineCol(4)
+	l2, c2 := b.LineCol(4) // same gen + pos → cached
+	if l1 != l2 || c1 != c2 {
+		t.Errorf("LineCol cache mismatch: (%d,%d) vs (%d,%d)", l1, c1, l2, c2)
+	}
+	if l1 != 2 || c1 != 1 {
+		t.Errorf("LineCol(4) = (%d,%d), want (2,1)", l1, c1)
+	}
+}
+
+func TestLineColClampsPastEnd(t *testing.T) {
+	b := NewWithContent("t", "ab\ncd")
+	line, col := b.LineCol(b.Len() + 10)
+	wantLine, wantCol := b.LineCol(b.Len())
+	if line != wantLine || col != wantCol {
+		t.Errorf("LineCol past end = (%d,%d), want (%d,%d)", line, col, wantLine, wantCol)
+	}
+}

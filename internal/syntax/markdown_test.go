@@ -147,3 +147,79 @@ func TestMarkdownWindowFilter(t *testing.T) {
 		t.Errorf("expected FaceBlockquote span for second line")
 	}
 }
+
+func TestMarkdownLinkUnterminated(t *testing.T) {
+	// '[' with no closing ']' — should not be highlighted as a link.
+	text := "see [Go for details\n"
+	spans := mdHighlight(text)
+	if sp := findSpanWithFace(spans, FaceLink); sp != nil {
+		t.Errorf("unterminated link should not produce FaceLink span: %v", sp)
+	}
+}
+
+func TestMarkdownLinkMissingParen(t *testing.T) {
+	// '[text]' with no following '(' — not a link.
+	text := "see [Go] here\n"
+	spans := mdHighlight(text)
+	if sp := findSpanWithFace(spans, FaceLink); sp != nil {
+		t.Errorf("[text] without (url) should not be a link: %v", sp)
+	}
+}
+
+func TestMarkdownLinkUnterminatedURL(t *testing.T) {
+	// '[text](url' with no closing ')' — not a link.
+	text := "see [Go](http://go.dev here\n"
+	spans := mdHighlight(text)
+	if sp := findSpanWithFace(spans, FaceLink); sp != nil {
+		t.Errorf("[text](url without ) should not be a link: %v", sp)
+	}
+}
+
+func TestMarkdownInlineCodeUnterminated(t *testing.T) {
+	// Backtick with no closing backtick — not inline code.
+	text := "use `code here\n"
+	spans := mdHighlight(text)
+	if sp := findSpanWithFace(spans, FaceCode); sp != nil {
+		t.Errorf("unterminated inline code should not produce FaceCode span: %v", sp)
+	}
+}
+
+func TestMarkdownInlineCodeEmpty(t *testing.T) {
+	// `` (empty delimited span) — skipped.
+	text := "empty `` here\n"
+	spans := mdHighlight(text)
+	if sp := findSpanWithFace(spans, FaceCode); sp != nil {
+		t.Errorf("empty `` should not produce FaceCode span: %v", sp)
+	}
+}
+
+func TestMarkdownBoldUnterminated(t *testing.T) {
+	// '**bold' with no closing '**' — not bold.
+	text := "this is **bold\n"
+	spans := mdHighlight(text)
+	if sp := findSpanWithFace(spans, FaceBold); sp != nil {
+		t.Errorf("unterminated bold should not produce FaceBold span: %v", sp)
+	}
+}
+
+func TestMarkdownItalicUnterminated(t *testing.T) {
+	// '*italic' with no closing '*' — not italic.
+	text := "this is *italic\n"
+	spans := mdHighlight(text)
+	if sp := findSpanWithFace(spans, FaceItalic); sp != nil {
+		t.Errorf("unterminated italic should not produce FaceItalic span: %v", sp)
+	}
+}
+
+func TestMarkdownNoTrailingNewline(t *testing.T) {
+	// splitLines path where the final line has no trailing '\n'.
+	text := "# Header"
+	spans := mdHighlight(text)
+	requireSpan(t, spans, FaceHeader1, "expected FaceHeader1 span without trailing newline")
+}
+
+func TestMarkdownHeader3(t *testing.T) {
+	text := "### Sub-sub heading\n"
+	spans := mdHighlight(text)
+	requireSpan(t, spans, FaceHeader3, "expected FaceHeader3 span")
+}

@@ -2090,3 +2090,610 @@ func TestString_Builtin(t *testing.T) {
 		t.Fatalf("Builtin{car}.String() = %q, want \"#<builtin car>\"", b.String())
 	}
 }
+
+// wantErr evaluates src and fails unless an error is returned.
+func wantErr(t *testing.T, ev *Evaluator, src string) {
+	t.Helper()
+	if _, err := ev.EvalString(src); err == nil {
+		t.Fatalf("EvalString(%q): expected error, got nil", src)
+	}
+}
+
+// -------------------------------------------------------------------
+// Special-form error and edge-case branches
+// -------------------------------------------------------------------
+
+func TestEval_SetqOddArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(setq a)")
+}
+
+func TestEval_SetqNonSymbolErrors(t *testing.T) {
+	wantErr(t, newEval(), "(setq 1 2)")
+}
+
+func TestEval_SetqEvalErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(setq x undefined-xyz)")
+}
+
+func TestEval_DefvarNoArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(defvar)")
+}
+
+func TestEval_DefvarNonSymbolErrors(t *testing.T) {
+	wantErr(t, newEval(), "(defvar 5 1)")
+}
+
+func TestEval_DefvarDoesNotOverride(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, "(setq dv 10)")
+	mustEval(t, ev, "(defvar dv 99)")
+	if got := mustEval(t, ev, "dv"); got.(Int).V != 10 {
+		t.Fatalf("defvar overrode existing var: got %v", got)
+	}
+}
+
+func TestEval_DefvarNoValueOnNewSymbol(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(defvar only-decl)")
+	if s, ok := v.(Symbol); !ok || s.Name != "only-decl" {
+		t.Fatalf("defvar return: want symbol only-decl, got %v", v)
+	}
+}
+
+func TestEval_DefvarValueEvalErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(defvar nv undefined-xyz)")
+}
+
+func TestEval_DefunTooFewArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(defun foo)")
+}
+
+func TestEval_DefunNonSymbolNameErrors(t *testing.T) {
+	wantErr(t, newEval(), "(defun 5 () 1)")
+}
+
+func TestEval_DefunBadParamListErrors(t *testing.T) {
+	wantErr(t, newEval(), "(defun foo (1) 1)")
+}
+
+func TestEval_IfTooFewArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(if t)")
+}
+
+func TestEval_IfCondErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(if undefined-xyz 1 2)")
+}
+
+func TestEval_IfElseProgn(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(if nil 0 1 2 3)")
+	if i, ok := v.(Int); !ok || i.V != 3 {
+		t.Fatalf("if multi-else: want 3, got %v", v)
+	}
+}
+
+func TestEval_IfElseErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(if nil 1 undefined-xyz)")
+}
+
+func TestEval_CondInvalidClauseErrors(t *testing.T) {
+	wantErr(t, newEval(), "(cond 5)")
+}
+
+func TestEval_CondTestErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(cond (undefined-xyz 1))")
+}
+
+func TestEval_CondSingleElementClause(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(cond (42))")
+	if i, ok := v.(Int); !ok || i.V != 42 {
+		t.Fatalf("cond single-element: want 42, got %v", v)
+	}
+}
+
+func TestEval_CondBodyErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(cond (t undefined-xyz))")
+}
+
+func TestEval_PrognErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(progn 1 undefined-xyz)")
+}
+
+func TestEval_LetNoArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(let)")
+}
+
+func TestEval_LetBadBindingListErrors(t *testing.T) {
+	wantErr(t, newEval(), "(let 5 1)")
+}
+
+func TestEval_LetBindingNameNotSymbolErrors(t *testing.T) {
+	wantErr(t, newEval(), "(let ((1 2)) 1)")
+}
+
+func TestEval_LetUnexpectedBindingTypeErrors(t *testing.T) {
+	wantErr(t, newEval(), "(let (5) 1)")
+}
+
+func TestEval_LetSymbolBindingDefaultsNil(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(let (x) x)"); !IsNil(v) {
+		t.Fatalf("let bare symbol: want nil, got %v", v)
+	}
+}
+
+func TestEval_LetEmptyConsBinding(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(let ((x)) x)"); !IsNil(v) {
+		t.Fatalf("let empty cons binding: want nil, got %v", v)
+	}
+}
+
+func TestEval_LetNilBindingSkipped(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(let (()) 7)"); v.(Int).V != 7 {
+		t.Fatalf("let nil binding: want 7, got %v", v)
+	}
+}
+
+func TestEval_LetBindingValueErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(let ((x undefined-xyz)) x)")
+}
+
+func TestEval_LetBodyErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(let ((x 1)) undefined-xyz)")
+}
+
+func TestEval_WhenNoArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(when)")
+}
+
+func TestEval_WhenCondErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(when undefined-xyz 1)")
+}
+
+func TestEval_WhenFalseReturnsNil(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(when nil 1)"); !IsNil(v) {
+		t.Fatalf("when nil: want nil, got %v", v)
+	}
+}
+
+func TestEval_WhenBodyErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(when t undefined-xyz)")
+}
+
+func TestEval_UnlessNoArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(unless)")
+}
+
+func TestEval_UnlessCondErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(unless undefined-xyz 1)")
+}
+
+func TestEval_UnlessTrueReturnsNil(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(unless t 1)"); !IsNil(v) {
+		t.Fatalf("unless t: want nil, got %v", v)
+	}
+}
+
+func TestEval_UnlessBodyErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(unless nil undefined-xyz)")
+}
+
+func TestEval_WhileNoArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(while)")
+}
+
+func TestEval_WhileCondErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(while undefined-xyz 1)")
+}
+
+func TestEval_WhileBodyErrorPropagates(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, "(setq i 0)")
+	wantErr(t, ev, "(while (= i 0) (setq i 1) undefined-xyz)")
+}
+
+func TestEval_WhileLoops(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, "(setq i 0)")
+	mustEval(t, ev, "(while (< i 3) (setq i (+ i 1)))")
+	if got := mustEval(t, ev, "i"); got.(Int).V != 3 {
+		t.Fatalf("while loop: want i=3, got %v", got)
+	}
+}
+
+func TestEval_FunctionWrongArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(function)")
+}
+
+func TestEval_FunctionVoidErrors(t *testing.T) {
+	wantErr(t, newEval(), "(function never-defined-xyz)")
+}
+
+func TestEval_FunctionNonSymbolEvaluates(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(function (lambda (x) x))")
+	if _, ok := v.(Lambda); !ok {
+		t.Fatalf("function on lambda form: want Lambda, got %T", v)
+	}
+}
+
+func TestEval_FunctionUserDefined(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, "(defun myf (x) x)")
+	v := mustEval(t, ev, "(function myf)")
+	if _, ok := v.(Lambda); !ok {
+		t.Fatalf("function myf: want Lambda, got %T", v)
+	}
+}
+
+func TestEval_LambdaNoArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(lambda)")
+}
+
+func TestEval_LambdaBadParamListErrors(t *testing.T) {
+	wantErr(t, newEval(), "(lambda 5 1)")
+}
+
+func TestEval_AndEmptyReturnsT(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(and)"); !isTruthy(v) {
+		t.Fatalf("(and): want t, got %v", v)
+	}
+}
+
+func TestEval_AndErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(and t undefined-xyz)")
+}
+
+func TestEval_AndShortCircuits(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(and 1 nil 2)"); !IsNil(v) {
+		t.Fatalf("(and 1 nil 2): want nil, got %v", v)
+	}
+}
+
+func TestEval_OrEmptyReturnsNil(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(or)"); !IsNil(v) {
+		t.Fatalf("(or): want nil, got %v", v)
+	}
+}
+
+func TestEval_OrErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(or nil undefined-xyz)")
+}
+
+func TestEval_QuasiquoteUnquote(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(setq x 3) `(a ,x b)")
+	if got := v.String(); got != "(a 3 b)" {
+		t.Fatalf("quasiquote unquote: want (a 3 b), got %q", got)
+	}
+}
+
+func TestEval_QuasiquoteAtom(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "`5"); v.(Int).V != 5 {
+		t.Fatalf("quasiquote atom: want 5, got %v", v)
+	}
+}
+
+func TestEval_QuasiquoteUnquoteErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "`(a ,undefined-xyz)")
+}
+
+func TestEval_LambdaTooManyArgsErrors(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, "(defun one (x) x)")
+	wantErr(t, ev, "(one 1 2)")
+}
+
+func TestEval_LambdaRestCollectsExtra(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, "(defun collect (a &rest r) r)")
+	v := mustEval(t, ev, "(collect 1 2 3)")
+	if got := v.String(); got != "(2 3)" {
+		t.Fatalf("&rest collect: want (2 3), got %q", got)
+	}
+}
+
+func TestEval_LambdaMissingArgsDefaultNil(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, "(defun pair (a b) b)")
+	if v := mustEval(t, ev, "(pair 1)"); !IsNil(v) {
+		t.Fatalf("missing arg default: want nil, got %v", v)
+	}
+}
+
+func TestEval_ConsHeadNotSymbolCalls(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "((lambda (x) (+ x 1)) 4)")
+	if v.(Int).V != 5 {
+		t.Fatalf("direct lambda call: want 5, got %v", v)
+	}
+}
+
+func TestEval_CallNonFunctionErrors(t *testing.T) {
+	wantErr(t, newEval(), "(5 1 2)")
+}
+
+func TestEval_VectorEvaluatesElements(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, "(setq y 9)")
+	v := mustEval(t, ev, "[1 y 3]")
+	vec, ok := v.(Vector)
+	if !ok || len(vec.Elems) != 3 || vec.Elems[1].(Int).V != 9 {
+		t.Fatalf("vector eval: got %v", v)
+	}
+}
+
+func TestEval_VectorElementErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "[1 undefined-xyz]")
+}
+
+func TestEval_SelfEvaluatingAtoms(t *testing.T) {
+	ev := newEval()
+	for _, src := range []string{"42", "3.5", `"hi"`, "t", "nil"} {
+		if _, err := ev.EvalString(src); err != nil {
+			t.Fatalf("self-eval %q: %v", src, err)
+		}
+	}
+}
+
+func TestEval_QuasiquoteWrongArgsErrors(t *testing.T) {
+	ev := newEval()
+	form, err := ParseOne("(quasiquote 1 2)")
+	if err != nil {
+		t.Fatalf("ParseOne: %v", err)
+	}
+	if _, err := ev.Eval(form, ev.global); err == nil {
+		t.Fatal("quasiquote with 2 args: expected error")
+	}
+}
+
+// -------------------------------------------------------------------
+// numericFold / numericFoldFrom / numericCompare error paths
+// -------------------------------------------------------------------
+
+func TestEval_AddNonNumberErrors(t *testing.T) {
+	wantErr(t, newEval(), `(+ 1 "x")`)
+}
+
+func TestEval_AddFloatNonNumberErrors(t *testing.T) {
+	wantErr(t, newEval(), `(+ 1.0 "x")`)
+}
+
+func TestEval_SubNonNumberErrors(t *testing.T) {
+	wantErr(t, newEval(), `(- 1 "x")`)
+}
+
+func TestEval_SubSingleNonNumberErrors(t *testing.T) {
+	wantErr(t, newEval(), `(- "x")`)
+}
+
+func TestEval_SubFloatFirstNonNumber(t *testing.T) {
+	wantErr(t, newEval(), `(- "x" 1.0)`)
+}
+
+func TestEval_DivFloat(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(/ 6.0 2)")
+	if f, ok := v.(Float); !ok || f.V != 3.0 {
+		t.Fatalf("(/ 6.0 2): want 3.0, got %v", v)
+	}
+}
+
+func TestEval_CompareNonNumberErrors(t *testing.T) {
+	wantErr(t, newEval(), `(< 1 "x")`)
+}
+
+func TestEval_CompareTooFewArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(< 1)")
+}
+
+// -------------------------------------------------------------------
+// Builtin coverage: success and error branches
+// -------------------------------------------------------------------
+
+func TestEval_LengthVector(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(length [1 2 3])"); v.(Int).V != 3 {
+		t.Fatalf("length vector: want 3, got %v", v)
+	}
+}
+
+func TestEval_LengthImproperErrors(t *testing.T) {
+	wantErr(t, newEval(), "(length (cons 1 2))")
+}
+
+func TestEval_LengthWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(length)")
+}
+
+func TestEval_MessageNoArgs(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(message)"); v.(StringVal).V != "" {
+		t.Fatalf("message no args: want empty, got %v", v)
+	}
+}
+
+func TestEval_MessageFormat(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, `(message "hi %d" 5)`); v.(StringVal).V != "hi 5" {
+		t.Fatalf("message format: want \"hi 5\", got %v", v)
+	}
+}
+
+func TestEval_StringToIntWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(string-to-int)")
+}
+
+func TestEval_StringToIntNonStringErrors(t *testing.T) {
+	wantErr(t, newEval(), "(string-to-int 42)")
+}
+
+func TestEval_StringToIntBadFormatErrors(t *testing.T) {
+	wantErr(t, newEval(), `(string-to-int "abc")`)
+}
+
+func TestEval_IntToStringFloat(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(int-to-string 2.5)"); v.(StringVal).V != "2.5" {
+		t.Fatalf("int-to-string float: want 2.5, got %v", v)
+	}
+}
+
+func TestEval_IntToStringWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(int-to-string)")
+}
+
+func TestEval_IntToStringNonNumberErrors(t *testing.T) {
+	wantErr(t, newEval(), `(int-to-string "x")`)
+}
+
+func TestEval_NumberToStringWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(number-to-string)")
+}
+
+func TestEval_NumberToStringNonNumberErrors(t *testing.T) {
+	wantErr(t, newEval(), `(number-to-string "x")`)
+}
+
+func TestEval_StringpWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(stringp)")
+}
+
+func TestEval_StringpFalse(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(stringp 5)"); !IsNil(v) {
+		t.Fatalf("stringp 5: want nil, got %v", v)
+	}
+}
+
+func TestEval_NumberpFloatAndFalse(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(numberp 1.5)"); !isTruthy(v) {
+		t.Fatalf("numberp float: want t, got %v", v)
+	}
+	if v := mustEval(t, ev, `(numberp "x")`); !IsNil(v) {
+		t.Fatalf("numberp string: want nil, got %v", v)
+	}
+}
+
+func TestEval_NumberpWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(numberp)")
+}
+
+func TestEval_SymbolpVariants(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(symbolp 'foo)"); !isTruthy(v) {
+		t.Fatalf("symbolp 'foo: want t, got %v", v)
+	}
+	if v := mustEval(t, ev, "(symbolp nil)"); !isTruthy(v) {
+		t.Fatalf("symbolp nil: want t, got %v", v)
+	}
+	if v := mustEval(t, ev, "(symbolp 5)"); !IsNil(v) {
+		t.Fatalf("symbolp 5: want nil, got %v", v)
+	}
+}
+
+func TestEval_SymbolpWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(symbolp)")
+}
+
+func TestEval_ListpVariants(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(listp '(1))"); !isTruthy(v) {
+		t.Fatalf("listp list: want t, got %v", v)
+	}
+	if v := mustEval(t, ev, "(listp nil)"); !isTruthy(v) {
+		t.Fatalf("listp nil: want t, got %v", v)
+	}
+	if v := mustEval(t, ev, "(listp 5)"); !IsNil(v) {
+		t.Fatalf("listp 5: want nil, got %v", v)
+	}
+}
+
+func TestEval_ListpWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(listp)")
+}
+
+func TestEval_FunctionpWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(functionp)")
+}
+
+func TestEval_GlobalSetKeyWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), `(global-set-key "C-x")`)
+}
+
+func TestEval_GlobalSetKeyNonStringKeyErrors(t *testing.T) {
+	wantErr(t, newEval(), "(global-set-key 5 'foo)")
+}
+
+func TestEval_GlobalSetKeyOtherCommand(t *testing.T) {
+	ev := newEval()
+	mustEval(t, ev, `(global-set-key "C-y" 5)`)
+	if ev.keyBindings["C-y"] != "5" {
+		t.Fatalf("global-set-key int cmd: got %q", ev.keyBindings["C-y"])
+	}
+}
+
+func TestEval_KbdWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(kbd)")
+}
+
+func TestEval_KbdNonStringErrors(t *testing.T) {
+	wantErr(t, newEval(), "(kbd 5)")
+}
+
+func TestEval_RequireNoArgs(t *testing.T) {
+	ev := newEval()
+	if v := mustEval(t, ev, "(require)"); !IsNil(v) {
+		t.Fatalf("require no args: want nil, got %v", v)
+	}
+}
+
+func TestEval_LoadWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(load)")
+}
+
+func TestEval_LoadNonStringErrors(t *testing.T) {
+	wantErr(t, newEval(), "(load 5)")
+}
+
+func TestEval_FuncallNoArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(funcall)")
+}
+
+func TestEval_ApplyTooFewArgsErrors(t *testing.T) {
+	wantErr(t, newEval(), "(apply '+)")
+}
+
+func TestEval_ApplyLastNotListErrors(t *testing.T) {
+	wantErr(t, newEval(), "(apply '+ 5)")
+}
+
+func TestEval_MapcarWrongArgCountErrors(t *testing.T) {
+	wantErr(t, newEval(), "(mapcar (lambda (x) x))")
+}
+
+func TestEval_MapcarNonListErrors(t *testing.T) {
+	wantErr(t, newEval(), "(mapcar (lambda (x) x) 5)")
+}
+
+func TestEval_MapcarFnErrorPropagates(t *testing.T) {
+	wantErr(t, newEval(), "(mapcar 'car '(1 2))")
+}
+
+func TestEval_ConcatSymbolAndOther(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, `(concat "a" 'b 3)`)
+	if v.(StringVal).V != "ab3" {
+		t.Fatalf("concat mixed: want ab3, got %v", v)
+	}
+}

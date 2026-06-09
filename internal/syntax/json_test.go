@@ -128,3 +128,46 @@ func TestJSONMixed(t *testing.T) {
 		t.Errorf("expected 2 keyword spans (true, null), got %d", kwCount)
 	}
 }
+
+func TestJSONExponent(t *testing.T) {
+	spans := jsonSpans(`{"x": 6.022e+23}`)
+	if _, ok := findJSONSpan(spans, FaceNumber); !ok {
+		t.Error("expected FaceNumber for exponent literal")
+	}
+}
+
+func TestJSONNegativeExponent(t *testing.T) {
+	spans := jsonSpans(`{"x": 1E-9}`)
+	if _, ok := findJSONSpan(spans, FaceNumber); !ok {
+		t.Error("expected FaceNumber for negative exponent literal")
+	}
+}
+
+func TestJSONUnterminatedString(t *testing.T) {
+	spans := jsonSpans(`{"key": "value`)
+	if _, ok := findJSONSpan(spans, FaceString); !ok {
+		t.Error("expected FaceString even for unterminated string")
+	}
+}
+
+func TestJSONIncompleteKeyword(t *testing.T) {
+	// "tru" is not "true" and must not be highlighted as a keyword.
+	spans := jsonSpans("tru")
+	if _, ok := findJSONSpan(spans, FaceKeyword); ok {
+		t.Error("incomplete keyword should not be highlighted")
+	}
+}
+
+func TestJSONLoneMinus(t *testing.T) {
+	// A lone '-' advances j past the sign, so j > i and a span is emitted.
+	spans := jsonSpans("-")
+	if _, ok := findJSONSpan(spans, FaceNumber); !ok {
+		t.Error("lone '-' is treated as the start of a number span")
+	}
+}
+
+func TestJSONEmpty(t *testing.T) {
+	if spans := jsonSpans(""); len(spans) != 0 {
+		t.Errorf("expected no spans for empty JSON, got %v", spans)
+	}
+}

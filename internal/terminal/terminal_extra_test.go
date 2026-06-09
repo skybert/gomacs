@@ -343,3 +343,41 @@ func TestParseColorANSIMin(t *testing.T) {
 		t.Errorf("parseColor(1) = %v, want PaletteColor(1)=%v", got, want)
 	}
 }
+
+// ---- TryPollEvent / PostWakeup nil-screen guards ---------------------------
+
+func TestTryPollEventNilScreen(t *testing.T) {
+	// A capture-mode terminal has no real screen; TryPollEvent returns nil.
+	term := NewCapture(10, 5)
+	if ev := term.TryPollEvent(); ev != nil {
+		t.Errorf("TryPollEvent with nil screen = %v, want nil", ev)
+	}
+}
+
+func TestPostWakeupNilScreenNoPanic(t *testing.T) {
+	// PostWakeup is a no-op when there is no real screen.
+	term := NewCapture(10, 5)
+	term.PostWakeup()
+}
+
+// ---- faceToStyle: underline without explicit color -------------------------
+
+func TestFaceToStyleUnderlineNoColor(t *testing.T) {
+	face := syntax.Face{Underline: true}
+	style := faceToStyle(face)
+	if style.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+		t.Error("underline without color: underline not set in style")
+	}
+}
+
+func TestFaceToStyleBoldItalic(t *testing.T) {
+	face := syntax.Face{Bold: true, Italic: true}
+	style := faceToStyle(face)
+	attrs := style.GetAttributes()
+	if attrs&tcell.AttrBold == 0 {
+		t.Error("bold face: AttrBold not set")
+	}
+	if attrs&tcell.AttrItalic == 0 {
+		t.Error("italic face: AttrItalic not set")
+	}
+}

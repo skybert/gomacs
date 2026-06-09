@@ -115,6 +115,21 @@ func TestRegisterTheme(t *testing.T) {
 	applySweetTheme()
 }
 
+func TestLoadThemeUnknown(t *testing.T) {
+	if LoadTheme("no-such-theme") {
+		t.Error("LoadTheme on unknown name should return false")
+	}
+}
+
+func TestLoadThemeBuiltins(t *testing.T) {
+	for _, name := range []string{"sweet", "default"} {
+		if !LoadTheme(name) {
+			t.Errorf("LoadTheme(%q) returned false", name)
+		}
+	}
+	applySweetTheme() // restore default startup theme
+}
+
 func TestFaceNames(t *testing.T) {
 	names := FaceNames()
 	required := []string{"keyword", "string", "comment", "modeline", "region", "isearch"}

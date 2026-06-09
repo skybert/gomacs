@@ -47,9 +47,13 @@ type callResult struct {
 // --client-addr HOST:PORT to the adapter, wait for it to connect,
 // then hand the accepted connection to the Client.
 //
+// dir, when non-empty, becomes the adapter process's working directory.
+// This matters for adapters that build the debuggee (e.g. delve in "debug"
+// mode runs `go build`, which must run inside the target's module).
+//
 // The adapter process's stderr is discarded; its stdout/stdin are
 // NOT used for DAP traffic (only TCP is).
-func Start(command string, args ...string) (*Client, error) {
+func Start(dir, command string, args ...string) (*Client, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("dap: listen: %w", err)
@@ -59,6 +63,7 @@ func Start(command string, args ...string) (*Client, error) {
 	allArgs := append(args, "--client-addr", addr) //nolint:gocritic
 
 	cmd := exec.Command(command, allArgs...) //nolint:gosec
+	cmd.Dir = dir
 	if err := cmd.Start(); err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("dap: start %q: %w", command, err)
@@ -95,6 +100,21 @@ func Start(command string, args ...string) (*Client, error) {
 	}
 	go c.readLoop()
 	return c, nil
+}
+
+// NewConnClient builds a Client that speaks DAP over an already-connected
+// stream (rw).  Unlike Start it does not spawn an adapter process; it is used
+// to attach to an adapter reached over an existing connection (and by tests).
+func NewConnClient(rw io.ReadWriteCloser) *Client {
+	c := &Client{
+		rw:      rw,
+		reader:  bufio.NewReaderSize(rw, 1<<16),
+		pending: make(map[int]chan callResult),
+		closed:  make(chan struct{}),
+		nextSeq: 1,
+	}
+	go c.readLoop()
+	return c
 }
 
 // SetEventHandler installs a callback invoked for every adapter event.

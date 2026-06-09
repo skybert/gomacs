@@ -347,3 +347,124 @@ func TestScrollCacheInvalidatedAfterEdit(t *testing.T) {
 		t.Errorf("after insert: ViewLine[0] text = %q, want %q", text, "new")
 	}
 }
+
+// ---- firstScrollPos cache hit ----------------------------------------------
+
+func TestFirstScrollPosCacheHit(t *testing.T) {
+	w, _ := newFiveLineWindow(3)
+	w.SetScrollLine(2)
+	first := w.ViewLines()  // seeds the firstScrollPos cache
+	second := w.ViewLines() // same scrollLine + changeGen → cache hit
+	if first[0].StartPos != second[0].StartPos {
+		t.Errorf("firstScrollPos cache mismatch: %d vs %d", first[0].StartPos, second[0].StartPos)
+	}
+}
+
+// ---- textRows for a height<=1 normal window --------------------------------
+
+func TestTextRowsHeightOneNormalWindow(t *testing.T) {
+	b := buffer.NewWithContent("t", "a\nb\nc")
+	w := New(b, 0, 0, 80, 1) // height 1: textRows uses full height
+	vl := w.ViewLines()
+	if len(vl) != 1 {
+		t.Errorf("height-1 window ViewLines len = %d, want 1", len(vl))
+	}
+	// EnsurePointVisible calls textRows(); with height<=1 it returns the full
+	// height rather than reserving a modeline row.
+	w.SetPoint(b.LineStart(3))
+	w.EnsurePointVisible()
+	if w.ScrollLine() != 3 {
+		t.Errorf("height-1 EnsurePointVisible: ScrollLine = %d, want 3", w.ScrollLine())
+	}
+}
+
+// ---- VisualRowForPoint (no wrap path) --------------------------------------
+
+func TestVisualRowForPointNoWrap(t *testing.T) {
+	b := buffer.NewWithContent("t", fiveLineContent)
+	w := New(b, 0, 0, 80, 5)
+	w.SetScrollLine(2)
+	w.SetPoint(b.LineStart(4)) // line 4
+	if got := w.VisualRowForPoint(); got != 2 {
+		t.Errorf("VisualRowForPoint no-wrap = %d, want 2 (line4-scroll2)", got)
+	}
+}
+
+// ---- visualRowsForLine with wrapping ---------------------------------------
+
+func TestVisualRowsForLineWrapped(t *testing.T) {
+	// One long line of 25 runes, wrapCol 10 → 3 visual rows.
+	b := buffer.NewWithContent("t", "0123456789abcdefghijABCDE")
+	w := New(b, 0, 0, 80, 5)
+	w.SetWrapCol(10)
+	if got := w.visualRowsForLine(1); got != 3 {
+		t.Errorf("visualRowsForLine wrapped = %d, want 3", got)
+	}
+}
+
+func TestVisualRowsForLineEmptyLine(t *testing.T) {
+	// Empty first line; wrapping enabled → still 1 row.
+	b := buffer.NewWithContent("t", "\nsecond")
+	w := New(b, 0, 0, 80, 5)
+	w.SetWrapCol(10)
+	if got := w.visualRowsForLine(1); got != 1 {
+		t.Errorf("visualRowsForLine empty = %d, want 1", got)
+	}
+}
+
+// ---- viewLinesWrapped ------------------------------------------------------
+
+func TestViewLinesWrappedSplitsLongLine(t *testing.T) {
+	b := buffer.NewWithContent("t", "0123456789abcdefghij")
+	w := New(b, 0, 0, 80, 5)
+	w.SetWrapCol(10)
+	vl := w.ViewLines()
+	// First two rows are segments of line 1.
+	if vl[0].Line != 1 || vl[1].Line != 1 {
+		t.Errorf("wrapped: rows 0,1 Line = %d,%d, want 1,1", vl[0].Line, vl[1].Line)
+	}
+	if vl[0].EndPos-vl[0].StartPos != 10 {
+		t.Errorf("wrapped seg 0 len = %d, want 10", vl[0].EndPos-vl[0].StartPos)
+	}
+}
+
+func TestViewLinesWrappedShortLine(t *testing.T) {
+	// Short lines (<= wrapCol) take the single-row branch.
+	b := buffer.NewWithContent("t", "ab\ncd")
+	w := New(b, 0, 0, 80, 4)
+	w.SetWrapCol(10)
+	vl := w.ViewLines()
+	if vl[0].Line != 1 || vl[1].Line != 2 {
+		t.Errorf("wrapped short: rows Line = %d,%d, want 1,2", vl[0].Line, vl[1].Line)
+	}
+}
+
+func TestViewLinesWrappedPastEnd(t *testing.T) {
+	// Window taller than content with wrapping on: the fallback past-EOF
+	// branch (spIdx >= len(startPositions)) runs.
+	b := buffer.NewWithContent("t", "only")
+	w := New(b, 0, 0, 80, 4)
+	w.SetWrapCol(10)
+	vl := w.ViewLines()
+	if len(vl) != 4 {
+		t.Fatalf("wrapped past-end ViewLines len = %d, want 4", len(vl))
+	}
+}
+
+// ---- EnsurePointVisible (wrapped, cursor past bottom) ----------------------
+
+func TestEnsurePointVisibleWrappedCursorBelow(t *testing.T) {
+	// Several long lines with wrapping; point on a far line so its visual row
+	// exceeds the text area, exercising the wrapped scroll-adjust branch.
+	long := "0123456789abcdefghij"
+	b := buffer.NewWithContent("t", long+"\n"+long+"\n"+long+"\n"+long)
+	w := New(b, 0, 0, 80, 4) // textRows = 3
+	w.SetWrapCol(10)
+	w.SetScrollLine(1)
+	w.SetPoint(b.LineStart(4)) // line 4, well past the visible visual rows
+	w.EnsurePointVisible()
+	pointLine, _ := b.LineCol(w.Point())
+	if w.ScrollLine() != pointLine {
+		t.Errorf("EnsurePointVisible wrapped: ScrollLine = %d, want %d", w.ScrollLine(), pointLine)
+	}
+}

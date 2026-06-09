@@ -55,6 +55,33 @@ func TestLexer_String(t *testing.T) {
 	}
 }
 
+func TestLexer_StringEscapes(t *testing.T) {
+	l := NewLexer(`"a\tb\"c\\d\q"`)
+	tok := l.Next()
+	if tok.Type != TokenString {
+		t.Fatalf("expected TokenString, got %d", tok.Type)
+	}
+	if tok.Value != "a\tb\"c\\d\\q" {
+		t.Fatalf("unexpected escape decoding: %q", tok.Value)
+	}
+}
+
+func TestLexer_StringUnterminated(t *testing.T) {
+	l := NewLexer(`"no end`)
+	tok := l.Next()
+	if tok.Type != TokenString || tok.Value != "no end" {
+		t.Fatalf("unterminated string: type=%d val=%q", tok.Type, tok.Value)
+	}
+}
+
+func TestLexer_StringTrailingBackslash(t *testing.T) {
+	l := NewLexer(`"x\`)
+	tok := l.Next()
+	if tok.Type != TokenString || tok.Value != "x" {
+		t.Fatalf("trailing backslash: type=%d val=%q", tok.Type, tok.Value)
+	}
+}
+
 func TestLexer_Comment(t *testing.T) {
 	l := NewLexer("; this is a comment\n42")
 	tok := l.Next()

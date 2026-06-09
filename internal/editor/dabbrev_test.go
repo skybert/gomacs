@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -64,5 +65,73 @@ func TestCmdDabbrevExpand(t *testing.T) {
 	// nearest word starting with "hel" from position 16: "helpme" (dist=4), "hello" (dist=11)
 	if got != "hello helpme hello\n" && got != "hello helpme helpme\n" {
 		t.Errorf("unexpected expansion: %q", got)
+	}
+}
+
+// TestCmdDabbrevExpand_RepeatedRebuild calls M-/ twice; the second call sees a
+// changed prefix (now the expanded candidate) and rebuilds the candidate list.
+func TestCmdDabbrevExpand_RepeatedRebuild(t *testing.T) {
+	e := newTestEditor("foobar foobaz foo")
+	buf := e.ActiveBuffer()
+	buf.SetPoint(buf.Len()) // after the trailing "foo"
+	e.cmdDabbrevExpand()
+	first := buf.String()
+	if !strings.Contains(first, "foobar") && !strings.Contains(first, "foobaz") {
+		t.Fatalf("first expansion lost both candidates: %q", first)
+	}
+	e.cmdDabbrevExpand() // prefix is now the full candidate; rebuild path
+}
+
+// TestCmdDabbrevExpand_PointMovedAway treats a second call as fresh when point
+// is no longer at the previous expansion end.
+func TestCmdDabbrevExpand_PointMovedAway(t *testing.T) {
+	e := newTestEditor("foobar foo")
+	buf := e.ActiveBuffer()
+	buf.SetPoint(buf.Len())
+	e.cmdDabbrevExpand()
+	// Move point elsewhere and add a fresh prefix.
+	buf.SetPoint(buf.Len())
+	buf.InsertString(buf.Len(), " foob")
+	buf.SetPoint(buf.Len())
+	e.cmdDabbrevExpand()
+	if !strings.Contains(buf.String(), "foobar") {
+		t.Fatalf("expected fresh expansion to foobar, got %q", buf.String())
+	}
+}
+
+// TestCmdDabbrevExpand_CommandNameFallback covers candidate source #3:
+// registered command names matching the prefix.
+func TestCmdDabbrevExpand_CommandNameFallback(t *testing.T) {
+	e := newTestEditor("forward-c")
+	buf := e.ActiveBuffer()
+	buf.SetPoint(buf.Len())
+	e.cmdDabbrevExpand()
+	if !strings.Contains(buf.String(), "forward-char") {
+		t.Logf("buffer after expand: %q", buf.String())
+	}
+	// At minimum a candidate should have been found (no 'No expansion' message).
+	if strings.Contains(e.message, "No expansion") {
+		t.Fatalf("expected a command-name expansion, got %q", e.message)
+	}
+}
+
+// TestCov_DabbrevExpand_CycleBranch forces the repeated-invocation cycle path
+// (pt == dabbrevLastEnd with an unchanged prefix). The state is seeded as if a
+// prior expansion just completed and the detected word before point equals the
+// recorded prefix, so the branch undoes the previous expansion and cycles.
+func TestCov_DabbrevExpand_CycleBranch(t *testing.T) {
+	e := newTestEditor("foobar foobaz foo")
+	b := e.ActiveBuffer()
+	// Buffer ends with "foo"; treat that as a completed expansion whose
+	// candidate equals the prefix "foo", so the next call hits the cycle path.
+	b.SetPoint(b.Len())
+	e.dabbrevPrefix = "foo"
+	e.dabbrevCandidates = []string{"foo", "foobar", "foobaz"}
+	e.dabbrevIdx = 1
+	e.dabbrevLastEnd = b.Point()
+	before := b.String()
+	e.cmdDabbrevExpand()
+	if b.String() == before {
+		t.Fatal("cycle branch should have replaced the expansion")
 	}
 }

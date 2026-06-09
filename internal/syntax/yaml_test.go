@@ -155,3 +155,61 @@ func TestYAMLMixed(t *testing.T) {
 		t.Errorf("expected >=2 keyword spans (true, null), got %d", kwCount)
 	}
 }
+
+func TestYAMLBlockScalar(t *testing.T) {
+	// The '|' indicator must be the first non-whitespace char on its line.
+	spans := yamlSpans("  |\n")
+	if _, ok := findYAMLSpan(spans, FaceKeyword); !ok {
+		t.Error("expected FaceKeyword for block scalar indicator '|'")
+	}
+}
+
+func TestYAMLFoldedScalar(t *testing.T) {
+	spans := yamlSpans("  >\n")
+	if _, ok := findYAMLSpan(spans, FaceKeyword); !ok {
+		t.Error("expected FaceKeyword for folded scalar indicator '>'")
+	}
+}
+
+func TestYAMLFlowIndicators(t *testing.T) {
+	spans := yamlSpans("items: [a, b, c]\n")
+	if _, ok := findYAMLSpan(spans, FaceOperator); !ok {
+		t.Error("expected FaceOperator for flow indicators")
+	}
+}
+
+func TestYAMLFlowMapping(t *testing.T) {
+	spans := yamlSpans("m: {x: 1, y: 2}\n")
+	if _, ok := findYAMLSpan(spans, FaceOperator); !ok {
+		t.Error("expected FaceOperator for flow mapping braces")
+	}
+}
+
+func TestYAMLNonNumberWord(t *testing.T) {
+	// A token that starts numeric but is not a clean number (e.g. version
+	// string) should not crash and should fall through.
+	spans := yamlSpans("version: 1.2.3-beta\n")
+	if _, ok := findYAMLSpan(spans, FaceFunction); !ok {
+		t.Error("expected FaceFunction for mapping key 'version'")
+	}
+}
+
+func TestYAMLEmpty(t *testing.T) {
+	if spans := yamlSpans(""); len(spans) != 0 {
+		t.Errorf("expected no spans for empty YAML, got %v", spans)
+	}
+}
+
+func TestYAMLBlankLine(t *testing.T) {
+	spans := yamlSpans("\nkey: val\n")
+	if _, ok := findYAMLSpan(spans, FaceFunction); !ok {
+		t.Error("expected FaceFunction for key after blank line")
+	}
+}
+
+func TestYAMLKeyWithSpaceBeforeColon(t *testing.T) {
+	spans := yamlSpans("my key : value\n")
+	if _, ok := findYAMLSpan(spans, FaceFunction); !ok {
+		t.Error("expected FaceFunction for key with space before colon")
+	}
+}

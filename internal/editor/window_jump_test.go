@@ -203,3 +203,23 @@ func TestRelayout_HorizThenVert(t *testing.T) {
 		t.Errorf("win1.Left=%d, expected 0 (full-width stacked row)", win1.Left())
 	}
 }
+
+// renderWindowJumpOverlays draws badges on non-active windows when 3+ are open.
+func TestRenderWindowJumpOverlays_DrawsBadges(t *testing.T) {
+	e := newCapTestEditor("line1\nline2\nline3\nline4\nline5\nline6\n")
+	e.cmdSplitWindowBelow()
+	e.cmdSplitWindowBelow()
+	if len(e.windows) < 3 {
+		t.Skipf("need 3+ windows, got %d", len(e.windows))
+	}
+	e.renderWindowJumpOverlays() // must not panic; draws badges on non-active windows
+}
+
+func TestRenderWindowJumpOverlays_WithBreakpointGutter(t *testing.T) {
+	e := newCapTestEditor("a\nb\nc\nd\ne\nf\n")
+	e.ActiveBuffer().SetFilename("/tmp/jump.go")
+	e.dapBreakpoints = map[string]map[int]struct{}{}
+	e.cmdSplitWindowBelow()
+	e.cmdSplitWindowBelow()
+	e.renderWindowJumpOverlays()
+}

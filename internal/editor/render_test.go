@@ -220,6 +220,194 @@ func TestRenderModelineUnmodifiedMark(t *testing.T) {
 	}
 }
 
+func TestRenderModelineNarrowIndicator(t *testing.T) {
+	e := newCapTestEditor("line1\nline2\nline3\n")
+	b := e.ActiveBuffer()
+	b.Narrow(0, 5)
+	e.Redraw()
+
+	row := captureRow(t, e, 22)
+	if !strings.Contains(row, "Narrow") {
+		t.Errorf("modeline should show Narrow indicator: %q", row)
+	}
+}
+
+func TestRenderModelineMacroIndicator(t *testing.T) {
+	e := newCapTestEditor("text")
+	e.kbdMacroRecording = true
+	e.Redraw()
+
+	row := captureRow(t, e, 22)
+	if !strings.Contains(row, "Def") {
+		t.Errorf("modeline should show macro Def indicator: %q", row)
+	}
+}
+
+func TestRenderModelineVcAnnotateStripsLangSuffix(t *testing.T) {
+	e := newCapTestEditor("abc123 (Author) package main\n")
+	e.ActiveBuffer().SetMode("vc-annotate+go")
+	e.Redraw()
+
+	row := captureRow(t, e, 22)
+	if !strings.Contains(row, "vc-annotate") {
+		t.Errorf("modeline should show base vc-annotate mode: %q", row)
+	}
+	if strings.Contains(row, "vc-annotate+go") {
+		t.Errorf("modeline should strip +go suffix: %q", row)
+	}
+}
+
+func TestRenderModelineCompilationOK(t *testing.T) {
+	e := newCapTestEditor("build output\n")
+	b := e.ActiveBuffer()
+	b.SetName("*compilation*")
+	ok := true
+	e.compilationExitOK = &ok
+	e.Redraw()
+
+	row := captureRow(t, e, 22)
+	if !strings.Contains(row, "*compilation*") {
+		t.Errorf("modeline should show *compilation* name: %q", row)
+	}
+}
+
+func TestRenderModelineCompilationFail(t *testing.T) {
+	e := newCapTestEditor("build output\n")
+	b := e.ActiveBuffer()
+	b.SetName("*compilation*")
+	failed := false
+	e.compilationExitOK = &failed
+	// Should render the fail-colored name without panicking.
+	e.Redraw()
+
+	row := captureRow(t, e, 22)
+	if !strings.Contains(row, "*compilation*") {
+		t.Errorf("modeline should show *compilation* name: %q", row)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// renderWindow overlays
+// ---------------------------------------------------------------------------
+
+func TestRenderWindowRegionHighlight(t *testing.T) {
+	e := newCapTestEditor("hello")
+	b := e.ActiveBuffer()
+	b.SetMark(0)
+	b.SetMarkActive(true)
+	b.SetPoint(3)
+	e.Redraw()
+
+	// Cells 0..2 are inside the region and should use FaceRegion.
+	_, face := e.term.CaptureCell(0, 0)
+	if face != syntax.FaceRegion {
+		t.Errorf("expected FaceRegion at (0,0) inside region, got %+v", face)
+	}
+	// Cell 4 is outside the region.
+	_, face = e.term.CaptureCell(4, 0)
+	if face == syntax.FaceRegion {
+		t.Error("cell 4 should not be region-highlighted")
+	}
+}
+
+func TestRenderWindowIsearchHighlight(t *testing.T) {
+	e := newCapTestEditor("abcXYZ")
+	e.isearching = true
+	e.isearchFwd = true
+	e.isearchStr = "XYZ"
+	e.isSearchCaseFold = false
+	// Forward isearch: match ends at point.
+	e.ActiveBuffer().SetPoint(6)
+	e.Redraw()
+
+	_, face := e.term.CaptureCell(3, 0) // 'X'
+	if face != syntax.FaceIsearch {
+		t.Errorf("expected FaceIsearch at match start, got %+v", face)
+	}
+}
+
+func TestRenderWindowQueryReplaceHighlight(t *testing.T) {
+	e := newCapTestEditor("foo bar")
+	e.queryReplaceActive = true
+	e.queryReplaceMatch = 0
+	e.queryReplaceFromRunes = []rune("foo")
+	e.Redraw()
+
+	_, face := e.term.CaptureCell(0, 0)
+	if face != syntax.FaceIsearch {
+		t.Errorf("expected FaceIsearch for query-replace match, got %+v", face)
+	}
+}
+
+func TestRenderWindowNarrowedSkipsOutsideLines(t *testing.T) {
+	e := newCapTestEditor("AAAA\nBBBB\nCCCC\n")
+	b := e.ActiveBuffer()
+	// Narrow to the second line only (offsets 5..9 = "BBBB").
+	b.Narrow(5, 9)
+	e.Redraw()
+
+	// The first physical line "AAAA" is outside the narrow region and must be blank.
+	ch, _ := e.term.CaptureCell(0, 0)
+	if ch == 'A' {
+		t.Errorf("line outside narrow region should not render 'A', got %q", ch)
+	}
+}
+
+func TestRenderWindowBreakpointGutter(t *testing.T) {
+	e := newCapTestEditor("package main\nfunc main() {}\n")
+	b := e.ActiveBuffer()
+	b.SetFilename("/tmp/gomacs_render_bp.go")
+	b.SetMode("go")
+	e.dapBreakpoints = map[string]map[int]struct{}{
+		"/tmp/gomacs_render_bp.go": {1: {}},
+	}
+	e.Redraw()
+
+	// The gutter draws a breakpoint bullet at column 0 of line 1.
+	ch, _ := e.term.CaptureCell(0, 0)
+	if ch != '●' {
+		t.Errorf("expected breakpoint bullet in gutter, got %q", ch)
+	}
+}
+
+func TestRenderWindowExecPosArrow(t *testing.T) {
+	e := newCapTestEditor("package main\nfunc main() {}\n")
+	b := e.ActiveBuffer()
+	b.SetFilename("/tmp/gomacs_render_ep.go")
+	b.SetMode("go")
+	e.dapBreakpoints = map[string]map[int]struct{}{
+		"/tmp/gomacs_render_ep.go": {2: {}},
+	}
+	e.dap = &dapState{stoppedFile: "/tmp/gomacs_render_ep.go", stoppedLine: 1}
+	e.Redraw()
+
+	// Exec-pos arrow is drawn at gutter column 1 of the stopped line (row 0).
+	ch, _ := e.term.CaptureCell(1, 0)
+	if ch != '→' {
+		t.Errorf("expected exec-pos arrow at stopped line, got %q", ch)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// applyVisualLines
+// ---------------------------------------------------------------------------
+
+func TestApplyVisualLinesEnabled(t *testing.T) {
+	e := newCapTestEditor(strings.Repeat("x", 200) + "\n")
+	e.visualLines = true
+	e.visualLinesSynced = false
+	e.applyVisualLines()
+	// Re-applying when already synced is a no-op and must not panic.
+	e.applyVisualLines()
+}
+
+func TestApplyVisualLinesDisabled(t *testing.T) {
+	e := newCapTestEditor(strings.Repeat("y", 200) + "\n")
+	e.visualLines = false
+	e.visualLinesSynced = false
+	e.applyVisualLines()
+}
+
 // ---------------------------------------------------------------------------
 // renderMinibuffer
 // ---------------------------------------------------------------------------
@@ -568,6 +756,68 @@ func TestHighlighterForGherkinMode(t *testing.T) {
 	hl := highlighterFor(b)
 	if _, ok := hl.(syntax.GherkinHighlighter); !ok {
 		t.Errorf("expected GherkinHighlighter for gherkin mode, got %T", hl)
+	}
+}
+
+func TestHighlighterForVcGrepModes(t *testing.T) {
+	for _, mode := range []string{"vc-grep", "lsp-refs"} {
+		b := buffer.NewWithContent("*t*", "file.go:1: hit\n")
+		b.SetMode(mode)
+		if _, ok := highlighterFor(b).(syntax.VcGrepHighlighter); !ok {
+			t.Errorf("mode %q: expected VcGrepHighlighter, got %T", mode, highlighterFor(b))
+		}
+	}
+}
+
+func TestHighlighterForVcFixupSelectMode(t *testing.T) {
+	b := buffer.NewWithContent("*t*", "commit abc123\n")
+	b.SetMode("vc-fixup-select")
+	if _, ok := highlighterFor(b).(syntax.VcLogHighlighter); !ok {
+		t.Errorf("expected VcLogHighlighter for vc-fixup-select mode, got %T", highlighterFor(b))
+	}
+}
+
+func TestHighlighterForVcCommitMode(t *testing.T) {
+	b := buffer.NewWithContent("*t*", "feat: thing\n")
+	b.SetMode("vc-commit")
+	if _, ok := highlighterFor(b).(syntax.VcCommitHighlighter); !ok {
+		t.Errorf("expected VcCommitHighlighter for vc-commit mode, got %T", highlighterFor(b))
+	}
+}
+
+func TestHighlighterForConfMode(t *testing.T) {
+	b := buffer.NewWithContent("*t*", "key = value\n")
+	b.SetMode("conf")
+	if _, ok := highlighterFor(b).(syntax.ConfHighlighter); !ok {
+		t.Errorf("expected ConfHighlighter for conf mode, got %T", highlighterFor(b))
+	}
+}
+
+func TestHighlighterForPerlMode(t *testing.T) {
+	b := buffer.NewWithContent("*t*", "print \"hi\";\n")
+	b.SetMode("perl")
+	if _, ok := highlighterFor(b).(syntax.PerlHighlighter); !ok {
+		t.Errorf("expected PerlHighlighter for perl mode, got %T", highlighterFor(b))
+	}
+}
+
+func TestHighlighterForDebugModes(t *testing.T) {
+	bl := buffer.NewWithContent("*t*", "x = 1\n")
+	bl.SetMode("debug-locals")
+	if _, ok := highlighterFor(bl).(syntax.DapLocalsHighlighter); !ok {
+		t.Errorf("debug-locals: got %T, want DapLocalsHighlighter", highlighterFor(bl))
+	}
+
+	bs := buffer.NewWithContent("*t*", "frame 0\n")
+	bs.SetMode("debug-stack")
+	if _, ok := highlighterFor(bs).(syntax.DapStackHighlighter); !ok {
+		t.Errorf("debug-stack: got %T, want DapStackHighlighter", highlighterFor(bs))
+	}
+
+	br := buffer.NewWithContent("*t*", "p x\n")
+	br.SetMode("debug-repl")
+	if _, ok := highlighterFor(br).(syntax.GoHighlighter); !ok {
+		t.Errorf("debug-repl: got %T, want GoHighlighter", highlighterFor(br))
 	}
 }
 

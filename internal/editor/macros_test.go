@@ -74,3 +74,29 @@ func TestCallLastKbdMacro_WhileRecording(t *testing.T) {
 		t.Errorf("message = %q, want 'Cannot call macro...'", e.message)
 	}
 }
+
+func TestCov_CallLastKbdMacro_PlaysBackInsertions(t *testing.T) {
+	e := newTestEditorFull("")
+	e.kbdMacro = []terminal.KeyEvent{
+		{Key: tcell.KeyRune, Rune: 'a'},
+		{Key: tcell.KeyRune, Rune: 'b'},
+	}
+	e.cmdCallLastKbdMacro()
+	if got := buf(e).String(); got != "ab" {
+		t.Fatalf("macro playback inserted %q, want %q", got, "ab")
+	}
+	if e.kbdMacroPlaying {
+		t.Error("kbdMacroPlaying should be reset after playback")
+	}
+}
+
+func TestCov_CallLastKbdMacro_RepeatsWithArg(t *testing.T) {
+	e := newTestEditorFull("")
+	e.kbdMacro = []terminal.KeyEvent{{Key: tcell.KeyRune, Rune: 'x'}}
+	e.universalArg = 3
+	e.universalArgSet = true
+	e.cmdCallLastKbdMacro()
+	if got := buf(e).String(); got != "xxx" {
+		t.Fatalf("macro should repeat 3 times, got %q", got)
+	}
+}

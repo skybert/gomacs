@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/lsp"
+	"github.com/skybert/gomacs/internal/terminal"
 )
 
 func TestBufferWordCompletions_basic(t *testing.T) {
@@ -466,5 +468,304 @@ func TestLspCompletionInsert_noopWhenNoItems(t *testing.T) {
 
 	if got := e.ActiveBuffer().String(); got != "hel" {
 		t.Errorf("expected buffer unchanged, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// triggerBufferWordCompletion
+// ---------------------------------------------------------------------------
+
+func TestTriggerBufferWordCompletion_CodeActivates(t *testing.T) {
+	// In a code context (not prose, not in a comment) the popup activates
+	// synchronously.
+	e := newTestEditorWithMode("alpha alphabet al", "go")
+	e.lspCompDelayCancel = func() {}
+	b := e.ActiveBuffer()
+	b.SetPoint(b.Len())
+	e.triggerBufferWordCompletion(b, "al", b.Len()-2)
+	if !e.lspCompActive {
+		t.Fatal("expected completion popup to activate in code context")
+	}
+	if len(e.lspCompItems) == 0 {
+		t.Fatal("expected completion items")
+	}
+}
+
+func TestTriggerBufferWordCompletion_NoMatchNoPopup(t *testing.T) {
+	e := newTestEditorWithMode("alpha beta", "go")
+	e.lspCompDelayCancel = func() {}
+	b := e.ActiveBuffer()
+	e.triggerBufferWordCompletion(b, "zzz", 0)
+	if e.lspCompActive {
+		t.Fatal("no matching words should not activate the popup")
+	}
+}
+
+func TestTriggerBufferWordCompletion_ProseDelays(t *testing.T) {
+	// Prose context defers activation, so it is not active immediately.
+	e := newTestEditorWithMode("alpha alphabet al", "text")
+	e.lspCompDelayCancel = func() {}
+	b := e.ActiveBuffer()
+	b.SetPoint(b.Len())
+	e.triggerBufferWordCompletion(b, "al", b.Len()-2)
+	if e.lspCompActive {
+		t.Fatal("prose context should defer activation, not activate immediately")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// lspCompletionHandleKey
+// ---------------------------------------------------------------------------
+
+func newCompletionEditor() *Editor {
+	e := newTestEditor("hel")
+	e.lspCompItems = []lsp.CompletionItem{{Label: "hello"}, {Label: "help"}, {Label: "helm"}}
+	e.lspCompActive = true
+	e.lspCompSelectedIdx = 0
+	e.lspCompWordStart = 0
+	e.lspCompDelayCancel = func() {}
+	return e
+}
+
+func TestLspCompletionHandleKey_InactiveReturnsFalse(t *testing.T) {
+	e := newTestEditor("x")
+	if e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyTab}) {
+		t.Fatal("handler should return false when popup is inactive")
+	}
+}
+
+func TestLspCompletionHandleKey_DownUp(t *testing.T) {
+	e := newCompletionEditor()
+	if !e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyDown}) {
+		t.Fatal("Down should be consumed")
+	}
+	if e.lspCompSelectedIdx != 1 {
+		t.Fatalf("Down should advance selection, got %d", e.lspCompSelectedIdx)
+	}
+	if !e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyUp}) {
+		t.Fatal("Up should be consumed")
+	}
+	if e.lspCompSelectedIdx != 0 {
+		t.Fatalf("Up should move selection back, got %d", e.lspCompSelectedIdx)
+	}
+}
+
+func TestLspCompletionHandleKey_AltNP(t *testing.T) {
+	e := newCompletionEditor()
+	if !e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'n', Mod: tcell.ModAlt}) {
+		t.Fatal("M-n should be consumed")
+	}
+	if e.lspCompSelectedIdx != 1 {
+		t.Fatalf("M-n should advance, got %d", e.lspCompSelectedIdx)
+	}
+	if !e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'p', Mod: tcell.ModAlt}) {
+		t.Fatal("M-p should be consumed")
+	}
+	if e.lspCompSelectedIdx != 0 {
+		t.Fatalf("M-p should retreat, got %d", e.lspCompSelectedIdx)
+	}
+}
+
+func TestLspCompletionHandleKey_TabInserts(t *testing.T) {
+	e := newCompletionEditor()
+	e.ActiveBuffer().SetPoint(3)
+	if !e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyTab}) {
+		t.Fatal("Tab should be consumed")
+	}
+	if e.lspCompActive {
+		t.Fatal("Tab should dismiss the popup after inserting")
+	}
+	if got := e.ActiveBuffer().String(); got != "hello" {
+		t.Fatalf("Tab should insert the selected completion, got %q", got)
+	}
+}
+
+func TestLspCompletionHandleKey_EscapeDismisses(t *testing.T) {
+	e := newCompletionEditor()
+	if !e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyEscape}) {
+		t.Fatal("Escape should be consumed")
+	}
+	if e.lspCompActive {
+		t.Fatal("Escape should dismiss the popup")
+	}
+}
+
+func TestLspCompletionHandleKey_RuneDismissesAndContinues(t *testing.T) {
+	e := newCompletionEditor()
+	if e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'x'}) {
+		t.Fatal("a plain rune should not be consumed (normal dispatch continues)")
+	}
+	if e.lspCompActive {
+		t.Fatal("a plain rune should dismiss the popup")
+	}
+}
+
+func TestLspCompletionHandleKey_BackspaceDismissesAndContinues(t *testing.T) {
+	e := newCompletionEditor()
+	if e.lspCompletionHandleKey(terminal.KeyEvent{Key: tcell.KeyBackspace}) {
+		t.Fatal("Backspace should not be consumed")
+	}
+	if e.lspCompActive {
+		t.Fatal("Backspace should dismiss the popup")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// triggerBufferWordCompletion (non-prose synchronous path)
+// ---------------------------------------------------------------------------
+
+func TestTriggerBufferWordCompletion_GoMode(t *testing.T) {
+	e := newTestEditorWithMode("fooXXbar fooXX", "go")
+	e.lspCompDelayCancel = func() {}
+	b := e.ActiveBuffer()
+	b.SetPoint(b.Len())
+	e.triggerBufferWordCompletion(b, "fooXX", b.Len()-5)
+	if !e.lspCompActive {
+		t.Fatal("expected popup active after buffer-word completion in go mode")
+	}
+	if len(e.lspCompItems) == 0 {
+		t.Fatal("expected at least one completion item")
+	}
+}
+
+func TestTriggerBufferWordCompletion_NoCandidates(t *testing.T) {
+	e := newTestEditorWithMode("uniqueword", "go")
+	e.lspCompDelayCancel = func() {}
+	b := e.ActiveBuffer()
+	b.SetPoint(b.Len())
+	e.triggerBufferWordCompletion(b, "zzz", b.Len())
+	if e.lspCompActive {
+		t.Fatal("expected no popup when there are no candidates")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// lspMaybeTriggerCompletion — fallback to buffer words when no LSP server
+// ---------------------------------------------------------------------------
+
+func TestLspMaybeTriggerCompletion_Fallback(t *testing.T) {
+	e := newTestEditorWithMode("fooXXbar fooXX", "go")
+	e.lspCompDelayCancel = func() {}
+	b := e.ActiveBuffer()
+	b.SetFilename("/tmp/x.go")
+	b.SetPoint(b.Len())
+	e.lspMaybeTriggerCompletion()
+	if !e.lspCompActive {
+		t.Fatal("expected buffer-word fallback popup to activate")
+	}
+}
+
+func TestLspMaybeTriggerCompletion_NoFilename(t *testing.T) {
+	e := newTestEditorWithMode("fooXXbar fooXX", "go")
+	e.lspCompDelayCancel = func() {}
+	b := e.ActiveBuffer()
+	b.SetPoint(b.Len())
+	e.lspMaybeTriggerCompletion() // no filename → early return
+	if e.lspCompActive {
+		t.Fatal("expected no completion without a filename")
+	}
+}
+
+func TestLspMaybeTriggerCompletion_ShortPrefix(t *testing.T) {
+	e := newTestEditorWithMode("ab", "go")
+	e.lspCompDelayCancel = func() {}
+	b := e.ActiveBuffer()
+	b.SetFilename("/tmp/x.go")
+	b.SetPoint(b.Len())
+	e.lspMaybeTriggerCompletion() // prefix "ab" < minChars(3) → no popup
+	if e.lspCompActive {
+		t.Fatal("expected no completion for a short prefix")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// renderLSPCompletionPopup — capture terminal
+// ---------------------------------------------------------------------------
+
+func TestRenderLSPCompletionPopup_Inactive(t *testing.T) {
+	e := newCapTestEditor("hello")
+	e.lspCompActive = false
+	e.renderLSPCompletionPopup() // no-op, must not panic
+}
+
+func TestRenderLSPCompletionPopup_DrawsBorder(t *testing.T) {
+	e := newCapTestEditor("os.\nmore text here\nyet another line\n")
+	e.ActiveBuffer().SetPoint(3)
+	e.lspCompItems = []lsp.CompletionItem{
+		{Label: "Open", Detail: "func"},
+		{Label: "Create", Detail: "func"},
+	}
+	e.lspCompActive = true
+	e.Redraw()
+	w, h := e.term.CaptureSize()
+	found := false
+	for row := 0; row < h && !found; row++ {
+		for col := 0; col < w; col++ {
+			if ch, _ := e.term.CaptureCell(col, row); ch == '╭' {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected completion popup border glyph on screen")
+	}
+}
+
+func TestRenderLSPCompletionPopup_ManyItemsScroll(t *testing.T) {
+	e := newCapTestEditor("x\n\n\n\n\n\n\n\n\n\n\n\n")
+	e.ActiveBuffer().SetPoint(0)
+	items := make([]lsp.CompletionItem, 10)
+	for i := range items {
+		items[i] = lsp.CompletionItem{Label: string(rune('a'+i)) + "fn"}
+	}
+	e.lspCompItems = items
+	e.lspCompActive = true
+	e.lspCompOffset = 2
+	e.lspCompSelectedIdx = 3
+	e.Redraw() // exercises offset/visible-slice logic without panicking
+}
+
+// ---------------------------------------------------------------------------
+// triggerBufferWordCompletion
+// ---------------------------------------------------------------------------
+
+func TestCov_TriggerBufferWordCompletion_NonProse(t *testing.T) {
+	e := newTestEditorWithMode("function functional functor", "go")
+	_, cancel := context.WithCancel(context.Background())
+	e.lspCompDelayCancel = cancel
+	buf := e.ActiveBuffer()
+	buf.SetPoint(buf.Len())
+	e.triggerBufferWordCompletion(buf, "func", buf.Len()-3)
+	if !e.lspCompActive {
+		t.Fatal("expected completion popup to activate in non-prose mode")
+	}
+	if len(e.lspCompItems) == 0 {
+		t.Fatal("expected candidate items")
+	}
+}
+
+func TestCov_TriggerBufferWordCompletion_NoMatchesNoop(t *testing.T) {
+	e := newTestEditorWithMode("alpha beta", "go")
+	_, cancel := context.WithCancel(context.Background())
+	e.lspCompDelayCancel = cancel
+	buf := e.ActiveBuffer()
+	e.triggerBufferWordCompletion(buf, "zzz", 0)
+	if e.lspCompActive {
+		t.Fatal("no candidates should leave the popup inactive")
+	}
+}
+
+func TestCov_TriggerBufferWordCompletion_ProseSchedules(t *testing.T) {
+	e := newTestEditorWithMode("hello helicopter helium", "text")
+	_, cancel := context.WithCancel(context.Background())
+	e.lspCompDelayCancel = cancel
+	buf := e.ActiveBuffer()
+	buf.SetPoint(buf.Len())
+	// Prose context schedules a delayed trigger and returns immediately without
+	// activating the popup synchronously.
+	e.triggerBufferWordCompletion(buf, "hel", buf.Len()-3)
+	if e.lspCompActive {
+		t.Fatal("prose context should not activate popup synchronously")
 	}
 }

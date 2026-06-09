@@ -1,11 +1,14 @@
 package editor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/elisp"
 	"github.com/skybert/gomacs/internal/terminal"
@@ -304,6 +307,50 @@ func TestApplyElispConfig_SubwordMode(t *testing.T) {
 	}
 }
 
+func TestApplyElispConfig_ManyValues(t *testing.T) {
+	e := newCapTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	e.dap = &dapState{localsAutoExpandDepth: 1}
+	_, _ = e.lisp.EvalString(`
+(setq lsp-completion-min-chars 3)
+(setq completion-menu-trigger-chars 2)
+(setq visual-lines t)
+(setq delete-trailing-whitespace t)
+(setq debug-locals-auto-expand-depth 4)
+`)
+	e.applyElispConfig()
+	if e.lspCompletionMinChars != 2 { // completion-menu-trigger-chars overrides
+		t.Errorf("lspCompletionMinChars = %d, want 2", e.lspCompletionMinChars)
+	}
+	if !e.visualLines {
+		t.Error("visual-lines t should enable visualLines")
+	}
+	if e.dap.localsAutoExpandDepth != 4 {
+		t.Errorf("debug-locals-auto-expand-depth = %d, want 4", e.dap.localsAutoExpandDepth)
+	}
+}
+
+func TestApplyElispConfig_NilVariants(t *testing.T) {
+	e := newCapTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	e.visualLines = true
+	e.subwordMode = true
+	e.autoRevert = true
+	e.saveBufferDeleteTrailingWS = true
+	e.isSearchCaseFold = true
+	_, _ = e.lisp.EvalString(`
+(setq visual-lines nil)
+(setq subword-mode nil)
+(setq auto-revert nil)
+(setq delete-trailing-whitespace nil)
+(setq isearch-case-insensitive nil)
+`)
+	e.applyElispConfig()
+	if e.visualLines || e.subwordMode || e.autoRevert || e.saveBufferDeleteTrailingWS || e.isSearchCaseFold {
+		t.Error("nil config values should disable their respective flags")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // writeBuffer
 // ---------------------------------------------------------------------------
@@ -591,6 +638,30 @@ func TestLoadFile_YAMLMode(t *testing.T) {
 	}
 }
 
+func TestLoadFile_MoreExtensions(t *testing.T) {
+	cases := []struct{ name, want string }{
+		{"a.pl", "perl"},
+		{"Widget.java", "java"},
+		{"notes.txt", "text"},
+		{"app.conf", "conf"},
+		{"login.feature", "gherkin"},
+		{"Makefile", "makefile"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		path := filepath.Join(dir, tc.name)
+		_ = os.WriteFile(path, []byte("content\n"), 0600)
+		e := newLoadFileEditor()
+		b, err := e.loadFile(path)
+		if err != nil {
+			t.Fatalf("loadFile(%s): %v", tc.name, err)
+		}
+		if b.Mode() != tc.want {
+			t.Errorf("loadFile(%s) mode = %q, want %q", tc.name, b.Mode(), tc.want)
+		}
+	}
+}
+
 func TestLoadFile_AddsToBuffers(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "added.go")
@@ -636,6 +707,26 @@ func TestCmdQueryReplace(t *testing.T) {
 	}
 }
 
+func TestCmdQueryReplace_Flow(t *testing.T) {
+	e := newElispTestEditor("foo bar foo")
+	e.ActiveBuffer().SetPoint(0)
+	e.startQueryReplace("foo", "baz")
+	if !e.queryReplaceActive {
+		t.Error("startQueryReplace should activate on a match")
+	}
+	if e.queryReplaceMatch < 0 {
+		t.Error("startQueryReplace should find the first match")
+	}
+}
+
+func TestCmdQueryReplace_EmptyFromAborts(t *testing.T) {
+	e := newElispTestEditor("text")
+	e.startQueryReplace("", "x")
+	if e.queryReplaceActive {
+		t.Error("empty FROM should not start query-replace")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // cmdImenu (no entries)
 // ---------------------------------------------------------------------------
@@ -649,5 +740,527 @@ func TestCmdImenu_NoEntries(t *testing.T) {
 	}
 	if e.message == "" {
 		t.Error("cmdImenu with no entries: expected a message")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// OpenFile / Close / handleResize
+// ---------------------------------------------------------------------------
+
+func TestOpenFile_Success(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hello.txt")
+	if err := os.WriteFile(path, []byte("hi there"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := newLoadFileEditor()
+	if err := e.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if e.ActiveBuffer().Filename() != path {
+		t.Fatalf("OpenFile should switch to the loaded file, got %q", e.ActiveBuffer().Filename())
+	}
+}
+
+func TestOpenFile_InvalidUTF8(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.bin")
+	if err := os.WriteFile(path, []byte{0xff, 0xfe, 0xfd}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := newLoadFileEditor()
+	if err := e.OpenFile(path); err == nil {
+		t.Fatal("OpenFile should return an error for invalid UTF-8")
+	}
+}
+
+func TestClose_NoTerminalSafe(t *testing.T) {
+	e := newTestEditor("")
+	e.lspConns = make(map[string]*lspConn)
+	// term is nil; Close must not panic.
+	e.Close()
+}
+
+func TestHandleResize_RelaysOut(t *testing.T) {
+	e := newCapTestEditor("hello")
+	e.handleResize()
+	// After a resize the minibuffer window should span the full width.
+	if e.minibufWin.Width() != 80 {
+		t.Fatalf("expected minibuffer width 80 after resize, got %d", e.minibufWin.Width())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dispatchKey / processEvent
+// ---------------------------------------------------------------------------
+
+func TestDispatchKey_InsertsRune(t *testing.T) {
+	e := newCapTestEditor("")
+	ev := tcell.NewEventKey(tcell.KeyRune, "x", tcell.ModNone)
+	e.dispatchKey(ev)
+	if e.ActiveBuffer().String() != "x" {
+		t.Fatalf("dispatchKey should self-insert 'x', got %q", e.ActiveBuffer().String())
+	}
+}
+
+func TestDispatchKey_RecordsMacro(t *testing.T) {
+	e := newCapTestEditor("")
+	e.kbdMacroRecording = true
+	ev := tcell.NewEventKey(tcell.KeyRune, "a", tcell.ModNone)
+	e.dispatchKey(ev)
+	if len(e.kbdMacroEvents) != 1 {
+		t.Fatalf("expected one recorded macro event, got %d", len(e.kbdMacroEvents))
+	}
+}
+
+func TestProcessEvent_Key(t *testing.T) {
+	e := newCapTestEditor("")
+	e.processEvent(tcell.NewEventKey(tcell.KeyRune, "z", tcell.ModNone))
+	if e.ActiveBuffer().String() != "z" {
+		t.Fatalf("processEvent(key) should insert, got %q", e.ActiveBuffer().String())
+	}
+}
+
+func TestProcessEvent_Resize(t *testing.T) {
+	e := newCapTestEditor("hello")
+	// Should not panic; handleResize relays out windows.
+	e.processEvent(tcell.NewEventResize(80, 24))
+	if e.minibufWin.Width() != 80 {
+		t.Fatalf("resize event should relayout, got minibuffer width %d", e.minibufWin.Width())
+	}
+}
+
+func TestProcessEvent_InterruptDrainsCallbacks(t *testing.T) {
+	e := newCapTestEditor("")
+	e.lspCbs = make(chan func(), 4)
+	e.dapCbs = make(chan func(), 4)
+	ran := false
+	e.lspCbs <- func() { ran = true }
+	e.processEvent(tcell.NewEventInterrupt(nil))
+	if !ran {
+		t.Fatal("interrupt event should drain and run queued LSP callbacks")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dispatchParsedKey — special-mode branches
+// ---------------------------------------------------------------------------
+
+func TestDispatchParsedKey_EscStartsPrefix(t *testing.T) {
+	e := newTestEditor("hello")
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyEscape})
+	if !e.escPending {
+		t.Error("ESC alone should set escPending=true")
+	}
+}
+
+func TestDispatchParsedKey_EscEscCancels(t *testing.T) {
+	e := newTestEditor("hello")
+	e.escPending = true
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyEscape})
+	if e.escPending {
+		t.Error("ESC ESC should clear escPending")
+	}
+}
+
+func TestDispatchParsedKey_EscRuneSynthesisesMeta(t *testing.T) {
+	e := newTestEditor("hello world")
+	e.lisp = elisp.NewEvaluator()
+	e.setupKeymaps()
+	e.ActiveBuffer().SetPoint(0)
+	e.escPending = true
+	// ESC then 'f' should act as M-f (forward-word).
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'f'})
+	if e.escPending {
+		t.Error("escPending should be cleared after ESC+key")
+	}
+	if e.ActiveBuffer().Point() != 5 {
+		t.Errorf("ESC f should move forward-word to point 5, got %d", e.ActiveBuffer().Point())
+	}
+}
+
+func TestDispatchParsedKey_WhatKeyReports(t *testing.T) {
+	e := newTestEditor("")
+	e.whatKeyPending = true
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'a'})
+	if e.whatKeyPending {
+		t.Error("whatKeyPending should be cleared after reporting")
+	}
+	if !strings.Contains(e.message, "key=") {
+		t.Errorf("expected key report message, got %q", e.message)
+	}
+}
+
+func TestDispatchParsedKey_UniversalArgDigits(t *testing.T) {
+	e := newTestEditor("")
+	e.universalArgSet = true
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: '8'})
+	if e.universalArg != 8 {
+		t.Errorf("universalArg = %d, want 8", e.universalArg)
+	}
+}
+
+func TestDispatchParsedKey_UniversalArgMinus(t *testing.T) {
+	e := newTestEditor("")
+	e.universalArgSet = true
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: '-'})
+	if e.universalArgDigits != "-" {
+		t.Errorf("universalArgDigits = %q, want \"-\"", e.universalArgDigits)
+	}
+}
+
+func TestDispatchParsedKey_ReadCharCallback(t *testing.T) {
+	e := newTestEditor("")
+	var got rune
+	e.readCharPending = true
+	e.readCharCallback = func(r rune) { got = r }
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'q'})
+	if got != 'q' {
+		t.Errorf("readChar callback got %q, want 'q'", got)
+	}
+	if e.readCharPending {
+		t.Error("readCharPending should be cleared")
+	}
+}
+
+func TestDispatchParsedKey_ReadCharNonRuneCancels(t *testing.T) {
+	e := newTestEditor("")
+	called := false
+	e.readCharPending = true
+	e.readCharCallback = func(rune) { called = true }
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyCtrlG})
+	if called {
+		t.Error("callback should not be invoked for non-rune key")
+	}
+	if !strings.Contains(e.message, "cancelled") {
+		t.Errorf("expected cancellation message, got %q", e.message)
+	}
+}
+
+func TestDispatchParsedKey_PrefixIncomplete(t *testing.T) {
+	e := newTestEditor("")
+	e.prefixKeymap = e.ctrlXKeymap
+	// F12 is not bound under C-x.
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyF12})
+	if e.prefixKeymap != nil {
+		t.Error("unrecognised prefix key should clear prefixKeymap")
+	}
+	if !strings.Contains(e.message, "incomplete") {
+		t.Errorf("expected 'incomplete' message, got %q", e.message)
+	}
+}
+
+func TestDispatchParsedKey_LspDocDismissed(t *testing.T) {
+	e := newTestEditor("hello")
+	e.lspDocLines = []string{"doc"}
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'x'})
+	if e.lspDocLines != nil {
+		t.Error("any key should dismiss the lsp doc popup")
+	}
+}
+
+func TestDispatchParsedKey_SelfInsertUnbound(t *testing.T) {
+	e := newTestEditor("")
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'Z'})
+	if e.ActiveBuffer().String() != "Z" {
+		t.Errorf("unbound printable rune should self-insert, got %q", e.ActiveBuffer().String())
+	}
+}
+
+func TestDispatchParsedKey_ModeRouting(t *testing.T) {
+	modes := []string{
+		"dired", "buffer-list", "vc-log", "diff", "vc-show", "vc-status",
+		"compilation", "vc-grep", "lsp-refs", "help", "man", "shell",
+		"vc-annotate", "vc-commit", "vc-fixup-select",
+	}
+	for _, m := range modes {
+		e := newCapTestEditor("line1\nline2\n")
+		e.lisp = elisp.NewEvaluator()
+		e.diredStates = map[*buffer.Buffer]*diredState{}
+		e.vcParent = map[*buffer.Buffer]*buffer.Buffer{}
+		e.shellStates = map[*buffer.Buffer]*shellState{}
+		e.ActiveBuffer().SetMode(m)
+		// Routes through the mode-dispatch switch; must not panic.
+		e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'z'})
+	}
+}
+
+func TestDispatchParsedKey_DebugModeRouting(t *testing.T) {
+	for _, m := range []string{"debug-locals", "debug-stack", "debug-repl", "go"} {
+		e := newCapTestEditor("x")
+		e.lisp = elisp.NewEvaluator()
+		e.dap = &dapState{}
+		e.dapBreakpoints = map[string]map[int]struct{}{}
+		e.ActiveBuffer().SetMode(m)
+		e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'z'})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dispatchMinibufKey — editing/navigation key branches
+// ---------------------------------------------------------------------------
+
+func newMinibufKeyEditor(content string) *Editor {
+	e := newTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	e.ReadMinibuffer("P: ", func(string) {})
+	e.minibufBuf.InsertString(0, content)
+	e.minibufBuf.SetPoint(len([]rune(content)))
+	return e
+}
+
+func TestDispatchMinibufKey_DeleteForward(t *testing.T) {
+	e := newMinibufKeyEditor("abc")
+	e.minibufBuf.SetPoint(0)
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyDelete})
+	if e.minibufBuf.String() != "bc" {
+		t.Errorf("Delete should remove forward char, got %q", e.minibufBuf.String())
+	}
+}
+
+func TestDispatchMinibufKey_CtrlD(t *testing.T) {
+	e := newMinibufKeyEditor("abc")
+	e.minibufBuf.SetPoint(0)
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyCtrlD})
+	if e.minibufBuf.String() != "bc" {
+		t.Errorf("C-d should delete forward char, got %q", e.minibufBuf.String())
+	}
+}
+
+func TestDispatchMinibufKey_CtrlK(t *testing.T) {
+	e := newMinibufKeyEditor("abcdef")
+	e.minibufBuf.SetPoint(3)
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyCtrlK})
+	if e.minibufBuf.String() != "abc" {
+		t.Errorf("C-k should kill to end of line, got %q", e.minibufBuf.String())
+	}
+}
+
+func TestDispatchMinibufKey_LeftRight(t *testing.T) {
+	e := newMinibufKeyEditor("abc")
+	e.minibufBuf.SetPoint(1)
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyRight})
+	if e.minibufBuf.Point() != 2 {
+		t.Errorf("Right point = %d, want 2", e.minibufBuf.Point())
+	}
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyLeft})
+	if e.minibufBuf.Point() != 1 {
+		t.Errorf("Left point = %d, want 1", e.minibufBuf.Point())
+	}
+}
+
+func TestDispatchMinibufKey_CtrlFB(t *testing.T) {
+	e := newMinibufKeyEditor("abc")
+	e.minibufBuf.SetPoint(1)
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyCtrlF})
+	if e.minibufBuf.Point() != 2 {
+		t.Errorf("C-f point = %d, want 2", e.minibufBuf.Point())
+	}
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyCtrlB})
+	if e.minibufBuf.Point() != 1 {
+		t.Errorf("C-b point = %d, want 1", e.minibufBuf.Point())
+	}
+}
+
+func TestDispatchMinibufKey_HomeEnd(t *testing.T) {
+	e := newMinibufKeyEditor("abc")
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyHome})
+	if e.minibufBuf.Point() != 0 {
+		t.Errorf("Home point = %d, want 0", e.minibufBuf.Point())
+	}
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyEnd})
+	if e.minibufBuf.Point() != e.minibufBuf.Len() {
+		t.Errorf("End point = %d, want %d", e.minibufBuf.Point(), e.minibufBuf.Len())
+	}
+}
+
+func TestDispatchMinibufKey_CtrlW(t *testing.T) {
+	e := newMinibufKeyEditor("foo bar")
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyCtrlW})
+	if strings.Contains(e.minibufBuf.String(), "bar") {
+		t.Errorf("C-w should kill the last word, got %q", e.minibufBuf.String())
+	}
+}
+
+func TestDispatchMinibufKey_MetaBackspace(t *testing.T) {
+	e := newMinibufKeyEditor("foo bar")
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyBackspace, Mod: tcell.ModAlt})
+	if strings.Contains(e.minibufBuf.String(), "bar") {
+		t.Errorf("M-DEL should kill the last word, got %q", e.minibufBuf.String())
+	}
+}
+
+func TestDispatchMinibufKey_DownUpCandidates(t *testing.T) {
+	e := newMinibufKeyEditor("")
+	e.minibufCandidates = []string{"a", "b", "c"}
+	e.minibufSelectedIdx = 0
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyDown})
+	if e.minibufSelectedIdx != 1 {
+		t.Errorf("Down with candidates should advance selection, got %d", e.minibufSelectedIdx)
+	}
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyUp})
+	if e.minibufSelectedIdx != 0 {
+		t.Errorf("Up with candidates should move selection back, got %d", e.minibufSelectedIdx)
+	}
+}
+
+func TestDispatchMinibufKey_CtrlNP(t *testing.T) {
+	e := newMinibufKeyEditor("")
+	e.minibufCandidates = []string{"x", "y"}
+	e.minibufSelectedIdx = 0
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyCtrlN})
+	if e.minibufSelectedIdx != 1 {
+		t.Errorf("C-n should advance selection, got %d", e.minibufSelectedIdx)
+	}
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyCtrlP})
+	if e.minibufSelectedIdx != 0 {
+		t.Errorf("C-p should move selection back, got %d", e.minibufSelectedIdx)
+	}
+}
+
+func TestDispatchMinibufKey_MetaF(t *testing.T) {
+	e := newMinibufKeyEditor("foo bar")
+	e.minibufBuf.SetPoint(0)
+	e.dispatchMinibufKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'f', Mod: tcell.ModAlt})
+	if e.minibufBuf.Point() != 3 {
+		t.Errorf("M-f should move to end of first word (3), got %d", e.minibufBuf.Point())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// manDispatch / relayoutWindows / evalSexp / Close
+// ---------------------------------------------------------------------------
+
+func TestManDispatch_UsesMRU(t *testing.T) {
+	e := newTestEditor("main")
+	e.lisp = elisp.NewEvaluator()
+	other := buffer.NewWithContent("other", "x")
+	manBuf := buffer.NewWithContent("*Man cat*", "man page")
+	manBuf.SetMode("man")
+	e.buffers = append(e.buffers, other, manBuf)
+	e.bufferMRU = []*buffer.Buffer{other}
+	e.activeWin.SetBuf(manBuf)
+	if !e.manDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'q'}) {
+		t.Fatal("'q' should be consumed")
+	}
+	if e.ActiveBuffer() != other {
+		t.Error("manDispatch should switch to the MRU non-man buffer")
+	}
+}
+
+func TestManDispatch_NonQNotConsumed(t *testing.T) {
+	e := newTestEditor("x")
+	if e.manDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'j'}) {
+		t.Error("non-'q' key should not be consumed by manDispatch")
+	}
+}
+
+func TestRelayoutWindows_NoWindows(t *testing.T) {
+	e := newTestEditor("")
+	e.windows = nil
+	e.relayoutWindows(80, 24) // n==0 → no-op, no panic
+}
+
+func TestRelayoutWindows_NilLayoutRebuilds(t *testing.T) {
+	e := newTestEditor("hi")
+	e.layoutRoot = nil
+	e.relayoutWindows(80, 24)
+	if e.layoutRoot == nil {
+		t.Error("relayoutWindows should rebuild a nil layout tree")
+	}
+}
+
+func TestEvalSexp_OK(t *testing.T) {
+	e := newTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	got, err := e.evalSexp("(+ 1 2)")
+	if err != nil {
+		t.Fatalf("evalSexp: %v", err)
+	}
+	if got != "3" {
+		t.Errorf("evalSexp((+ 1 2)) = %q, want \"3\"", got)
+	}
+}
+
+func TestExecCommand_Unknown(t *testing.T) {
+	e := newTestEditor("")
+	e.execCommand("no-such-command-xyz")
+	if !strings.Contains(e.message, "Unknown command") {
+		t.Errorf("expected 'Unknown command' message, got %q", e.message)
+	}
+}
+
+func TestEvalSexp_Error(t *testing.T) {
+	e := newTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	if _, err := e.evalSexp("(this is not valid"); err == nil {
+		t.Error("evalSexp should return an error for malformed input")
+	}
+}
+
+func TestLoadInitFile_EvalsGomacs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".gomacs"), []byte("(setq fill-column 99)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := newElispTestEditor("")
+	e.fillColumn = 70
+	e.loadInitFile()
+	if e.fillColumn != 99 {
+		t.Errorf("loadInitFile should apply ~/.gomacs config, fillColumn=%d", e.fillColumn)
+	}
+}
+
+func TestLoadInitFile_NoFile(t *testing.T) {
+	home := t.TempDir() // no init file present
+	t.Setenv("HOME", home)
+	e := newElispTestEditor("")
+	e.loadInitFile() // must not panic and must leave defaults intact
+}
+
+func TestAddToKillRing_EmptyIgnored(t *testing.T) {
+	e := newTestEditor("")
+	e.killRing = nil
+	e.addToKillRing("")
+	if len(e.killRing) != 0 {
+		t.Errorf("empty string should not be added to the kill ring, len=%d", len(e.killRing))
+	}
+}
+
+func TestAddToKillRing_TruncatesAtCap(t *testing.T) {
+	e := newTestEditor("")
+	e.killRing = nil
+	for i := range 65 {
+		e.addToKillRing(fmt.Sprintf("entry-%d", i))
+	}
+	if len(e.killRing) != 60 {
+		t.Errorf("kill ring should be capped at 60 entries, got %d", len(e.killRing))
+	}
+	if e.killRing[0] != "entry-64" {
+		t.Errorf("most recent entry should be first, got %q", e.killRing[0])
+	}
+}
+
+func TestYankPop_EmptyRing(t *testing.T) {
+	e := newTestEditor("")
+	e.killRing = nil
+	if got := e.yankPop(); got != "" {
+		t.Errorf("yankPop on empty ring should return \"\", got %q", got)
+	}
+}
+
+func TestYankPop_Rotates(t *testing.T) {
+	e := newTestEditor("")
+	e.killRing = []string{"one", "two", "three"}
+	e.yankIdx = 0
+	if got := e.yankPop(); got != "two" {
+		t.Errorf("first yankPop should return \"two\", got %q", got)
+	}
+	if got := e.yankPop(); got != "three" {
+		t.Errorf("second yankPop should return \"three\", got %q", got)
+	}
+	if got := e.yankPop(); got != "one" {
+		t.Errorf("yankPop should wrap around to \"one\", got %q", got)
 	}
 }

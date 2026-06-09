@@ -146,6 +146,39 @@ func TestApplyRedoEmptyReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestApplyRedoReplaceString(t *testing.T) {
+	b := NewWithContent("test", "hello")
+	b.ReplaceString(0, 5, "world")
+	b.ApplyUndo()
+	if got := b.String(); got != "hello" {
+		t.Fatalf("after undo of replace: want %q, got %q", "hello", got)
+	}
+	if !b.ApplyRedo() {
+		t.Fatal("ApplyRedo of replace returned false")
+	}
+	if got := b.String(); got != "world" {
+		t.Fatalf("after redo of replace: want %q, got %q", "world", got)
+	}
+	if b.Point() != 5 {
+		t.Errorf("point after redo of replace = %d, want 5", b.Point())
+	}
+}
+
+func TestApplyRedoDelete(t *testing.T) {
+	b := NewWithContent("test", "hello world")
+	b.Delete(5, 6)
+	b.ApplyUndo()
+	if got := b.String(); got != "hello world" {
+		t.Fatalf("after undo of delete: want %q, got %q", "hello world", got)
+	}
+	if !b.ApplyRedo() {
+		t.Fatal("ApplyRedo of delete returned false")
+	}
+	if got := b.String(); got != "hello" {
+		t.Fatalf("after redo of delete: want %q, got %q", "hello", got)
+	}
+}
+
 func TestApplyUndoMultipleSteps(t *testing.T) {
 	b := NewWithContent("test", "")
 	b.Insert(0, 'a')

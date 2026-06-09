@@ -13,6 +13,7 @@ import (
 
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/syntax"
+	"github.com/skybert/gomacs/internal/terminal"
 )
 
 // newTestEditorFull returns a test editor that also has the auxiliary maps
@@ -26,6 +27,264 @@ func newTestEditorFull(content string) *Editor {
 	e.customHighlighters = make(map[*buffer.Buffer]syntax.Highlighter)
 	e.spanCaches = make(map[*buffer.Buffer]*spanCache)
 	return e
+}
+
+// ---------------------------------------------------------------------------
+// cmdUndo / cmdRedo
+// ---------------------------------------------------------------------------
+
+func TestCmdUndo_NoHistory(t *testing.T) {
+	e := newTestEditor("hello")
+	e.cmdUndo()
+	if !strings.Contains(e.message, "No further undo") {
+		t.Errorf("expected 'No further undo' message, got %q", e.message)
+	}
+}
+
+func TestCmdUndo_AfterEdit(t *testing.T) {
+	e := newElispTestEditor("")
+	e.selfInsert('X')
+	e.selfInsert('Y')
+	e.cmdUndo()
+	if strings.Contains(e.ActiveBuffer().String(), "Y") && strings.Contains(e.ActiveBuffer().String(), "X") {
+		// undo should have removed at least the most recent insertion
+		t.Errorf("undo did not revert insertion: %q", e.ActiveBuffer().String())
+	}
+}
+
+func TestCmdUndo_ReadOnly(t *testing.T) {
+	e := newTestEditor("data")
+	e.ActiveBuffer().SetReadOnly(true)
+	e.cmdUndo()
+	if e.ActiveBuffer().String() != "data" {
+		t.Error("cmdUndo on read-only buffer must not modify it")
+	}
+}
+
+func TestCmdRedo_NoHistory(t *testing.T) {
+	e := newTestEditor("hello")
+	e.cmdRedo()
+	if !strings.Contains(e.message, "No further redo") {
+		t.Errorf("expected 'No further redo' message, got %q", e.message)
+	}
+}
+
+func TestCmdRedo_AfterUndo(t *testing.T) {
+	e := newElispTestEditor("")
+	e.selfInsert('A')
+	e.cmdUndo()
+	e.cmdRedo()
+	// Redo should not panic and the buffer is in a defined state.
+	_ = e.ActiveBuffer().String()
+}
+
+// ---------------------------------------------------------------------------
+// cmdDescribeFunction / cmdDescribeVariable
+// ---------------------------------------------------------------------------
+
+func TestCmdDescribeFunction_ShowsHelp(t *testing.T) {
+	e := newElispTestEditor("")
+	e.setupKeymaps()
+	e.cmdDescribeFunction()
+	if e.minibufDoneFunc == nil {
+		t.Fatal("cmdDescribeFunction should activate the minibuffer")
+	}
+	e.minibufDoneFunc("forward-char")
+	if e.FindBuffer("*Help*") == nil {
+		t.Error("expected *Help* buffer after describing a function")
+	}
+}
+
+func TestCmdDescribeFunction_EmptyNameNoHelp(t *testing.T) {
+	e := newElispTestEditor("")
+	e.setupKeymaps()
+	e.cmdDescribeFunction()
+	e.minibufDoneFunc("")
+	if e.FindBuffer("*Help*") != nil {
+		t.Error("empty function name should not create *Help*")
+	}
+}
+
+func TestCmdDescribeVariable_ShowsHelp(t *testing.T) {
+	e := newElispTestEditor("")
+	_, _ = e.lisp.EvalString("(setq fill-column 80)")
+	e.cmdDescribeVariable()
+	if e.minibufDoneFunc == nil {
+		t.Fatal("cmdDescribeVariable should activate the minibuffer")
+	}
+	e.minibufDoneFunc("fill-column")
+	if e.FindBuffer("*Help*") == nil {
+		t.Error("expected *Help* buffer after describing a variable")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cmdLoadTheme
+// ---------------------------------------------------------------------------
+
+func TestCmdLoadTheme_Known(t *testing.T) {
+	e := newElispTestEditor("")
+	e.cmdLoadTheme()
+	if e.minibufDoneFunc == nil {
+		t.Fatal("cmdLoadTheme should activate the minibuffer")
+	}
+	e.minibufDoneFunc("sweet")
+	if strings.Contains(e.message, "Unknown theme") {
+		t.Errorf("'sweet' should be a known theme, got %q", e.message)
+	}
+}
+
+func TestCmdLoadTheme_Unknown(t *testing.T) {
+	e := newElispTestEditor("")
+	e.cmdLoadTheme()
+	e.minibufDoneFunc("no-such-theme-xyz")
+	if !strings.Contains(e.message, "Unknown theme") {
+		t.Errorf("expected 'Unknown theme' message, got %q", e.message)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cmdDeleteOtherWindows
+// ---------------------------------------------------------------------------
+
+func TestCmdDeleteOtherWindows(t *testing.T) {
+	e := newTestEditor("hello")
+	e.cmdSplitWindowBelow()
+	if len(e.windows) != 2 {
+		t.Fatalf("expected 2 windows after split, got %d", len(e.windows))
+	}
+	e.cmdDeleteOtherWindows()
+	if len(e.windows) != 1 {
+		t.Errorf("expected 1 window after delete-other-windows, got %d", len(e.windows))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Read-only guards: editing commands must no-op on a read-only buffer.
+// ---------------------------------------------------------------------------
+
+func TestEditingCommandsReadOnlyGuards(t *testing.T) {
+	const content = "hello world\nsecond line\nthird\n"
+	cmds := map[string]func(*Editor){
+		"newline":              (*Editor).cmdNewline,
+		"deleteChar":           (*Editor).cmdDeleteChar,
+		"backwardDeleteChar":   (*Editor).cmdBackwardDeleteChar,
+		"killLine":             (*Editor).cmdKillLine,
+		"killRegion":           (*Editor).cmdKillRegion,
+		"yank":                 (*Editor).cmdYank,
+		"yankPop":              (*Editor).cmdYankPop,
+		"killWord":             (*Editor).cmdKillWord,
+		"backwardKillWord":     (*Editor).cmdBackwardKillWord,
+		"transposeChars":       (*Editor).cmdTransposeChars,
+		"openLine":             (*Editor).cmdOpenLine,
+		"killSentence":         (*Editor).cmdKillSentence,
+		"transposeWords":       (*Editor).cmdTransposeWords,
+		"deleteBlankLines":     (*Editor).cmdDeleteBlankLines,
+		"joinLine":             (*Editor).cmdJoinLine,
+		"upcaseRegion":         (*Editor).cmdUpcaseRegion,
+		"downcaseRegion":       (*Editor).cmdDowncaseRegion,
+		"sortLines":            (*Editor).cmdSortLines,
+		"deleteDuplicateLines": (*Editor).cmdDeleteDuplicateLines,
+		"fillParagraph":        (*Editor).cmdFillParagraph,
+		"indentRegion":         (*Editor).cmdIndentRegion,
+		"indentRigidly":        (*Editor).cmdIndentRigidly,
+	}
+	for name, fn := range cmds {
+		e := newElispTestEditor(content)
+		e.ActiveBuffer().SetReadOnly(true)
+		e.ActiveBuffer().SetPoint(3)
+		fn(e)
+		if e.ActiveBuffer().String() != content {
+			t.Errorf("%s mutated a read-only buffer: %q", name, e.ActiveBuffer().String())
+		}
+	}
+}
+
+// newFindFileEditor returns an editor with the maps that loadFile / openDired need.
+func newFindFileEditor(content string) *Editor {
+	e := newTestEditorFull(content)
+	e.lspConns = make(map[string]*lspConn)
+	e.diredStates = make(map[*buffer.Buffer]*diredState)
+	// Non-nil terminal (screen==nil) so async callbacks calling PostWakeup are safe.
+	e.term = &terminal.Terminal{}
+	return e
+}
+
+func TestCmdFindFile_OpensFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "open.txt")
+	_ = os.WriteFile(path, []byte("hello"), 0o644)
+	e := newFindFileEditor("")
+	e.cmdFindFile()
+	if e.minibufDoneFunc == nil {
+		t.Fatal("cmdFindFile should activate the minibuffer")
+	}
+	e.minibufDoneFunc(path)
+	if e.ActiveBuffer().Filename() != path {
+		t.Errorf("expected active buffer %q, got %q", path, e.ActiveBuffer().Filename())
+	}
+}
+
+func TestCmdFindFile_DirectoryOpensDired(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644)
+	e := newFindFileEditor("")
+	e.cmdFindFile()
+	e.minibufDoneFunc(dir)
+	if e.ActiveBuffer().Mode() != "dired" {
+		t.Errorf("a directory path should open dired, got mode %q", e.ActiveBuffer().Mode())
+	}
+}
+
+func TestCmdFindFile_EmptyNoop(t *testing.T) {
+	e := newFindFileEditor("content")
+	before := e.ActiveBuffer()
+	e.cmdFindFile()
+	e.minibufDoneFunc("")
+	if e.ActiveBuffer() != before {
+		t.Error("empty path should not change the active buffer")
+	}
+}
+
+func TestCmdFindFile_TildeExpansion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	e := newFindFileEditor("")
+	e.cmdFindFile()
+	e.minibufDoneFunc("~/newfile.txt")
+	if !strings.HasPrefix(e.ActiveBuffer().Filename(), home) {
+		t.Errorf("~ should expand to home dir, got %q", e.ActiveBuffer().Filename())
+	}
+}
+
+func TestCmdProjectFindFile_OpensRelativePath(t *testing.T) {
+	dir := makeGitRepo(t)
+	sub := filepath.Join(dir, "pkg")
+	_ = os.Mkdir(sub, 0o755)
+	target := filepath.Join(sub, "file.txt")
+	_ = os.WriteFile(target, []byte("data"), 0o644)
+
+	e := newFindFileEditor("")
+	e.ActiveBuffer().SetFilename(filepath.Join(dir, "notes.txt"))
+	e.cmdProjectFindFile()
+	if e.minibufDoneFunc == nil {
+		t.Fatal("cmdProjectFindFile should activate the minibuffer in a VC repo")
+	}
+	e.minibufDoneFunc(filepath.Join("pkg", "file.txt"))
+	if e.ActiveBuffer().Filename() != target {
+		t.Errorf("expected to open %q, got %q", target, e.ActiveBuffer().Filename())
+	}
+}
+
+func TestCmdProjectFindFile_NoVCFallsBack(t *testing.T) {
+	dir := t.TempDir() // not a git repo
+	e := newFindFileEditor("")
+	e.ActiveBuffer().SetFilename(filepath.Join(dir, "loose.txt"))
+	e.cmdProjectFindFile()
+	// Falls back to cmdFindFile → minibuffer prompt active.
+	if !e.minibufActive {
+		t.Error("cmdProjectFindFile with no VC root should fall back to find-file")
+	}
 }
 
 // ---------------------------------------------------------------------------

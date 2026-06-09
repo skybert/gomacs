@@ -15,22 +15,22 @@ const (
 type TokenType int
 
 const (
-	TokenEOF       TokenType = iota
-	TokenLParen              // (
-	TokenRParen              // )
-	TokenLBracket            // [
-	TokenRBracket            // ]
-	TokenQuote               // '
-	TokenSharpQuote          // #'
-	TokenBackquote           // `
-	TokenComma               // ,
-	TokenCommaAt             // ,@
-	TokenDot                 // .
-	TokenSymbol              // foo, bar, t, nil, +, -, etc.
-	TokenString              // "hello"
-	TokenInt                 // 42, -1
-	TokenFloat               // 3.14
-	TokenBool                // t or nil (also symbol, but special)
+	TokenEOF        TokenType = iota
+	TokenLParen               // (
+	TokenRParen               // )
+	TokenLBracket             // [
+	TokenRBracket             // ]
+	TokenQuote                // '
+	TokenSharpQuote           // #'
+	TokenBackquote            // `
+	TokenComma                // ,
+	TokenCommaAt              // ,@
+	TokenDot                  // .
+	TokenSymbol               // foo, bar, t, nil, +, -, etc.
+	TokenString               // "hello"
+	TokenInt                  // 42, -1
+	TokenFloat                // 3.14
+	TokenBool                 // t or nil (also symbol, but special)
 )
 
 // Token is a single lexical token.

@@ -344,3 +344,65 @@ func TestANSIParse_italic(t *testing.T) {
 		t.Error("expected non-bold face")
 	}
 }
+
+func TestANSIParse_malformedEscapeNoTerminator(t *testing.T) {
+	// ESC [ with no terminating 'm' — emitted raw, no spans.
+	raw := "abc\x1b[31"
+	plain, spans := ANSIParse(raw)
+	if plain != raw {
+		t.Errorf("plain = %q, want %q", plain, raw)
+	}
+	if len(spans) != 0 {
+		t.Errorf("expected no spans for malformed escape, got %v", spans)
+	}
+}
+
+func TestANSIParse_loneEscape(t *testing.T) {
+	// A lone ESC not followed by '[' is emitted as a literal rune.
+	raw := "a\x1bb"
+	plain, _ := ANSIParse(raw)
+	if plain != raw {
+		t.Errorf("plain = %q, want %q", plain, raw)
+	}
+}
+
+func TestANSIParse_boldOffItalicOff(t *testing.T) {
+	// Exercise the 22 (bold off) and 23 (italic off) branches.
+	raw := "\x1b[1;3mboth\x1b[22;23mneither\x1b[0m"
+	plain, spans := ANSIParse(raw)
+	if plain != "bothneither" {
+		t.Errorf("plain = %q, want %q", plain, "bothneither")
+	}
+	// The "both" span should be bold+italic; "neither" carries no style so
+	// produces no span.
+	var sawBoldItalic bool
+	for _, sp := range spans {
+		if sp.Face.Bold && sp.Face.Italic {
+			sawBoldItalic = true
+		}
+	}
+	if !sawBoldItalic {
+		t.Error("expected a bold+italic span")
+	}
+}
+
+func TestParseSGRParams_invalidToken(t *testing.T) {
+	// Non-numeric tokens are skipped.
+	got := parseSGRParams("31;abc;1")
+	want := []int{31, 1}
+	if len(got) != len(want) {
+		t.Fatalf("parseSGRParams = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("parseSGRParams[%d] = %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseSGRParams_empty(t *testing.T) {
+	got := parseSGRParams("")
+	if len(got) != 1 || got[0] != 0 {
+		t.Errorf("parseSGRParams(\"\") = %v, want [0]", got)
+	}
+}

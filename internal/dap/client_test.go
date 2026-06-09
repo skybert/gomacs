@@ -2,6 +2,7 @@ package dap
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -226,5 +227,30 @@ func TestClientClose(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout: Request did not return after Close")
+	}
+}
+
+func TestStart_BadCommandReturnsError(t *testing.T) {
+	if _, err := Start("", "/nonexistent/dap-adapter-xyz"); err == nil {
+		t.Fatal("Start with a non-existent command should return an error")
+	}
+}
+
+func TestRequestCtx_Cancelled(t *testing.T) {
+	c := newPipeClient(t, func(r io.Reader, _ io.Writer) {
+		// Never reply, so the request blocks until ctx is cancelled.
+		buf := make([]byte, 1)
+		for {
+			if _, err := r.Read(buf); err != nil {
+				return
+			}
+		}
+	})
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+	if _, err := c.RequestCtx(ctx, "initialize", nil); err == nil {
+		t.Fatal("RequestCtx with a cancelled context should return an error")
 	}
 }

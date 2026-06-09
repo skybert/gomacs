@@ -144,3 +144,79 @@ func TestConfHighlighter_ColonSeparator(t *testing.T) {
 		t.Error("expected FaceNumber for numeric value with colon separator")
 	}
 }
+
+func TestConfHighlighter_Empty(t *testing.T) {
+	h := ConfHighlighter{}
+	if spans := h.Highlight("", 0, 0); len(spans) != 0 {
+		t.Errorf("expected no spans for empty input, got %v", spans)
+	}
+}
+
+func TestConfHighlighter_BlankAndWhitespaceLines(t *testing.T) {
+	h := ConfHighlighter{}
+	// A blank line, then a line of only whitespace, then a value line.
+	text := "\n   \nkey = val\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	if len(spans) == 0 {
+		t.Error("expected at least the key span")
+	}
+}
+
+func TestConfHighlighter_IndentedComment(t *testing.T) {
+	h := ConfHighlighter{}
+	text := "   # indented comment\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	if len(spans) != 1 || spans[0].Face != FaceComment {
+		t.Errorf("expected FaceComment for indented comment, got %v", spans)
+	}
+}
+
+func TestConfHighlighter_QuotedValueWithEscape(t *testing.T) {
+	h := ConfHighlighter{}
+	text := `path = "C:\\temp\\x"` + "\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	var strSpan *Span
+	for i := range spans {
+		if spans[i].Face == FaceString {
+			strSpan = &spans[i]
+		}
+	}
+	if strSpan == nil {
+		t.Error("expected FaceString for escaped quoted value")
+	}
+}
+
+func TestConfHighlighter_NegativeNumber(t *testing.T) {
+	h := ConfHighlighter{}
+	text := "offset = -17\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	var numSpan *Span
+	for i := range spans {
+		if spans[i].Face == FaceNumber {
+			numSpan = &spans[i]
+		}
+	}
+	if numSpan == nil {
+		t.Error("expected FaceNumber for negative number value")
+	}
+}
+
+func TestConfHighlighter_QuotedKey(t *testing.T) {
+	h := ConfHighlighter{}
+	// Key contains a separator inside a quoted string; the real '=' follows.
+	text := `"a:b" = 1` + "\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	if len(spans) == 0 {
+		t.Error("expected spans for quoted-key line")
+	}
+}
+
+func TestConfHighlighter_NoSeparator(t *testing.T) {
+	h := ConfHighlighter{}
+	// A bare line with no '=' or ':' separator produces no spans.
+	text := "barewordnoassignment\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	if len(spans) != 0 {
+		t.Errorf("expected no spans for line without separator, got %v", spans)
+	}
+}

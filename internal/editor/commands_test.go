@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
@@ -25,15 +26,16 @@ func newTestEditor(content string) *Editor {
 	win := window.New(buf, 0, 0, 80, 24)
 
 	e := &Editor{
-		term:         nil,
-		buffers:      []*buffer.Buffer{buf},
-		windows:      []*window.Window{win},
-		activeWin:    win,
-		layoutRoot:   leafNode(win),
-		minibufBuf:   buffer.New(" *minibuf*"),
-		globalKeymap: keymap.New("global"),
-		ctrlXKeymap:  keymap.New("C-x"),
-		universalArg: 1,
+		term:             nil,
+		buffers:          []*buffer.Buffer{buf},
+		windows:          []*window.Window{win},
+		activeWin:        win,
+		layoutRoot:       leafNode(win),
+		minibufBuf:       buffer.New(" *minibuf*"),
+		globalKeymap:     keymap.New("global"),
+		ctrlXKeymap:      keymap.New("C-x"),
+		universalArg:     1,
+		autoRevertMtimes: make(map[*buffer.Buffer]time.Time),
 	}
 	e.minibufWin = window.New(e.minibufBuf, 23, 0, 80, 1)
 	return e

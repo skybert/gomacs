@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -472,5 +473,193 @@ func TestProcTablePipeEscape(t *testing.T) {
 	out := runProc(input)
 	if strings.Contains(out, "key|name") && !strings.Contains(out, `key\|name`) {
 		t.Errorf("table: pipe not escaped in %q", out)
+	}
+}
+
+// ---- gitVersion ------------------------------------------------------------
+
+func TestGitVersionNonEmpty(t *testing.T) {
+	// Run from within the repo: git describe should succeed and return a
+	// non-empty string. If git is unavailable it returns "dev" — still valid.
+	got := gitVersion()
+	if got == "" {
+		t.Error("gitVersion returned empty string")
+	}
+}
+
+// ---- readAuthors -----------------------------------------------------------
+
+func TestReadAuthorsJoinsLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AUTHORS")
+	if err := os.WriteFile(path, []byte("Alice\n\nBob\n  Carol  \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readAuthors(path)
+	if got != "Alice, Bob, Carol" {
+		t.Errorf("readAuthors = %q, want %q", got, "Alice, Bob, Carol")
+	}
+}
+
+func TestReadAuthorsMissingFile(t *testing.T) {
+	if got := readAuthors("/nonexistent/AUTHORS"); got != "" {
+		t.Errorf("readAuthors missing = %q, want empty", got)
+	}
+}
+
+// ---- main ------------------------------------------------------------------
+
+func TestMainWritesUserGuide(t *testing.T) {
+	dir := t.TempDir()
+	docDir := filepath.Join(dir, "doc")
+	if err := os.MkdirAll(docDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manIn := ".TH GOMACS 1\n.SH NAME\ngomacs \\- editor\n.SH AUTHORS\n@AUTHORS@\n"
+	if err := os.WriteFile(filepath.Join(docDir, "gomacs.1.in"), []byte(manIn), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "AUTHORS"), []byte("Dave\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A screenshot so the screenshots section is exercised.
+	if err := os.WriteFile(filepath.Join(docDir, "demo.png"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(old) }()
+
+	main()
+
+	out, err := os.ReadFile(filepath.Join(docDir, "gomacs-user-guide.md"))
+	if err != nil {
+		t.Fatalf("main did not write user guide: %v", err)
+	}
+	md := string(out)
+	if !strings.Contains(md, "# gomacs(1)") {
+		t.Errorf("user guide missing title: %q", md)
+	}
+	if !strings.Contains(md, "Dave") {
+		t.Errorf("user guide missing author substitution: %q", md)
+	}
+	if !strings.Contains(md, "## Screenshots") || !strings.Contains(md, "demo.png") {
+		t.Errorf("user guide missing screenshots section: %q", md)
+	}
+}
+
+// ---- run: flushTP / open code block / open table at EOF --------------------
+
+func TestRunFlushesOpenTPAtEOF(t *testing.T) {
+	// A .TP with a term but no closing blank line; run() must flushTP.
+	out := runProc(".TP\nterm\ndef")
+	if !strings.Contains(out, "term") || !strings.Contains(out, "def") {
+		t.Errorf("open TP at EOF: %q", out)
+	}
+}
+
+func TestRunClosesOpenCodeBlockAtEOF(t *testing.T) {
+	// .nf with no closing .fi: run() must emit the closing fence.
+	out := runProc(".nf\ncode")
+	if strings.Count(out, "```") != 2 {
+		t.Errorf("open .nf at EOF should be closed with fence, got %q", out)
+	}
+}
+
+func TestRunFlushesOpenTableAtEOF(t *testing.T) {
+	// .TS with rows but no .TE: run() must flush the table.
+	out := runProc(".TS\nl l.\nKey\tVal")
+	if !strings.Contains(out, "Key") || !strings.Contains(out, "Val") {
+		t.Errorf("open table at EOF should be flushed, got %q", out)
+	}
+}
+
+// ---- processMacro: empty / .TE / .fi standalone ----------------------------
+
+func TestProcessMacroEmptyLine(t *testing.T) {
+	// A lone "." has no macro name; processMacro returns early.
+	out := runProc(".\ntext")
+	if !strings.Contains(out, "text") {
+		t.Errorf("lone dot macro: %q", out)
+	}
+}
+
+func TestProcTEWithoutTable(t *testing.T) {
+	// .TE outside a table goes through the macro switch (inTable already false).
+	out := runProc(".TE\ntext")
+	if !strings.Contains(out, "text") {
+		t.Errorf(".TE standalone: %q", out)
+	}
+}
+
+func TestProcFiWithoutNF(t *testing.T) {
+	// .fi outside a code block goes through the macro switch.
+	out := runProc(".fi\ntext")
+	if !strings.Contains(out, "```") {
+		t.Errorf(".fi standalone should emit fence: %q", out)
+	}
+}
+
+// ---- flushTable empty ------------------------------------------------------
+
+func TestFlushTableEmptyNoOutput(t *testing.T) {
+	// .TS immediately followed by .TE: no rows, flushTable returns early.
+	out := runProc(".TS\n.TE\ntext")
+	if strings.Contains(out, "|") {
+		t.Errorf("empty table should emit no pipes: %q", out)
+	}
+}
+
+// ---- inline: trailing-backslash and \f at end ------------------------------
+
+func TestInlineTrailingBackslash(t *testing.T) {
+	got := inline(`abc\`)
+	if got != `abc\` {
+		t.Errorf("inline trailing backslash = %q, want %q", got, `abc\`)
+	}
+}
+
+func TestInlineFontEscapeAtEnd(t *testing.T) {
+	// "\f" with nothing after it: emit the backslash literally.
+	got := inline(`x\f`)
+	if !strings.Contains(got, "x") {
+		t.Errorf("inline \\f at end = %q", got)
+	}
+}
+
+func TestInlineUnknownFontCode(t *testing.T) {
+	// \fZ is an unknown font code; the backslash is emitted.
+	got := inline(`\fZtext`)
+	if !strings.Contains(got, "text") {
+		t.Errorf("inline unknown font = %q", got)
+	}
+}
+
+// ---- plainText: trailing backslash, \f at end, unknown ---------------------
+
+func TestPlainTextTrailingBackslash(t *testing.T) {
+	got := plainText(`abc\`)
+	if got != "abc" {
+		t.Errorf("plainText trailing backslash = %q, want %q", got, "abc")
+	}
+}
+
+func TestPlainTextFontEscapeAtEnd(t *testing.T) {
+	got := plainText(`x\f`)
+	if !strings.Contains(got, "x") {
+		t.Errorf("plainText \\f at end = %q", got)
+	}
+}
+
+func TestPlainTextUnknownEscape(t *testing.T) {
+	got := plainText(`\z`)
+	if got != "z" {
+		t.Errorf("plainText unknown escape = %q, want %q", got, "z")
 	}
 }

@@ -84,3 +84,48 @@ func TestManParse_NoOverstrike(t *testing.T) {
 		t.Fatalf("plain = %q, want %q", plain, raw)
 	}
 }
+
+func TestManFlagSpans_BracketAndComma(t *testing.T) {
+	// Flags preceded by '[' and ',' must be recognized.
+	line := "[--verbose,--quiet]"
+	spans := manFlagSpans(line, 0)
+	if len(spans) < 2 {
+		t.Fatalf("expected >=2 flag spans, got %d: %v", len(spans), spans)
+	}
+	for _, sp := range spans {
+		if sp.Face != FaceFunction {
+			t.Errorf("flag span face = %+v, want FaceFunction", sp.Face)
+		}
+	}
+}
+
+func TestManFlagSpans_LoneDashRejected(t *testing.T) {
+	// A lone '-' (e.g. stdin marker) with no following option char is skipped.
+	line := "read from - now"
+	spans := manFlagSpans(line, 0)
+	if len(spans) != 0 {
+		t.Errorf("expected no flag spans for lone '-', got %v", spans)
+	}
+}
+
+func TestManFlagSpans_Offset(t *testing.T) {
+	// lineOffset must be added to span positions.
+	const off = 100
+	spans := manFlagSpans("--help", off)
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+	if spans[0].Start != off {
+		t.Errorf("span start = %d, want %d", spans[0].Start, off)
+	}
+}
+
+func TestManParse_Empty(t *testing.T) {
+	plain, spans := ManParse("")
+	if plain != "" {
+		t.Errorf("plain = %q, want empty", plain)
+	}
+	if len(spans) != 0 {
+		t.Errorf("expected no spans for empty input, got %v", spans)
+	}
+}

@@ -91,3 +91,91 @@ func TestMakefileVarRef(t *testing.T) {
 		t.Errorf("$(BIN): face = %+v, want FaceMakefileVarRef", got)
 	}
 }
+
+func TestMakefileAutoVar(t *testing.T) {
+	src := "all:\n\tcp $< $@\n"
+	hl := MakefileHighlighter{}
+	runes := []rune(src)
+	spans := hl.Highlight(src, 0, len(runes))
+	var autoCount int
+	for _, sp := range spans {
+		if sp.Face == FaceMakefileAutoVar {
+			autoCount++
+		}
+	}
+	if autoCount < 2 {
+		t.Errorf("expected >=2 auto-var spans ($< and $@), got %d", autoCount)
+	}
+}
+
+func TestMakefileBraceVarRef(t *testing.T) {
+	src := "OUT = ${BIN}/prog\n"
+	hl := MakefileHighlighter{}
+	runes := []rune(src)
+	spans := hl.Highlight(src, 0, len(runes))
+	var found bool
+	for _, sp := range spans {
+		if sp.Face == FaceMakefileVarRef && string(runes[sp.Start:sp.End]) == "${BIN}" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected FaceMakefileVarRef for ${BIN}")
+	}
+}
+
+func TestMakefileNestedVarRef(t *testing.T) {
+	src := "X = $(dir $(FOO))\n"
+	hl := MakefileHighlighter{}
+	runes := []rune(src)
+	spans := hl.Highlight(src, 0, len(runes))
+	var found bool
+	for _, sp := range spans {
+		if sp.Face == FaceMakefileVarRef {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected FaceMakefileVarRef for nested $(dir $(FOO))")
+	}
+}
+
+func TestMakefileBareLineNoColon(t *testing.T) {
+	// A non-target, non-assignment line with a var ref still highlights the ref.
+	src := "$(info building)\n"
+	hl := MakefileHighlighter{}
+	runes := []rune(src)
+	spans := hl.Highlight(src, 0, len(runes))
+	var found bool
+	for _, sp := range spans {
+		if sp.Face == FaceMakefileVarRef {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected FaceMakefileVarRef in bare line with $(info ...)")
+	}
+}
+
+func TestMakefileImmediateAssignVarDef(t *testing.T) {
+	src := "FOO := bar\n"
+	hl := MakefileHighlighter{}
+	runes := []rune(src)
+	spans := hl.Highlight(src, 0, len(runes))
+	var found bool
+	for _, sp := range spans {
+		if sp.Face == FaceMakefileVariable && string(runes[sp.Start:sp.End]) == "FOO" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected FaceMakefileVariable for FOO in ':=' assignment")
+	}
+}
+
+func TestMakefileEmpty(t *testing.T) {
+	hl := MakefileHighlighter{}
+	if spans := hl.Highlight("", 0, 0); len(spans) != 0 {
+		t.Errorf("expected no spans for empty makefile, got %v", spans)
+	}
+}

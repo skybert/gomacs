@@ -185,3 +185,40 @@ func TestQueryReplaceDoReplaceRaw_ReplacesInPlace(t *testing.T) {
 		t.Errorf("buffer = %q, want %q", got, want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// cmdQueryReplace — drives the two nested minibuffer prompts
+// ---------------------------------------------------------------------------
+
+func TestCmdQueryReplace_FullFlow(t *testing.T) {
+	e := newTestEditor("hello world")
+	e.ActiveBuffer().SetPoint(0)
+	e.cmdQueryReplace()
+	if e.minibufDoneFunc == nil {
+		t.Fatal("cmdQueryReplace should open a minibuffer for the search string")
+	}
+	// Answer the "from" prompt, which opens the "to" prompt.
+	e.minibufDoneFunc("hello")
+	if e.minibufDoneFunc == nil {
+		t.Fatal("answering 'from' should open a second minibuffer for the replacement")
+	}
+	// Answer the "to" prompt, which starts query-replace.
+	e.minibufDoneFunc("goodbye")
+	if !e.queryReplaceActive {
+		t.Fatal("query-replace should be active after both prompts are answered")
+	}
+	if e.queryReplaceFrom != "hello" || e.queryReplaceTo != "goodbye" {
+		t.Errorf("from/to = %q/%q, want hello/goodbye", e.queryReplaceFrom, e.queryReplaceTo)
+	}
+}
+
+func TestCmdQueryReplace_EmptyFromCallbackAborts(t *testing.T) {
+	e := newTestEditor("hello world")
+	e.cmdQueryReplace()
+	// Submitting an empty "from" returns early without opening a second prompt
+	// or starting query-replace.
+	e.minibufDoneFunc("")
+	if e.queryReplaceActive {
+		t.Error("empty search string should abort without starting query-replace")
+	}
+}

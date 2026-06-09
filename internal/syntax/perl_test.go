@@ -158,3 +158,112 @@ func TestPerlHighlighter_PODComment(t *testing.T) {
 		t.Error("expected FaceComment for POD block")
 	}
 }
+
+func TestPerlHighlighter_BacktickString(t *testing.T) {
+	h := PerlHighlighter{}
+	text := "my $out = `ls -l`;\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	var strSpan *Span
+	for i := range spans {
+		if spans[i].Face == FaceString {
+			strSpan = &spans[i]
+		}
+	}
+	if strSpan == nil {
+		t.Error("expected FaceString for backtick command string")
+	}
+}
+
+func TestPerlHighlighter_BracedVariable(t *testing.T) {
+	h := PerlHighlighter{}
+	text := "print ${name};\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	var varSpan *Span
+	for i := range spans {
+		if spans[i].Face == FaceType {
+			varSpan = &spans[i]
+		}
+	}
+	if varSpan == nil {
+		t.Error("expected FaceType for ${...} braced variable")
+	}
+}
+
+func TestPerlHighlighter_PunctuationVariable(t *testing.T) {
+	h := PerlHighlighter{}
+	text := "print $_;\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	var varSpan *Span
+	for i := range spans {
+		if spans[i].Face == FaceType {
+			varSpan = &spans[i]
+		}
+	}
+	if varSpan == nil {
+		t.Error("expected FaceType for $_ punctuation variable")
+	}
+}
+
+func TestPerlHighlighter_CaptureVariable(t *testing.T) {
+	h := PerlHighlighter{}
+	text := "my $first = $1;\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	count := 0
+	for i := range spans {
+		if spans[i].Face == FaceType {
+			count++
+		}
+	}
+	if count < 2 {
+		t.Errorf("expected FaceType for both $first and capture var $1, got %d", count)
+	}
+}
+
+func TestPerlHighlighter_OctalNumber(t *testing.T) {
+	h := PerlHighlighter{}
+	text := "my $n = 0b1010;\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	var numSpan *Span
+	for i := range spans {
+		if spans[i].Face == FaceNumber {
+			numSpan = &spans[i]
+		}
+	}
+	if numSpan == nil {
+		t.Error("expected FaceNumber for binary literal")
+	}
+}
+
+func TestPerlHighlighter_FloatNumber(t *testing.T) {
+	h := PerlHighlighter{}
+	text := "my $pi = 3.14e0;\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	var numSpan *Span
+	for i := range spans {
+		if spans[i].Face == FaceNumber {
+			numSpan = &spans[i]
+		}
+	}
+	if numSpan == nil {
+		t.Error("expected FaceNumber for float literal")
+	}
+}
+
+func TestPerlHighlighter_Empty(t *testing.T) {
+	h := PerlHighlighter{}
+	if spans := h.Highlight("", 0, 0); len(spans) != 0 {
+		t.Errorf("expected no spans for empty input, got %v", spans)
+	}
+}
+
+func TestPerlHighlighter_PlainIdentifier(t *testing.T) {
+	h := PerlHighlighter{}
+	// An identifier that is neither keyword nor builtin produces no span.
+	text := "frobnicate;\n"
+	spans := h.Highlight(text, 0, len([]rune(text)))
+	for _, sp := range spans {
+		if sp.Face == FaceKeyword || sp.Face == FaceFunction {
+			t.Errorf("plain identifier should not be highlighted: %v", sp)
+		}
+	}
+}

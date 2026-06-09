@@ -81,3 +81,70 @@ func TestInsertRegister(t *testing.T) {
 		t.Errorf("got %q, want \"hello world\"", got)
 	}
 }
+
+func TestCmdCopyRectangleToRegister_Stub(t *testing.T) {
+	e := newEditorWithRegisters("hello")
+	e.cmdCopyRectangleToRegister()
+	if e.message == "" {
+		t.Error("cmdCopyRectangleToRegister should report a message")
+	}
+}
+
+func TestInsertRegister_ReadOnly(t *testing.T) {
+	e := newEditorWithRegisters("world")
+	e.registers['d'] = register{kind: "text", text: "hi"}
+	buf(e).SetReadOnly(true)
+	e.cmdInsertRegister()
+	if e.readCharPending {
+		t.Error("insert-register should bail out on a read-only buffer")
+	}
+	if buf(e).String() != "world" {
+		t.Errorf("buffer must be unchanged, got %q", buf(e).String())
+	}
+}
+
+func TestInsertRegister_Empty(t *testing.T) {
+	e := newEditorWithRegisters("world")
+	e.cmdInsertRegister()
+	e.readCharCallback('z')
+	if !containsStr(e.message, "empty") {
+		t.Errorf("message = %q, want 'empty'", e.message)
+	}
+}
+
+func TestInsertRegister_NotText(t *testing.T) {
+	e := newEditorWithRegisters("world")
+	e.registers['p'] = register{kind: "point", pos: 0, buf: buf(e).Name()}
+	e.cmdInsertRegister()
+	e.readCharCallback('p')
+	if !containsStr(e.message, "does not contain text") {
+		t.Errorf("message = %q, want 'does not contain text'", e.message)
+	}
+	if buf(e).String() != "world" {
+		t.Errorf("buffer must be unchanged, got %q", buf(e).String())
+	}
+}
+
+func TestCopyToRegister_NoRegion(t *testing.T) {
+	e := newEditorWithRegisters("hello world")
+	buf(e).SetMarkActive(false)
+	buf(e).SetPoint(0)
+	e.cmdCopyToRegister()
+	e.readCharCallback('c')
+	if !containsStr(e.message, "No region") {
+		t.Errorf("message = %q, want 'No region'", e.message)
+	}
+	if _, ok := e.registers['c']; ok {
+		t.Error("register should not be set when there is no region")
+	}
+}
+
+func TestJumpToRegister_TextKind(t *testing.T) {
+	e := newEditorWithRegisters("hello")
+	e.registers['t'] = register{kind: "text", text: "abc"}
+	e.cmdJumpToRegister()
+	e.readCharCallback('t')
+	if !containsStr(e.message, "insert-register") {
+		t.Errorf("message = %q, want hint to use insert-register", e.message)
+	}
+}

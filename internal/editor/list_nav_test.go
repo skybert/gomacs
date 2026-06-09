@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -161,5 +162,78 @@ func TestReadWordEndingAtMid(t *testing.T) {
 	word, start := readWordEndingAt(e.ActiveBuffer(), 10)
 	if word != "world" || start != 6 {
 		t.Fatalf("readWordEndingAt mid: got word=%q start=%d, want %q 6", word, start, "world")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bash-mode keyword navigation (if/fi, for/done, case/esac)
+// ---------------------------------------------------------------------------
+
+func TestForwardListBashIfFi(t *testing.T) {
+	src := "if true; then\n  echo hi\nfi\n"
+	e := newTestEditor(src)
+	b := buf(e)
+	b.SetMode("bash")
+	b.SetPoint(0)
+	e.cmdForwardList()
+	fiEnd := strings.Index(src, "fi") + 2
+	if got := b.Point(); got != fiEnd {
+		t.Fatalf("forward-list if/fi: want point=%d, got %d", fiEnd, got)
+	}
+}
+
+func TestForwardListBashNested(t *testing.T) {
+	src := "for x in 1 2; do\n  while y; do\n    z\n  done\ndone\n"
+	e := newTestEditor(src)
+	b := buf(e)
+	b.SetMode("bash")
+	b.SetPoint(0)
+	e.cmdForwardList()
+	doneEnd := strings.LastIndex(src, "done") + 4
+	if got := b.Point(); got != doneEnd {
+		t.Fatalf("forward-list nested for/done: want point=%d, got %d", doneEnd, got)
+	}
+}
+
+func TestBackwardListBashIfFi(t *testing.T) {
+	src := "if true; then\n  echo hi\nfi\n"
+	e := newTestEditor(src)
+	b := buf(e)
+	b.SetMode("bash")
+	b.SetPoint(strings.Index(src, "fi") + 2)
+	e.cmdBackwardList()
+	if got := b.Point(); got != 0 {
+		t.Fatalf("backward-list if/fi: want point=0, got %d", got)
+	}
+}
+
+func TestBackwardListBashNested(t *testing.T) {
+	src := "for x in 1 2; do\n  while y; do\n    z\n  done\ndone\n"
+	e := newTestEditor(src)
+	b := buf(e)
+	b.SetMode("bash")
+	b.SetPoint(b.Len())
+	e.cmdBackwardList()
+	if got := b.Point(); got != 0 {
+		t.Fatalf("backward-list nested: want point=0, got %d", got)
+	}
+}
+
+func TestForwardListNoListMessage(t *testing.T) {
+	e := newTestEditor("plain words only")
+	buf(e).SetPoint(0)
+	e.cmdForwardList()
+	if !strings.Contains(e.message, "No list found") {
+		t.Fatalf("expected 'No list found', got %q", e.message)
+	}
+}
+
+func TestBackwardListNoListMessage(t *testing.T) {
+	e := newTestEditor("plain words only")
+	b := buf(e)
+	b.SetPoint(b.Len())
+	e.cmdBackwardList()
+	if !strings.Contains(e.message, "No list found") {
+		t.Fatalf("expected 'No list found', got %q", e.message)
 	}
 }

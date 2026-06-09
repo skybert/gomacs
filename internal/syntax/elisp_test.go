@@ -194,3 +194,16 @@ func TestElispMixed(t *testing.T) {
 		t.Error("mixed: missing builtin span")
 	}
 }
+
+func TestElispStarSymbol(t *testing.T) {
+	// "let*" exercises the '*' continuation branch in isElispSymbolChar.
+	spans := elispSpans("(let* ((x 1)) x)")
+	sp, ok := findElispSpan(spans, FaceKeyword)
+	if !ok {
+		t.Fatal("expected a FaceKeyword span for let*")
+	}
+	runes := []rune("(let* ((x 1)) x)")
+	if got := string(runes[sp.Start:sp.End]); got != "let*" {
+		t.Errorf("keyword span = %q, want %q", got, "let*")
+	}
+}
