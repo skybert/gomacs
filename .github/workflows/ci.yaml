@@ -71,8 +71,8 @@ jobs:
             go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
           fi
 
-      - name: gomacs-test
-        run: make test
+      - name: gomacs-coverage
+        run: make coverage
 
       - name: gomacs-vulncheck
         run: make vulncheck
