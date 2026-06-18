@@ -39,7 +39,7 @@ coverage:
 lint:
 	golangci-lint run ./...
 
-vulncheck:
+vuln:
 	govulncheck ./...
 
 fmt:

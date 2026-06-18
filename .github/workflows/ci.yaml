@@ -75,7 +75,7 @@ jobs:
         run: make coverage
 
       - name: gomacs-vulncheck
-        run: make vulncheck
+        run: make vuln
 
       - name: gomacs-build
         run: make build
