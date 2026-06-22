@@ -1,6 +1,6 @@
 module github.com/skybert/gomacs
 
-go 1.25.0
+go 1.25.10
 
 require (
 	github.com/gdamore/tcell/v3 v3.4.0
