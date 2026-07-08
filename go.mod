@@ -4,7 +4,7 @@ go 1.25.10
 
 require (
 	github.com/gdamore/tcell/v3 v3.4.0
-	golang.org/x/sys v0.44.0
+	golang.org/x/sys v0.46.0
 )
 
 require (
@@ -12,6 +12,6 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
-	golang.org/x/term v0.43.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/term v0.44.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 )
