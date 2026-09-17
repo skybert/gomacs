@@ -1,6 +1,8 @@
 package syntax
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -179,4 +181,48 @@ func TestGoHighlighter_PartialRange(t *testing.T) {
 			t.Errorf("got keyword span before start offset: %v", sp)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Benchmarks: early termination
+// ---------------------------------------------------------------------------
+
+// benchGoSource builds a Go source file with n functions (8 lines each).
+func benchGoSource(n int) string {
+	var sb strings.Builder
+	sb.WriteString("package main\n\nimport \"fmt\"\n\n")
+	for i := range n {
+		fmt.Fprintf(&sb, "// doc comment for f%d\nfunc f%d(a int) string {\n"+
+			"\tif a > %d {\n\t\treturn fmt.Sprintf(\"big %%d\", a)\n\t}\n"+
+			"\treturn \"small\"\n}\n\n", i, i, i)
+	}
+	return sb.String()
+}
+
+// benchGoHighlight measures one Highlight call over a ~10 000-line Go file with
+// the given end offset, i.e. what a single redraw costs.
+func benchGoHighlight(bench *testing.B, visibleRunes int) {
+	text := benchGoSource(1250)
+	n := utf8.RuneCountInString(text)
+	end := min(visibleRunes, n)
+	h := GoHighlighter{}
+	bench.ReportAllocs()
+	bench.ResetTimer()
+	for range bench.N {
+		if spans := h.Highlight(text, 0, end); len(spans) == 0 {
+			bench.Fatal("no spans")
+		}
+	}
+}
+
+// BenchmarkGoHighlightFullBuffer is the cost when the whole buffer is requested
+// (the behaviour before highlighting was bounded to the visible region).
+func BenchmarkGoHighlightFullBuffer(bench *testing.B) {
+	benchGoHighlight(bench, 1<<30)
+}
+
+// BenchmarkGoHighlightOneScreen is the cost when only a screenful plus the
+// editor's look-ahead margin is requested — the top-of-file case.
+func BenchmarkGoHighlightOneScreen(bench *testing.B) {
+	benchGoHighlight(bench, 9000)
 }

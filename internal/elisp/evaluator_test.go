@@ -7,7 +7,14 @@ import (
 	"testing"
 )
 
-// mustEval evaluates src in ev and calls t.Fatal if there is an error.
+// Tests for evaluator.go: Env, the Evaluator, special forms and builtins.
+
+// -------------------------------------------------------------------
+// Evaluator tests
+// -------------------------------------------------------------------
+
+func newEval() *Evaluator { return NewEvaluator() }
+
 func mustEval(t *testing.T, ev *Evaluator, src string) Value {
 	t.Helper()
 	v, err := ev.EvalString(src)
@@ -15,6 +22,553 @@ func mustEval(t *testing.T, ev *Evaluator, src string) Value {
 		t.Fatalf("EvalString(%q): %v", src, err)
 	}
 	return v
+}
+
+// wantErr evaluates src and fails unless an error is returned.
+func wantErr(t *testing.T, ev *Evaluator, src string) {
+	t.Helper()
+	if _, err := ev.EvalString(src); err == nil {
+		t.Fatalf("EvalString(%q): expected error, got nil", src)
+	}
+}
+
+func TestEval_SetqAndRead(t *testing.T) {
+	ev := newEval()
+	_, err := ev.EvalString("(setq x 42)")
+	if err != nil {
+		t.Fatalf("setq error: %v", err)
+	}
+	val, err := ev.EvalString("x")
+	if err != nil {
+		t.Fatalf("read error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 42 {
+		t.Fatalf("expected 42, got %v", val)
+	}
+}
+
+func TestEval_Defun(t *testing.T) {
+	ev := newEval()
+	_, err := ev.EvalString("(defun square (x) (* x x))")
+	if err != nil {
+		t.Fatalf("defun error: %v", err)
+	}
+	val, err := ev.EvalString("(square 7)")
+	if err != nil {
+		t.Fatalf("call error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 49 {
+		t.Fatalf("expected 49, got %v", val)
+	}
+}
+
+func TestEval_IfTrue(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(if t 1 2)")
+	if err != nil {
+		t.Fatalf("if error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 1 {
+		t.Fatalf("expected 1, got %v", val)
+	}
+}
+
+func TestEval_IfFalse(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(if nil 1 2)")
+	if err != nil {
+		t.Fatalf("if error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 2 {
+		t.Fatalf("expected 2, got %v", val)
+	}
+}
+
+func TestEval_IfNoElse(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(if nil 1)")
+	if err != nil {
+		t.Fatalf("if error: %v", err)
+	}
+	if !IsNil(val) {
+		t.Fatalf("expected nil, got %v", val)
+	}
+}
+
+func TestEval_Let(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(let ((x 10) (y 20)) (+ x y))")
+	if err != nil {
+		t.Fatalf("let error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 30 {
+		t.Fatalf("expected 30, got %v", val)
+	}
+}
+
+func TestEval_LetStar(t *testing.T) {
+	ev := newEval()
+	// In let*, y can reference x
+	val, err := ev.EvalString("(let* ((x 5) (y (* x 2))) y)")
+	if err != nil {
+		t.Fatalf("let* error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 10 {
+		t.Fatalf("expected 10, got %v", val)
+	}
+}
+
+func TestEval_Cond(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString(`
+(cond
+  ((= 1 2) "no")
+  ((= 1 1) "yes")
+  (t "else"))
+`)
+	if err != nil {
+		t.Fatalf("cond error: %v", err)
+	}
+	s, ok := val.(StringVal)
+	if !ok || s.V != "yes" {
+		t.Fatalf("expected \"yes\", got %v", val)
+	}
+}
+
+func TestEval_CondElse(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString(`
+(cond
+  ((= 1 2) "no")
+  (t "else"))
+`)
+	if err != nil {
+		t.Fatalf("cond error: %v", err)
+	}
+	s, ok := val.(StringVal)
+	if !ok || s.V != "else" {
+		t.Fatalf("expected \"else\", got %v", val)
+	}
+}
+
+func TestEval_ArithAdd(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(+ 1 2)")
+	if err != nil {
+		t.Fatalf("+ error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 3 {
+		t.Fatalf("expected 3, got %v", val)
+	}
+}
+
+func TestEval_ArithMul(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(* 3 4)")
+	if err != nil {
+		t.Fatalf("* error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 12 {
+		t.Fatalf("expected 12, got %v", val)
+	}
+}
+
+func TestEval_StringConcat(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString(`(concat "hello" " " "world")`)
+	if err != nil {
+		t.Fatalf("concat error: %v", err)
+	}
+	s, ok := val.(StringVal)
+	if !ok || s.V != "hello world" {
+		t.Fatalf("expected \"hello world\", got %v", val)
+	}
+}
+
+func TestEval_Lambda(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("((lambda (x) (* x x)) 6)")
+	if err != nil {
+		t.Fatalf("lambda error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 36 {
+		t.Fatalf("expected 36, got %v", val)
+	}
+}
+
+func TestEval_LambdaViaFuncall(t *testing.T) {
+	ev := newEval()
+	_, err := ev.EvalString("(setq double (lambda (x) (* x 2)))")
+	if err != nil {
+		t.Fatalf("setq lambda error: %v", err)
+	}
+	val, err := ev.EvalString("(funcall double 5)")
+	if err != nil {
+		t.Fatalf("funcall error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 10 {
+		t.Fatalf("expected 10, got %v", val)
+	}
+}
+
+func TestEval_GlobalSetKeyAndKbd(t *testing.T) {
+	ev := newEval()
+	_, err := ev.EvalString(`(global-set-key (kbd "C-f") 'forward-char)`)
+	if err != nil {
+		t.Fatalf("global-set-key error: %v", err)
+	}
+	bindings := ev.GetKeyBindings()
+	cmd, ok := bindings["C-f"]
+	if !ok {
+		t.Fatalf("binding for C-f not found")
+	}
+	if cmd != "forward-char" {
+		t.Fatalf("expected forward-char, got %q", cmd)
+	}
+}
+
+func TestEval_KbdReturnString(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString(`(kbd "M-x")`)
+	if err != nil {
+		t.Fatalf("kbd error: %v", err)
+	}
+	s, ok := val.(StringVal)
+	if !ok || s.V != "M-x" {
+		t.Fatalf("expected M-x, got %v", val)
+	}
+}
+
+func TestEval_Mapcar(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(mapcar (lambda (x) (* x x)) '(1 2 3))")
+	if err != nil {
+		t.Fatalf("mapcar error: %v", err)
+	}
+	elems, ok := ToSlice(val)
+	if !ok || len(elems) != 3 {
+		t.Fatalf("expected list of 3, got %v", val)
+	}
+	expected := []int64{1, 4, 9}
+	for i, e := range elems {
+		iv, ok := e.(Int)
+		if !ok || iv.V != expected[i] {
+			t.Fatalf("elems[%d]: expected %d, got %v", i, expected[i], e)
+		}
+	}
+}
+
+func TestEval_Progn(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(progn 1 2 3)")
+	if err != nil {
+		t.Fatalf("progn error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 3 {
+		t.Fatalf("expected 3, got %v", val)
+	}
+}
+
+func TestEval_When(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(when t 42)")
+	if err != nil {
+		t.Fatalf("when error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 42 {
+		t.Fatalf("expected 42, got %v", val)
+	}
+}
+
+func TestEval_Unless(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(unless nil 99)")
+	if err != nil {
+		t.Fatalf("unless error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 99 {
+		t.Fatalf("expected 99, got %v", val)
+	}
+}
+
+func TestEval_AndOr(t *testing.T) {
+	ev := newEval()
+
+	// and returns last truthy value
+	val, err := ev.EvalString("(and 1 2 3)")
+	if err != nil {
+		t.Fatalf("and error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 3 {
+		t.Fatalf("and: expected 3, got %v", val)
+	}
+
+	// and short-circuits on nil
+	val, err = ev.EvalString("(and 1 nil 3)")
+	if err != nil {
+		t.Fatalf("and error: %v", err)
+	}
+	if !IsNil(val) {
+		t.Fatalf("and: expected nil, got %v", val)
+	}
+
+	// or returns first truthy
+	val, err = ev.EvalString("(or nil 5 6)")
+	if err != nil {
+		t.Fatalf("or error: %v", err)
+	}
+	i, ok = val.(Int)
+	if !ok || i.V != 5 {
+		t.Fatalf("or: expected 5, got %v", val)
+	}
+}
+
+func TestEval_Apply(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(apply + '(1 2 3))")
+	if err != nil {
+		t.Fatalf("apply error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 6 {
+		t.Fatalf("expected 6, got %v", val)
+	}
+}
+
+func TestEval_Format(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString(`(format "hello %s, you are %d years old" "alice" 30)`)
+	if err != nil {
+		t.Fatalf("format error: %v", err)
+	}
+	s, ok := val.(StringVal)
+	if !ok || s.V != "hello alice, you are 30 years old" {
+		t.Fatalf("expected formatted string, got %q", val)
+	}
+}
+
+func TestEval_NotAndNull(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString("(not nil)")
+	if err != nil {
+		t.Fatalf("not error: %v", err)
+	}
+	b, ok := val.(Bool)
+	if !ok || !b.V {
+		t.Fatalf("expected t, got %v", val)
+	}
+
+	val, err = ev.EvalString("(null '())")
+	if err != nil {
+		t.Fatalf("null error: %v", err)
+	}
+	b, ok = val.(Bool)
+	if !ok || !b.V {
+		t.Fatalf("expected t for null of empty list, got %v", val)
+	}
+}
+
+func TestEval_Predicates(t *testing.T) {
+	ev := newEval()
+
+	tests := []struct {
+		expr string
+		want bool
+	}{
+		{`(stringp "hi")`, true},
+		{`(stringp 42)`, false},
+		{`(numberp 42)`, true},
+		{`(numberp "hi")`, false},
+		{`(symbolp 'foo)`, true},
+		{`(listp '(1 2))`, true},
+		{`(listp 42)`, false},
+	}
+
+	for _, tt := range tests {
+		val, err := ev.EvalString(tt.expr)
+		if err != nil {
+			t.Fatalf("%s: error %v", tt.expr, err)
+		}
+		got := isTruthy(val)
+		if got != tt.want {
+			t.Errorf("%s: expected truthy=%v, got %v", tt.expr, tt.want, val)
+		}
+	}
+}
+
+func TestEval_ArithComparisons(t *testing.T) {
+	ev := newEval()
+
+	tests := []struct {
+		expr string
+		want bool
+	}{
+		{"(< 1 2)", true},
+		{"(< 2 1)", false},
+		{"(> 2 1)", true},
+		{"(<= 1 1)", true},
+		{"(>= 2 1)", true},
+		{"(= 3 3)", true},
+		{"(= 3 4)", false},
+	}
+
+	for _, tt := range tests {
+		val, err := ev.EvalString(tt.expr)
+		if err != nil {
+			t.Fatalf("%s: error %v", tt.expr, err)
+		}
+		got := isTruthy(val)
+		if got != tt.want {
+			t.Errorf("%s: expected %v, got %v", tt.expr, tt.want, val)
+		}
+	}
+}
+
+func TestEval_CarCdrCons(t *testing.T) {
+	ev := newEval()
+
+	val, err := ev.EvalString("(car '(1 2 3))")
+	if err != nil {
+		t.Fatalf("car error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 1 {
+		t.Fatalf("car: expected 1, got %v", val)
+	}
+
+	val, err = ev.EvalString("(cdr '(1 2 3))")
+	if err != nil {
+		t.Fatalf("cdr error: %v", err)
+	}
+	elems, ok := ToSlice(val)
+	if !ok || len(elems) != 2 {
+		t.Fatalf("cdr: expected list of 2, got %v", val)
+	}
+
+	val, err = ev.EvalString("(cons 1 '(2 3))")
+	if err != nil {
+		t.Fatalf("cons error: %v", err)
+	}
+	elems, ok = ToSlice(val)
+	if !ok || len(elems) != 3 {
+		t.Fatalf("cons: expected list of 3, got %v", val)
+	}
+}
+
+func TestEval_Defvar(t *testing.T) {
+	ev := newEval()
+	_, err := ev.EvalString("(defvar my-var 100)")
+	if err != nil {
+		t.Fatalf("defvar error: %v", err)
+	}
+	val, err := ev.EvalString("my-var")
+	if err != nil {
+		t.Fatalf("read error: %v", err)
+	}
+	i, ok := val.(Int)
+	if !ok || i.V != 100 {
+		t.Fatalf("expected 100, got %v", val)
+	}
+
+	// defvar should not overwrite existing binding
+	_, err = ev.EvalString("(defvar my-var 999)")
+	if err != nil {
+		t.Fatalf("defvar overwrite error: %v", err)
+	}
+	val, err = ev.EvalString("my-var")
+	if err != nil {
+		t.Fatalf("read error: %v", err)
+	}
+	i, ok = val.(Int)
+	if !ok || i.V != 100 {
+		t.Fatalf("defvar should not overwrite: expected 100, got %v", val)
+	}
+}
+
+func TestEval_KeywordSymbolSelfQuoting(t *testing.T) {
+	ev := newEval()
+	val, err := ev.EvalString(":foreground")
+	if err != nil {
+		t.Fatalf("keyword symbol error: %v", err)
+	}
+	sym, ok := val.(Symbol)
+	if !ok {
+		t.Fatalf("expected Symbol, got %T", val)
+	}
+	if sym.Name != ":foreground" {
+		t.Errorf("Name = %q, want %q", sym.Name, ":foreground")
+	}
+}
+
+func TestEval_KeywordSymbolInList(t *testing.T) {
+	ev := newEval()
+	// Simulate what set-face-attribute receives: (:foreground "#abc")
+	var captured []Value
+	ev.RegisterGoFn("my-fn", func(args []Value, _ *Env) (Value, error) {
+		captured = args
+		return Nil{}, nil
+	})
+	_, err := ev.EvalString(`(my-fn :foreground "#abc" :bold t)`)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(captured) != 4 {
+		t.Fatalf("expected 4 args, got %d", len(captured))
+	}
+	kw, ok := captured[0].(Symbol)
+	if !ok || kw.Name != ":foreground" {
+		t.Errorf("arg[0] = %v, want :foreground", captured[0])
+	}
+	s, ok := captured[1].(StringVal)
+	if !ok || s.V != "#abc" {
+		t.Errorf("arg[1] = %v, want \"#abc\"", captured[1])
+	}
+}
+
+func TestEval_SetqHook(t *testing.T) {
+	ev := newEval()
+	var hooked Value
+	ev.SetSetqHook("theme", func(v Value) { hooked = v })
+
+	_, err := ev.EvalString("(setq theme 'sweet)")
+	if err != nil {
+		t.Fatalf("setq error: %v", err)
+	}
+	if hooked == nil {
+		t.Fatal("hook was not called")
+	}
+	sym, ok := hooked.(Symbol)
+	if !ok || sym.Name != "sweet" {
+		t.Errorf("hooked value = %v (%T), want Symbol{sweet}", hooked, hooked)
+	}
+}
+
+func TestEval_SetqHookNotCalledForOtherVars(t *testing.T) {
+	ev := newEval()
+	called := false
+	ev.SetSetqHook("theme", func(_ Value) { called = true })
+
+	_, err := ev.EvalString("(setq other-var 42)")
+	if err != nil {
+		t.Fatalf("setq error: %v", err)
+	}
+	if called {
+		t.Error("hook called for unrelated variable")
+	}
 }
 
 // -------------------------------------------------------------------
@@ -1674,152 +2228,6 @@ func TestEval_FormatSpecifierBeyondArgs(t *testing.T) {
 }
 
 // -------------------------------------------------------------------
-// lexer — peek1/peek2 at EOF
-// -------------------------------------------------------------------
-
-func TestLexer_Peek1AtEOF(t *testing.T) {
-	l := NewLexer("")
-	if l.peek1() != 0 {
-		t.Fatal("peek1 at EOF should return 0")
-	}
-}
-
-func TestLexer_Peek2AtEOF(t *testing.T) {
-	l := NewLexer("x")
-	if l.peek2() != 0 {
-		t.Fatal("peek2 at EOF should return 0")
-	}
-}
-
-// -------------------------------------------------------------------
-// lexer — readString escape sequences
-// -------------------------------------------------------------------
-
-func TestLexer_ReadStringTabEscape(t *testing.T) {
-	l := NewLexer(`"\t"`)
-	tok := l.Next()
-	if tok.Type != TokenString || tok.Value != "\t" {
-		t.Fatalf("expected tab char, got %q", tok.Value)
-	}
-}
-
-func TestLexer_ReadStringUnknownEscape(t *testing.T) {
-	l := NewLexer(`"\q"`)
-	tok := l.Next()
-	if tok.Type != TokenString || tok.Value != `\q` {
-		t.Fatalf("expected literal \\q, got %q", tok.Value)
-	}
-}
-
-func TestLexer_ReadStringEOFInEscape(t *testing.T) {
-	// Unterminated string with backslash at end.
-	l := NewLexer(`"\`)
-	tok := l.Next()
-	// Should return a string token (possibly empty/partial) without panicking.
-	if tok.Type != TokenString {
-		t.Fatalf("expected TokenString even for unterminated escape, got %v", tok.Type)
-	}
-}
-
-// -------------------------------------------------------------------
-// lexer — readNumber float with exponent
-// -------------------------------------------------------------------
-
-func TestLexer_ReadNumberExponent(t *testing.T) {
-	l := NewLexer("1e5")
-	tok := l.Next()
-	if tok.Type != TokenFloat || tok.Value != "1e5" {
-		t.Fatalf("expected TokenFloat \"1e5\", got type=%v val=%q", tok.Type, tok.Value)
-	}
-}
-
-func TestLexer_ReadNumberNegativeExponent(t *testing.T) {
-	l := NewLexer("2.5e-3")
-	tok := l.Next()
-	if tok.Type != TokenFloat || tok.Value != "2.5e-3" {
-		t.Fatalf("expected TokenFloat \"2.5e-3\", got type=%v val=%q", tok.Type, tok.Value)
-	}
-}
-
-func TestLexer_ReadNumberDotTrailingEOF(t *testing.T) {
-	// "1." — dot followed by EOF; peek2 returns 0 which is not a digit,
-	// but the condition `next == 0` makes it treated as float.
-	l := NewLexer("1.")
-	tok := l.Next()
-	if tok.Type != TokenFloat {
-		t.Fatalf("expected TokenFloat for \"1.\", got %v", tok.Type)
-	}
-}
-
-// -------------------------------------------------------------------
-// parser — parseForm error paths
-// -------------------------------------------------------------------
-
-func TestParse_UnterminatedList(t *testing.T) {
-	_, err := Parse("(1 2 3")
-	if err == nil {
-		t.Fatal("expected error for unterminated list")
-	}
-}
-
-func TestParse_UnterminatedVector(t *testing.T) {
-	_, err := Parse("[1 2 3")
-	if err == nil {
-		t.Fatal("expected error for unterminated vector")
-	}
-}
-
-func TestParse_UnexpectedEOFQuote(t *testing.T) {
-	_, err := Parse("'")
-	if err == nil {
-		t.Fatal("expected error for bare quote with no form")
-	}
-}
-
-func TestParse_UnexpectedEOFSharpQuote(t *testing.T) {
-	_, err := Parse("#'")
-	if err == nil {
-		t.Fatal("expected error for bare #' with no form")
-	}
-}
-
-func TestParse_UnexpectedEOFBackquote(t *testing.T) {
-	_, err := Parse("`")
-	if err == nil {
-		t.Fatal("expected error for bare backquote with no form")
-	}
-}
-
-func TestParse_UnexpectedEOFComma(t *testing.T) {
-	_, err := Parse(",")
-	if err == nil {
-		t.Fatal("expected error for bare comma with no form")
-	}
-}
-
-func TestParse_UnexpectedEOFCommaAt(t *testing.T) {
-	_, err := Parse(",@")
-	if err == nil {
-		t.Fatal("expected error for bare ,@ with no form")
-	}
-}
-
-func TestParse_DottedPairMissingCloseParen(t *testing.T) {
-	_, err := Parse("(1 . 2 3)")
-	if err == nil {
-		t.Fatal("expected error for dotted pair missing closing paren")
-	}
-}
-
-func TestParse_UnexpectedToken(t *testing.T) {
-	// A lone `)` at the top level is an unexpected token for parseAtom.
-	_, err := Parse(")")
-	if err == nil {
-		t.Fatal("expected error for unexpected )")
-	}
-}
-
-// -------------------------------------------------------------------
 // SetGlobal — path through nested environments
 // -------------------------------------------------------------------
 
@@ -1879,34 +2287,6 @@ func TestEval_ImproperArgList(t *testing.T) {
 }
 
 // -------------------------------------------------------------------
-// IsNil — Bool{false} is nil
-// -------------------------------------------------------------------
-
-func TestIsNil_BoolFalse(t *testing.T) {
-	if !IsNil(Bool{V: false}) {
-		t.Fatal("Bool{false} should be nil")
-	}
-}
-
-func TestIsNil_NilGoValue(t *testing.T) {
-	if !IsNil(nil) {
-		t.Fatal("Go nil should be nil")
-	}
-}
-
-// -------------------------------------------------------------------
-// ToSlice — improper list returns false
-// -------------------------------------------------------------------
-
-func TestToSlice_ImproperList(t *testing.T) {
-	improper := Cons{Car: Int{V: 1}, Cdr: Int{V: 2}}
-	_, ok := ToSlice(improper)
-	if ok {
-		t.Fatal("ToSlice should return false for improper list")
-	}
-}
-
-// -------------------------------------------------------------------
 // evalLambda — error on no params
 // -------------------------------------------------------------------
 
@@ -1962,140 +2342,6 @@ func TestEval_LoadReturnsErrorWhenNoNoerror(t *testing.T) {
 	_, err := ev.EvalString(`(load "/nonexistent/path.el")`)
 	if err == nil {
 		t.Fatal("expected error from load without noerror")
-	}
-}
-
-// -------------------------------------------------------------------
-// String() representations for all concrete Value types
-// -------------------------------------------------------------------
-
-func TestString_Nil(t *testing.T) {
-	v := Nil{}
-	if v.String() != "nil" {
-		t.Fatalf("Nil.String() = %q, want \"nil\"", v.String())
-	}
-}
-
-func TestString_BoolTrue(t *testing.T) {
-	v := Bool{V: true}
-	if v.String() != "t" {
-		t.Fatalf("Bool{true}.String() = %q, want \"t\"", v.String())
-	}
-}
-
-func TestString_BoolFalse(t *testing.T) {
-	v := Bool{V: false}
-	if v.String() != "nil" {
-		t.Fatalf("Bool{false}.String() = %q, want \"nil\"", v.String())
-	}
-}
-
-func TestString_Int(t *testing.T) {
-	v := Int{V: 42}
-	if v.String() != "42" {
-		t.Fatalf("Int{42}.String() = %q, want \"42\"", v.String())
-	}
-}
-
-func TestString_IntNegative(t *testing.T) {
-	v := Int{V: -7}
-	if v.String() != "-7" {
-		t.Fatalf("Int{-7}.String() = %q, want \"-7\"", v.String())
-	}
-}
-
-func TestString_Float(t *testing.T) {
-	v := Float{V: 3.14}
-	s := v.String()
-	if s != "3.14" {
-		t.Fatalf("Float{3.14}.String() = %q, want \"3.14\"", s)
-	}
-}
-
-func TestString_Symbol(t *testing.T) {
-	v := Symbol{Name: "foo"}
-	if v.String() != "foo" {
-		t.Fatalf("Symbol{foo}.String() = %q, want \"foo\"", v.String())
-	}
-}
-
-func TestString_StringVal(t *testing.T) {
-	v := StringVal{V: "hello"}
-	s := v.String()
-	if s != `"hello"` {
-		t.Fatalf("StringVal{hello}.String() = %q, want `\"hello\"`", s)
-	}
-}
-
-func TestString_ConsProperList(t *testing.T) {
-	// (1 2 3)
-	v := List(Int{V: 1}, Int{V: 2}, Int{V: 3})
-	if v.String() != "(1 2 3)" {
-		t.Fatalf("List(1,2,3).String() = %q, want \"(1 2 3)\"", v.String())
-	}
-}
-
-func TestString_ConsDottedPair(t *testing.T) {
-	v := Cons{Car: Int{V: 1}, Cdr: Int{V: 2}}
-	if v.String() != "(1 . 2)" {
-		t.Fatalf("Cons{1,2}.String() = %q, want \"(1 . 2)\"", v.String())
-	}
-}
-
-func TestString_Vector(t *testing.T) {
-	v := Vector{Elems: []Value{Int{V: 1}, Int{V: 2}}}
-	if v.String() != "[1 2]" {
-		t.Fatalf("Vector{1,2}.String() = %q, want \"[1 2]\"", v.String())
-	}
-}
-
-func TestString_VectorEmpty(t *testing.T) {
-	v := Vector{Elems: nil}
-	if v.String() != "[]" {
-		t.Fatalf("Vector{}.String() = %q, want \"[]\"", v.String())
-	}
-}
-
-func TestString_LambdaNoParams(t *testing.T) {
-	l := Lambda{Params: nil, Rest: "", Body: nil, Env: NewEnv()}
-	if l.String() != "#<lambda ()>" {
-		t.Fatalf("Lambda{}.String() = %q, want \"#<lambda ()>\"", l.String())
-	}
-}
-
-func TestString_LambdaWithParams(t *testing.T) {
-	l := Lambda{Params: []string{"x", "y"}, Rest: "", Body: nil, Env: NewEnv()}
-	if l.String() != "#<lambda (x y)>" {
-		t.Fatalf("Lambda{x,y}.String() = %q, want \"#<lambda (x y)>\"", l.String())
-	}
-}
-
-func TestString_LambdaWithRest(t *testing.T) {
-	l := Lambda{Params: nil, Rest: "args", Body: nil, Env: NewEnv()}
-	if l.String() != "#<lambda (&rest args)>" {
-		t.Fatalf("Lambda{&rest args}.String() = %q", l.String())
-	}
-}
-
-func TestString_LambdaWithParamsAndRest(t *testing.T) {
-	l := Lambda{Params: []string{"a"}, Rest: "rest", Body: nil, Env: NewEnv()}
-	if l.String() != "#<lambda (a &rest rest)>" {
-		t.Fatalf("Lambda{a,&rest rest}.String() = %q", l.String())
-	}
-}
-
-func TestString_Builtin(t *testing.T) {
-	b := Builtin{Name: "car", Fn: nil}
-	if b.String() != "#<builtin car>" {
-		t.Fatalf("Builtin{car}.String() = %q, want \"#<builtin car>\"", b.String())
-	}
-}
-
-// wantErr evaluates src and fails unless an error is returned.
-func wantErr(t *testing.T, ev *Evaluator, src string) {
-	t.Helper()
-	if _, err := ev.EvalString(src); err == nil {
-		t.Fatalf("EvalString(%q): expected error, got nil", src)
 	}
 }
 
@@ -2695,5 +2941,343 @@ func TestEval_ConcatSymbolAndOther(t *testing.T) {
 	v := mustEval(t, ev, `(concat "a" 'b 3)`)
 	if v.(StringVal).V != "ab3" {
 		t.Fatalf("concat mixed: want ab3, got %v", v)
+	}
+}
+
+// -------------------------------------------------------------------
+// Eval dispatch: self-evaluating function values and unknown types
+// -------------------------------------------------------------------
+
+// opaqueValue is a test-only Value implementation that Eval's type switch does
+// not know about, so it exercises the switch's default branch.
+type opaqueValue struct{}
+
+func (opaqueValue) isValue()       {}
+func (opaqueValue) String() string { return "#<opaque>" }
+
+func TestEval_LambdaValueEvaluatesToItself(t *testing.T) {
+	ev := newEval()
+	lam := Lambda{Params: []string{"x"}, Body: []Value{Symbol{Name: "x"}}}
+	got, err := ev.Eval(lam, NewEnv())
+	if err != nil {
+		t.Fatalf("Eval(Lambda): %v", err)
+	}
+	l, ok := got.(Lambda)
+	if !ok {
+		t.Fatalf("expected Lambda, got %T", got)
+	}
+	if len(l.Params) != 1 || l.Params[0] != "x" {
+		t.Fatalf("lambda params changed: %v", l.Params)
+	}
+}
+
+func TestEval_BuiltinValueEvaluatesToItself(t *testing.T) {
+	ev := newEval()
+	b := Builtin{Name: "noop", Fn: func([]Value, *Env) (Value, error) { return Nil{}, nil }}
+	got, err := ev.Eval(b, NewEnv())
+	if err != nil {
+		t.Fatalf("Eval(Builtin): %v", err)
+	}
+	gb, ok := got.(Builtin)
+	if !ok {
+		t.Fatalf("expected Builtin, got %T", got)
+	}
+	if gb.Name != "noop" {
+		t.Fatalf("builtin name = %q, want noop", gb.Name)
+	}
+}
+
+func TestEval_UnknownValueTypeErrors(t *testing.T) {
+	ev := newEval()
+	if _, err := ev.Eval(opaqueValue{}, NewEnv()); err == nil {
+		t.Fatal("expected error for unknown Value type")
+	}
+}
+
+func TestEval_StringParseErrorPropagates(t *testing.T) {
+	ev := newEval()
+	// Unbalanced input fails in Parse, before any evaluation happens.
+	if _, err := ev.EvalString("(setq x 1"); err == nil {
+		t.Fatal("expected parse error from EvalString")
+	}
+}
+
+// -------------------------------------------------------------------
+// Symbol / function lookup falling through to registered Go functions
+// -------------------------------------------------------------------
+
+func TestEval_GoFnAsBareSymbolValue(t *testing.T) {
+	ev := newEval()
+	ev.RegisterGoFn("my-go-fn", func([]Value, *Env) (Value, error) { return Int{V: 7}, nil })
+	// The symbol is unbound as a variable, so evalSymbol falls back to goFns
+	// and yields a Builtin wrapper.
+	v := mustEval(t, ev, "my-go-fn")
+	b, ok := v.(Builtin)
+	if !ok {
+		t.Fatalf("expected Builtin, got %T", v)
+	}
+	if b.Name != "my-go-fn" {
+		t.Fatalf("builtin name = %q, want my-go-fn", b.Name)
+	}
+}
+
+func TestEval_SharpQuoteResolvesGoFn(t *testing.T) {
+	ev := newEval()
+	ev.RegisterGoFn("go-double", func(args []Value, _ *Env) (Value, error) {
+		return Int{V: args[0].(Int).V * 2}, nil
+	})
+	v := mustEval(t, ev, "(funcall #'go-double 21)")
+	if i, ok := v.(Int); !ok || i.V != 42 {
+		t.Fatalf("got %v, want 42", v)
+	}
+}
+
+// -------------------------------------------------------------------
+// evalCons: non-symbol heads, undefined functions, improper arg lists
+// -------------------------------------------------------------------
+
+func TestEval_NonSymbolHeadEvalErrorPropagates(t *testing.T) {
+	ev := newEval()
+	// The head is a list, so it is evaluated as an expression — and fails.
+	wantErr(t, ev, "((no-such-variable) 1)")
+}
+
+func TestEval_NonSymbolHeadImproperArgListErrors(t *testing.T) {
+	ev := newEval()
+	head, err := ParseOne("(lambda (x) x)")
+	if err != nil {
+		t.Fatalf("parse lambda: %v", err)
+	}
+	// Cdr is not a list, so ToSlice fails after the head evaluates fine.
+	if _, err := ev.Eval(Cons{Car: head, Cdr: Int{V: 1}}, ev.global); err == nil {
+		t.Fatal("expected improper argument list error")
+	}
+}
+
+func TestEval_UndefinedFunctionCallErrors(t *testing.T) {
+	ev := newEval()
+	wantErr(t, ev, "(no-such-function 1 2)")
+}
+
+func TestEval_NamedCallImproperArgListErrors(t *testing.T) {
+	ev := newEval()
+	if _, err := ev.Eval(Cons{Car: Symbol{Name: "+"}, Cdr: Int{V: 1}}, ev.global); err == nil {
+		t.Fatal("expected improper argument list error")
+	}
+}
+
+func TestEval_ArgumentEvalErrorPropagates(t *testing.T) {
+	ev := newEval()
+	wantErr(t, ev, "(+ 1 no-such-variable)")
+}
+
+func TestEval_LambdaBodyErrorPropagates(t *testing.T) {
+	ev := newEval()
+	wantErr(t, ev, "((lambda () no-such-variable))")
+}
+
+// -------------------------------------------------------------------
+// Special forms: improper argument lists and the cond `t` else clause
+// -------------------------------------------------------------------
+
+func TestEval_CondImproperClauseListErrors(t *testing.T) {
+	ev := newEval()
+	if _, err := ev.Eval(Cons{Car: Symbol{Name: "cond"}, Cdr: Int{V: 1}}, ev.global); err == nil {
+		t.Fatal("expected cond clause list error")
+	}
+}
+
+func TestEval_CondTClauseActsAsElse(t *testing.T) {
+	ev := newEval()
+	// `t` is recognised structurally, without being evaluated as a variable.
+	v := mustEval(t, ev, "(cond (nil 1) (t 2))")
+	if i, ok := v.(Int); !ok || i.V != 2 {
+		t.Fatalf("got %v, want 2", v)
+	}
+}
+
+func TestEval_PrognImproperFormListErrors(t *testing.T) {
+	ev := newEval()
+	if _, err := ev.Eval(Cons{Car: Symbol{Name: "progn"}, Cdr: Int{V: 1}}, ev.global); err == nil {
+		t.Fatal("expected progn form list error")
+	}
+}
+
+func TestEval_LetDottedBindingErrors(t *testing.T) {
+	ev := newEval()
+	// (a . 1) is a Cons but not a proper list, so ToSlice fails.
+	wantErr(t, ev, "(let ((a . 1)) a)")
+}
+
+func TestEval_AndImproperFormListErrors(t *testing.T) {
+	ev := newEval()
+	if _, err := ev.Eval(Cons{Car: Symbol{Name: "and"}, Cdr: Int{V: 1}}, ev.global); err == nil {
+		t.Fatal("expected and form list error")
+	}
+}
+
+func TestEval_OrImproperFormListErrors(t *testing.T) {
+	ev := newEval()
+	if _, err := ev.Eval(Cons{Car: Symbol{Name: "or"}, Cdr: Int{V: 1}}, ev.global); err == nil {
+		t.Fatal("expected or form list error")
+	}
+}
+
+// -------------------------------------------------------------------
+// Arithmetic edge cases
+// -------------------------------------------------------------------
+
+func TestEval_SubNoArgsIsZero(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(-)")
+	if i, ok := v.(Int); !ok || i.V != 0 {
+		t.Fatalf("got %v, want 0", v)
+	}
+}
+
+func TestEval_SubSingleFloatNegates(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(- 1.5)")
+	if f, ok := v.(Float); !ok || f.V != -1.5 {
+		t.Fatalf("got %v, want -1.5", v)
+	}
+}
+
+func TestEval_MulFloatAndInt(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(* 1.5 2)")
+	if f, ok := v.(Float); !ok || f.V != 3.0 {
+		t.Fatalf("got %v, want 3", v)
+	}
+}
+
+func TestEval_SubFloatLaterArgNonNumberErrors(t *testing.T) {
+	ev := newEval()
+	// The float path is chosen because of 1.5, then "x" fails to convert.
+	wantErr(t, ev, `(- 1.5 "x")`)
+}
+
+// -------------------------------------------------------------------
+// Equality on aggregates
+// -------------------------------------------------------------------
+
+func TestEval_EqOnListsIsNil(t *testing.T) {
+	ev := newEval()
+	// eq compares identity for aggregates, so two equal lists are not eq.
+	v := mustEval(t, ev, "(eq (list 1) (list 1))")
+	if !IsNil(v) {
+		t.Fatalf("got %v, want nil", v)
+	}
+}
+
+func TestEval_EqOnVectorsIsNil(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(eq [1 2] [1 2])")
+	if !IsNil(v) {
+		t.Fatalf("got %v, want nil", v)
+	}
+}
+
+func TestEval_EqualVectorElementDiffers(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, "(equal [1 2] [1 3])")
+	if !IsNil(v) {
+		t.Fatalf("got %v, want nil", v)
+	}
+}
+
+// -------------------------------------------------------------------
+// format: type mismatches fall back to the value's printed form
+// -------------------------------------------------------------------
+
+func TestEval_FormatDWithNonNumber(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, `(format "%d" "x")`)
+	if s, ok := v.(StringVal); !ok || s.V != `"x"` {
+		t.Fatalf("got %v, want %q", v, `"x"`)
+	}
+}
+
+func TestEval_FormatFWithNonNumber(t *testing.T) {
+	ev := newEval()
+	v := mustEval(t, ev, `(format "%f" "x")`)
+	if s, ok := v.(StringVal); !ok || s.V != `"x"` {
+		t.Fatalf("got %v, want %q", v, `"x"`)
+	}
+}
+
+// -------------------------------------------------------------------
+// load: success path
+// -------------------------------------------------------------------
+
+func TestEval_LoadExistingFileReturnsT(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "init.el")
+	if err := os.WriteFile(path, []byte("(setq loaded-flag 99)\n"), 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	ev := newEval()
+	v := mustEval(t, ev, `(load "`+path+`")`)
+	if b, ok := v.(Bool); !ok || !b.V {
+		t.Fatalf("load returned %v, want t", v)
+	}
+	got, ok := ev.GetGlobalVar("loaded-flag")
+	if !ok {
+		t.Fatal("loaded-flag not set by loaded file")
+	}
+	if i, ok := got.(Int); !ok || i.V != 99 {
+		t.Fatalf("loaded-flag = %v, want 99", got)
+	}
+}
+
+// -------------------------------------------------------------------
+// goFns fallback when the name is absent from the variable environment
+// -------------------------------------------------------------------
+//
+// RegisterGoFn mirrors each function into the global variable environment, so
+// the goFns fallback in evalSymbol / evalFunction is only reached for names
+// present in the function namespace alone. These tests populate goFns directly
+// to cover that path.
+
+func TestEval_EvalSymbolFallsBackToGoFns(t *testing.T) {
+	ev := newEval()
+	ev.goFns["fn-only"] = func([]Value, *Env) (Value, error) { return Int{V: 5}, nil }
+	if _, bound := ev.GetGlobalVar("fn-only"); bound {
+		t.Fatal("precondition: fn-only must not be a bound variable")
+	}
+	v := mustEval(t, ev, "fn-only")
+	b, ok := v.(Builtin)
+	if !ok {
+		t.Fatalf("expected Builtin, got %T", v)
+	}
+	if b.Name != "fn-only" {
+		t.Fatalf("builtin name = %q, want fn-only", b.Name)
+	}
+}
+
+func TestEval_FunctionFormFallsBackToGoFns(t *testing.T) {
+	ev := newEval()
+	ev.goFns["fn-only"] = func(args []Value, _ *Env) (Value, error) { return Int{V: 5}, nil }
+	v := mustEval(t, ev, "(funcall #'fn-only)")
+	if i, ok := v.(Int); !ok || i.V != 5 {
+		t.Fatalf("got %v, want 5", v)
+	}
+}
+
+func TestEval_CondSymbolTIsElseClause(t *testing.T) {
+	// The reader turns `t` into Bool, so a literal Symbol{"t"} test only occurs
+	// in forms built programmatically. evalCond must still treat it as `else`.
+	ev := newEval()
+	form := List(
+		Symbol{Name: "cond"},
+		List(Nil{}, Int{V: 1}),
+		List(Symbol{Name: "t"}, Int{V: 2}),
+	)
+	got, err := ev.Eval(form, ev.global)
+	if err != nil {
+		t.Fatalf("Eval(cond): %v", err)
+	}
+	if i, ok := got.(Int); !ok || i.V != 2 {
+		t.Fatalf("got %v, want 2", got)
 	}
 }

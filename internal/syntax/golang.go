@@ -107,10 +107,18 @@ func (g GoHighlighter) Highlight(text string, start, end int) []Span {
 
 		// Advance cursor to byteStart, then byteEnd — never backward.
 		runeStart := advanceTo(byteStart)
+
+		// go/scanner emits tokens in increasing position order, so once a token
+		// starts at or past end every remaining token does too: stop scanning
+		// rather than tokenizing the rest of the file just to discard it.
+		if runeStart >= end {
+			break
+		}
+
 		runeEnd := advanceTo(byteEnd)
 
 		// Only emit spans that overlap [start, end).
-		if runeEnd <= start || runeStart >= end {
+		if runeEnd <= start {
 			continue
 		}
 

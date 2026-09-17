@@ -36,13 +36,14 @@ func (e *Editor) debugSetupLayout() {
 
 	// Resize the source window to occupy the left/top area.
 	src.SetRegion(0, 0, sourceW, topH)
-	src.Buf().SetReadOnly(true)
+	e.debugMarkSourceReadOnly(src.Buf())
 	src.SetGutterWidth(2)
 
-	// Create (or reuse) panel buffers.
+	// Create (or reuse) panel buffers.  The REPL carries the debugged language
+	// in its mode so that it gets that language's syntax highlighting.
 	localsBuf := e.ensureDebugBuf("*Debug Locals*", "debug-locals")
 	stackBuf := e.ensureDebugBuf("*Debug Stack*", "debug-stack")
-	replBuf := e.ensureDebugBuf("*Debug REPL*", "debug-repl")
+	replBuf := e.ensureDebugBuf("*Debug REPL*", dapReplModeFor(e.dap.mode))
 
 	// Create panel windows.
 	localsWin := window.New(localsBuf, 0, sourceW+1, rightW, localsH)
@@ -75,8 +76,37 @@ func (e *Editor) ensureDebugBuf(name, mode string) *buffer.Buffer {
 	return b
 }
 
+// dapReplModeFor returns the buffer mode for the REPL of a debug session on the
+// given language, e.g. "debug-repl+java".  highlighterFor understands the
+// suffix and highlights the REPL with that language's highlighter; an empty or
+// unknown language falls back to plain "debug-repl".
+func dapReplModeFor(lang string) string {
+	if lang == "" {
+		return debugReplMode
+	}
+	return debugReplMode + "+" + lang
+}
+
+// debugMarkSourceReadOnly forces buf read-only for the duration of the debug
+// session so that single-letter navigation shortcuts work, remembering the
+// buffer's previous flag so debugTeardownLayout can restore it.  Called for the
+// buffer the session started in and for every source file stepping opens later.
+func (e *Editor) debugMarkSourceReadOnly(buf *buffer.Buffer) {
+	if e.dap == nil || buf == nil {
+		return
+	}
+	if e.dap.prevReadOnly == nil {
+		e.dap.prevReadOnly = make(map[*buffer.Buffer]bool)
+	}
+	if _, seen := e.dap.prevReadOnly[buf]; !seen {
+		e.dap.prevReadOnly[buf] = buf.ReadOnly()
+	}
+	buf.SetReadOnly(true)
+}
+
 // debugTeardownLayout removes the 3 debug panel windows, restores the source
-// window to full-screen, and clears read-only / gutter settings.
+// window to full-screen, and clears read-only / gutter settings.  Every source
+// buffer the session forced read-only gets its original flag back.
 func (e *Editor) debugTeardownLayout() {
 	if e.dap == nil {
 		return
@@ -88,7 +118,14 @@ func (e *Editor) debugTeardownLayout() {
 	}
 
 	src := e.windows[0]
-	src.Buf().SetReadOnly(false)
+	for b, readOnly := range e.dap.prevReadOnly {
+		b.SetReadOnly(readOnly)
+	}
+	if _, tracked := e.dap.prevReadOnly[src.Buf()]; !tracked {
+		// Session state was set up without going through debugSetupLayout.
+		src.Buf().SetReadOnly(false)
+	}
+	e.dap.prevReadOnly = nil
 	src.SetGutterWidth(0)
 
 	// Restore active window.

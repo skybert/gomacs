@@ -6,6 +6,10 @@ import "strings"
 // Each line has the format "filename:linenum:content".
 // The filename is coloured cyan, the line number yellow, and the source
 // content is coloured using BashHighlighter (perl-mode equivalent).
+//
+// The line loop is already bounded by end, and the per-line BashHighlighter
+// call passes the line's own bounds, so the inner scan stops at the end of the
+// line rather than running to EOF.
 type VcGrepHighlighter struct{}
 
 var (
@@ -15,16 +19,18 @@ var (
 
 func (VcGrepHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
+	n := len(runes)
+	end = min(end, n)
 	var spans []Span
 	src := BashHighlighter{}
 	i := start
 	for i < end {
 		lineStart := i
-		for i < end && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < end {
+		if i < n {
 			i++ // skip '\n'
 		}
 		if lineStart >= lineEnd {
@@ -64,17 +70,19 @@ type VcShowHighlighter struct{}
 
 func (VcShowHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
+	n := len(runes)
+	end = min(end, n)
 
 	// Find the rune index where the diff portion starts.
 	diffStart := end
 	i := start
 	for i < end {
 		lineStart := i
-		for i < end && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < end {
+		if i < n {
 			i++
 		}
 		if strings.HasPrefix(string(runes[lineStart:lineEnd]), "diff --git") {
@@ -85,15 +93,16 @@ func (VcShowHighlighter) Highlight(text string, start, end int) []Span {
 
 	var spans []Span
 
-	// Highlight commit header lines.
+	// Highlight commit header lines.  Line starts are bounded by diffStart but
+	// each line is measured to its real end so header spans are not truncated.
 	i = start
 	for i < diffStart {
 		lineStart := i
-		for i < diffStart && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < diffStart {
+		if i < n {
 			i++
 		}
 		if lineStart >= lineEnd {
@@ -134,15 +143,17 @@ var FaceVcLogSHA = Face{Fg: "yellow"}
 
 func (VcLogHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
+	n := len(runes)
+	end = min(end, n)
 	var spans []Span
 	i := start
 	for i < end {
 		lineStart := i
-		for i < end && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < end {
+		if i < n {
 			i++ // skip '\n'
 		}
 		if lineStart >= lineEnd {
@@ -178,17 +189,19 @@ type vcAnnotateSrcPortion struct {
 
 func (h VcAnnotateHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
+	n := len(runes)
+	end = min(end, n)
 	var spans []Span
 	var portions []vcAnnotateSrcPortion
 
 	i := start
 	for i < end {
 		lineStart := i
-		for i < end && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < end {
+		if i < n {
 			i++ // skip '\n'
 		}
 		if lineStart >= lineEnd {
@@ -297,15 +310,17 @@ type VcCommitHighlighter struct{}
 
 func (VcCommitHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
+	n := len(runes)
+	end = min(end, n)
 	var spans []Span
 	i := start
 	for i < end {
 		lineStart := i
-		for i < end && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < end {
+		if i < n {
 			i++
 		}
 		if lineStart < lineEnd && runes[lineStart] == '#' {
@@ -324,15 +339,17 @@ type VcStatusHighlighter struct{}
 
 func (VcStatusHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
+	n := len(runes)
+	end = min(end, n)
 	var spans []Span
 	i := start
 	for i < end {
 		lineStart := i
-		for i < end && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < end {
+		if i < n {
 			i++
 		}
 		if lineStart >= lineEnd {

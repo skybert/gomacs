@@ -422,7 +422,7 @@ func TestGetSpellSpans_CacheHit(t *testing.T) {
 	b.SetMode("text")
 	want := []syntax.Span{{Start: 6, End: 11, Face: FaceSpellError}}
 	e.spellCaches = map[*buffer.Buffer]*spellCache{
-		b: {gen: b.ChangeGen(), spans: want},
+		b: {gen: b.ChangeGen(), spans: want, spansSet: true},
 	}
 	got := e.getSpellSpans(b)
 	if len(got) != 1 || got[0].Start != 6 {
@@ -606,5 +606,126 @@ func TestSpellHandleKey_DigitNoErrorNoop(t *testing.T) {
 	e.spellHandleKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: '1'})
 	if e.ActiveBuffer().String() != before {
 		t.Error("digit with no current error should not modify the buffer")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// getSpellSpans debounce
+// ---------------------------------------------------------------------------
+
+// TestGetSpellSpans_DebounceSkipsRapidEdits checks that a burst of edits does
+// not dispatch a fresh aspell run (and full-buffer copy) per redraw.
+func TestGetSpellSpans_DebounceSkipsRapidEdits(t *testing.T) {
+	e := newCapTestEditor("hello wrold")
+	e.spellCommand = "true" // no real aspell process
+	b := e.ActiveBuffer()
+	b.SetMode("text")
+
+	// First call dispatches and records the spawn time.
+	e.getSpellSpans(b)
+	c := e.spellCaches[b]
+	if c == nil {
+		t.Fatal("expected a spell cache record after the first call")
+	}
+	if c.lastSpawn.IsZero() {
+		t.Fatal("first call should have recorded lastSpawn")
+	}
+	firstSpawn := c.lastSpawn
+
+	// A new generation within the debounce window must not re-dispatch.
+	delete(e.spellPending, b)
+	b.InsertString(0, "x")
+	e.getSpellSpans(b)
+
+	if !e.spellCaches[b].lastSpawn.Equal(firstSpawn) {
+		t.Error("edit inside the debounce window should not dispatch a new check")
+	}
+	if !e.spellCaches[b].wakeArmed {
+		t.Error("a debounced call should arm a recheck wakeup")
+	}
+}
+
+// TestGetSpellSpans_DebounceElapsedDispatches checks the window actually opens
+// again once it has passed, so edits are never silently dropped.
+func TestGetSpellSpans_DebounceElapsedDispatches(t *testing.T) {
+	e := newCapTestEditor("hello wrold")
+	e.spellCommand = "true"
+	b := e.ActiveBuffer()
+	b.SetMode("text")
+
+	e.getSpellSpans(b)
+	c := e.spellCaches[b]
+	firstSpawn := c.lastSpawn
+
+	// Pretend the debounce window has fully elapsed.
+	c.lastSpawn = time.Now().Add(-2 * spellCheckDebounce)
+	delete(e.spellPending, b)
+	b.InsertString(0, "x")
+	e.getSpellSpans(b)
+
+	if e.spellCaches[b].lastSpawn.Equal(firstSpawn) {
+		t.Error("expected a new dispatch once the debounce window elapsed")
+	}
+}
+
+// TestArmSpellRecheck_ArmsOnlyOnce guards against one timer per keystroke.
+func TestArmSpellRecheck_ArmsOnlyOnce(t *testing.T) {
+	e := newCapTestEditor("hello wrold")
+	b := e.ActiveBuffer()
+	c := &spellCache{lastSpawn: time.Now()}
+	e.spellCaches = map[*buffer.Buffer]*spellCache{b: c}
+
+	e.armSpellRecheck(b, c)
+	if !c.wakeArmed {
+		t.Fatal("armSpellRecheck should set wakeArmed")
+	}
+	// Second call must be a no-op while one is still pending.
+	e.armSpellRecheck(b, c)
+	if !c.wakeArmed {
+		t.Error("wakeArmed should stay set")
+	}
+}
+
+// TestGetSpellSpans_SpansSetDistinguishesUncomputed pins why spansSet exists:
+// ApplyUndo decrements ChangeGen, so no gen value can mean "not yet computed".
+func TestGetSpellSpans_SpansSetDistinguishesUncomputed(t *testing.T) {
+	e := newCapTestEditor("hello wrold")
+	e.spellCommand = "true"
+	b := e.ActiveBuffer()
+	b.SetMode("text")
+
+	// A record for the current generation but with nothing computed yet must
+	// not be treated as a cache hit.
+	gen := b.ChangeGen()
+	e.spellCaches = map[*buffer.Buffer]*spellCache{b: {gen: gen}}
+	e.getSpellSpans(b)
+
+	if e.spellPending[b] != gen {
+		t.Error("expected a check to be dispatched when spansSet is false")
+	}
+}
+
+// TestGetSpellSpans_FreshBufferIsChecked is a regression test: a freshly loaded
+// buffer sits at ChangeGen 0, which is also the zero value a missing
+// spellPending entry reads back as.  A bare map lookup therefore made the very
+// first check of every file look "already in flight", so an unedited file was
+// never spell-checked at all.
+func TestGetSpellSpans_FreshBufferIsChecked(t *testing.T) {
+	e := newCapTestEditor("hello wrold")
+	e.spellCommand = "true"
+	b := e.ActiveBuffer()
+	b.SetMode("text")
+
+	if got := b.ChangeGen(); got != 0 {
+		t.Fatalf("precondition: fresh buffer ChangeGen = %d, want 0", got)
+	}
+	if _, ok := e.spellPending[b]; ok {
+		t.Fatal("precondition: nothing should be pending yet")
+	}
+
+	e.getSpellSpans(b)
+
+	if pg, ok := e.spellPending[b]; !ok || pg != 0 {
+		t.Errorf("expected a check dispatched for generation 0, pending=%v ok=%v", pg, ok)
 	}
 }

@@ -188,6 +188,8 @@ func hexByte(n int) string {
 
 // ANSIHighlighter implements Highlighter using pre-computed ANSI-derived spans.
 // It ignores the text argument and returns the spans stored at construction time.
+// There is nothing to scan, so the [start, end) range needs no truncation: the
+// caller filters the spans it actually draws.
 type ANSIHighlighter struct {
 	Spans []Span
 }

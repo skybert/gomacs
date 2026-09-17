@@ -15,6 +15,9 @@ import "strings"
 type ConfHighlighter struct{}
 
 // Highlight implements Highlighter for conf/ini/toml files.
+//
+// Scanning always begins at the first line so multi-line state is tracked from
+// the top of the file, but it stops as soon as a line begins at or past end.
 func (h ConfHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
 	n := len(runes)
@@ -26,8 +29,12 @@ func (h ConfHighlighter) Highlight(text string, start, end int) []Span {
 		}
 	}
 
+	// lineLimit bounds where a *new* line may start.  Scanning within a line
+	// still uses n so a line beginning just before end is highlighted in full.
+	lineLimit := min(n, end)
+
 	i := 0
-	for i < n {
+	for i < lineLimit {
 		lineStart := i
 		// Find end of line.
 		for i < n && runes[i] != '\n' {

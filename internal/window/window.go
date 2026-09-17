@@ -181,36 +181,80 @@ func (w *Window) ScrollUp(n int) {
 	if n <= 0 {
 		return
 	}
-	oldLine := w.scrollLine
-	w.SetScrollLine(w.scrollLine + n)
-	newLine := w.scrollLine
-	delta := newLine - oldLine
-	if delta <= 0 {
-		return
-	}
-	// Update cached scroll position incrementally: scan forward by `delta`
-	// newlines from the old position so the next ViewLines call is O(visible).
-	gen := w.buf.ChangeGen()
-	if w.cachedScrollLine == oldLine && w.cachedChangeGen == gen {
-		pos := w.cachedScrollPos
-		length := w.buf.Len()
-		found := 0
-		for i := pos; i < length && found < delta; i++ {
-			if w.buf.RuneAt(i) == '\n' {
-				found++
-				pos = i + 1
-			}
-		}
-		w.cachedScrollLine = newLine
-		w.cachedScrollPos = pos
-		// cachedChangeGen stays the same
-	}
+	w.scrollTo(w.scrollLine + n)
 }
 
 // ScrollDown scrolls the view up by n lines (scrollLine decreases), revealing
 // earlier content.
 func (w *Window) ScrollDown(n int) {
-	w.SetScrollLine(w.scrollLine - n)
+	if n <= 0 {
+		return
+	}
+	w.scrollTo(w.scrollLine - n)
+}
+
+// maxIncrementalScrollScan caps how far the cached first-visible-line position
+// is updated by scanning the buffer text.  Scrolling by more lines than this is
+// a jump rather than a scroll, and is left to the buffer's O(1) line-start
+// index via firstScrollPos().
+const maxIncrementalScrollScan = 512
+
+// scrollTo sets the first visible line to l and keeps cachedScrollPos in step
+// by scanning the buffer text from the previously cached position, in whichever
+// direction the view moved.  This keeps ordinary scrolling (and the backward
+// path of EnsurePointVisible) O(lines_scrolled) instead of dropping the cache
+// and forcing a rescan on the next ViewLines() call.
+func (w *Window) scrollTo(l int) {
+	oldLine := w.scrollLine
+	gen := w.buf.ChangeGen()
+	cached := w.cachedScrollLine == oldLine && w.cachedChangeGen == gen
+	w.SetScrollLine(l)
+	newLine := w.scrollLine
+	if !cached || newLine == oldLine {
+		return
+	}
+	delta := max(newLine-oldLine, oldLine-newLine)
+	if delta > maxIncrementalScrollScan {
+		// Leave the cache stale: firstScrollPos() will recompute it.
+		return
+	}
+	if newLine > oldLine {
+		w.cachedScrollPos = w.scanForwardLines(w.cachedScrollPos, delta)
+	} else {
+		w.cachedScrollPos = w.scanBackwardLines(w.cachedScrollPos, delta)
+	}
+	w.cachedScrollLine = newLine
+	// cachedChangeGen stays the same
+}
+
+// scanForwardLines returns the start position of the line n lines after the one
+// starting at pos.
+func (w *Window) scanForwardLines(pos, n int) int {
+	length := w.buf.Len()
+	found := 0
+	for i := pos; i < length && found < n; i++ {
+		if w.buf.RuneAt(i) == '\n' {
+			found++
+			pos = i + 1
+		}
+	}
+	return pos
+}
+
+// scanBackwardLines returns the start position of the line n lines before the
+// one starting at pos.  Getting back n lines means stepping over n newlines and
+// landing just after the one before them, hence the n+1 test.
+func (w *Window) scanBackwardLines(pos, n int) int {
+	found := 0
+	for i := pos - 1; i >= 0; i-- {
+		if w.buf.RuneAt(i) == '\n' {
+			found++
+			if found > n {
+				return i + 1
+			}
+		}
+	}
+	return 0
 }
 
 // textRows returns the number of rows available for buffer text content.
@@ -231,9 +275,18 @@ func (w *Window) visualRowsForLine(bufLine int) int {
 		return 1
 	}
 	startPos := w.buf.LineStart(bufLine)
-	endPos := w.buf.EndOfLine(startPos)
-	lineLen := endPos - startPos // rune count (positions are rune indices)
-	if lineLen == 0 {
+	return w.visualRowsForSpan(startPos, w.buf.EndOfLine(startPos))
+}
+
+// visualRowsForSpan returns how many visual rows the line spanning
+// [startPos, endPos) occupies.  Buffer positions are rune indices, so the rune
+// count is just the difference — no string allocation needed.
+func (w *Window) visualRowsForSpan(startPos, endPos int) int {
+	if w.wrapCol <= 0 {
+		return 1
+	}
+	lineLen := endPos - startPos
+	if lineLen <= 0 {
 		return 1
 	}
 	rows := lineLen / w.wrapCol
@@ -247,17 +300,23 @@ func (w *Window) visualRowsForLine(bufLine int) int {
 // top) of the current window point.  When wrapCol is 0 this equals
 // pointLine − scrollLine.
 func (w *Window) VisualRowForPoint() int {
-	pointLine, _ := w.buf.LineCol(w.point)
+	pointLine, cursorCol := w.buf.LineCol(w.point)
 	if w.wrapCol <= 0 {
 		return pointLine - w.scrollLine
 	}
-	// Count visual rows from scrollLine up to (but not including) pointLine.
+	// Count visual rows from scrollLine up to (but not including) pointLine,
+	// walking forward from the cached first-visible-line position the way
+	// ViewLines() does.  This costs O(text between the two lines) rather than
+	// one O(scrollLine) line-start lookup per line.
 	visualRow := 0
+	pos := w.firstScrollPos()
+	length := w.buf.Len()
 	for bufLine := w.scrollLine; bufLine < pointLine; bufLine++ {
-		visualRow += w.visualRowsForLine(bufLine)
+		endPos := w.buf.EndOfLine(pos)
+		visualRow += w.visualRowsForSpan(pos, endPos)
+		pos = min(endPos+1, length)
 	}
 	// Add the visual segment offset within the cursor's own line.
-	_, cursorCol := w.buf.LineCol(w.point)
 	visualRow += cursorCol / w.wrapCol
 	return visualRow
 }
@@ -272,14 +331,14 @@ func (w *Window) EnsurePointVisible() {
 	textH := w.textRows()
 
 	if pointLine < w.scrollLine {
-		w.SetScrollLine(pointLine)
+		w.scrollTo(pointLine)
 		return
 	}
 
 	if w.wrapCol <= 0 {
 		// No visual wrapping: simple line-count check.
 		if pointLine >= w.scrollLine+textH {
-			w.SetScrollLine(pointLine - textH + 1)
+			w.scrollTo(pointLine - textH + 1)
 		}
 		return
 	}
@@ -290,7 +349,7 @@ func (w *Window) EnsurePointVisible() {
 		// Cursor is past the bottom of the text area.  Set scrollLine to
 		// pointLine so the cursor appears at the top of the window.
 		// This is a safe, simple approach; future work could scroll minimally.
-		w.SetScrollLine(pointLine)
+		w.scrollTo(pointLine)
 	}
 }
 

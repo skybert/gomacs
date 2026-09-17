@@ -10,18 +10,30 @@ type MarkdownHighlighter struct{}
 
 // Highlight returns face spans for text, only emitting spans that overlap [start, end).
 // start and end are rune offsets into text.
+//
+// Scanning always begins at offset 0 so that the fenced-code-block state is
+// tracked correctly, but it stops as soon as a line begins at or after end —
+// everything past that point would only be discarded.
 func (m MarkdownHighlighter) Highlight(text string, start, end int) []Span {
 	var spans []Span
 
 	runeOffset := 0  // rune offset of the current line's first rune
 	inFence := false // true while inside a fenced code block
 
-	lines := splitLines(text)
-
-	for _, line := range lines {
-		lineRuneLen := utf8.RuneCountInString(line)
+	for rest := text; len(rest) > 0; {
 		lineStart := runeOffset
-		lineEnd := runeOffset + lineRuneLen
+		if lineStart >= end {
+			break
+		}
+
+		line := rest
+		if idx := strings.IndexByte(rest, '\n'); idx >= 0 {
+			line, rest = rest[:idx+1], rest[idx+1:]
+		} else {
+			rest = ""
+		}
+		lineEnd := lineStart + utf8.RuneCountInString(line)
+		runeOffset = lineEnd
 
 		// --- Fenced code block detection (``` lines) ---
 		trimmed := strings.TrimSpace(line)
@@ -29,13 +41,11 @@ func (m MarkdownHighlighter) Highlight(text string, start, end int) []Span {
 			inFence = !inFence
 			// Highlight the fence line itself as code.
 			addSpan(&spans, lineStart, lineEnd, FaceCode, start, end)
-			runeOffset = lineEnd
 			continue
 		}
 
 		if inFence {
 			addSpan(&spans, lineStart, lineEnd, FaceCode, start, end)
-			runeOffset = lineEnd
 			continue
 		}
 
@@ -44,50 +54,28 @@ func (m MarkdownHighlighter) Highlight(text string, start, end int) []Span {
 		// Blockquote: lines starting with >
 		if strings.HasPrefix(line, ">") {
 			addSpan(&spans, lineStart, lineEnd, FaceBlockquote, start, end)
-			runeOffset = lineEnd
 			continue
 		}
 
 		// Headers: ###, ##, #
 		if strings.HasPrefix(line, "### ") || line == "###" {
 			addSpan(&spans, lineStart, lineEnd, FaceHeader3, start, end)
-			runeOffset = lineEnd
 			continue
 		}
 		if strings.HasPrefix(line, "## ") || line == "##" {
 			addSpan(&spans, lineStart, lineEnd, FaceHeader2, start, end)
-			runeOffset = lineEnd
 			continue
 		}
 		if strings.HasPrefix(line, "# ") || line == "#" {
 			addSpan(&spans, lineStart, lineEnd, FaceHeader1, start, end)
-			runeOffset = lineEnd
 			continue
 		}
 
 		// --- Inline patterns (within the line) ---
 		spans = append(spans, inlineSpans(line, lineStart, start, end)...)
-
-		runeOffset = lineEnd
 	}
 
 	return spans
-}
-
-// splitLines splits text into lines, each including its trailing newline if present.
-// This preserves rune offsets: concatenating the slices reconstructs text exactly.
-func splitLines(text string) []string {
-	var lines []string
-	for len(text) > 0 {
-		idx := strings.IndexByte(text, '\n')
-		if idx < 0 {
-			lines = append(lines, text)
-			break
-		}
-		lines = append(lines, text[:idx+1])
-		text = text[idx+1:]
-	}
-	return lines
 }
 
 // addSpan appends a span if it overlaps the window [winStart, winEnd).

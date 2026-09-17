@@ -7,6 +7,19 @@ import (
 	"github.com/skybert/gomacs/internal/elisp"
 )
 
+// dapAdapterKind selects how the debug adapter for a language mode is reached.
+type dapAdapterKind int
+
+const (
+	// dapAdapterProcess spawns dapCmd as a child process which then speaks DAP
+	// over the reverse TCP connection dap.Start sets up (e.g. "dlv dap").
+	dapAdapterProcess dapAdapterKind = iota
+	// dapAdapterJdtls asks a running jdtls language server to start the
+	// java-debug adapter and connects to the TCP port jdtls reports back.
+	// eclipse.jdt.ls is not itself a debug adapter — see dapStartJdtls.
+	dapAdapterJdtls
+)
+
 // langModeInfo describes a major language mode and its LSP server.
 type langModeInfo struct {
 	// modeName is the internal mode string stored on the buffer (e.g. "go").
@@ -15,18 +28,40 @@ type langModeInfo struct {
 	// Empty means no LSP support for this mode.
 	lspCmd []string
 	// dapCmd is the command and arguments to start the DAP debug adapter.
-	// Empty means no DAP support for this mode.
+	// Empty means no DAP support for this mode, unless dapKind names an adapter
+	// that is not reached by spawning a process.
 	dapCmd []string
+	// dapKind is how the debug adapter is obtained.  The zero value spawns
+	// dapCmd as a child process.
+	dapKind dapAdapterKind
 	// rootMarkers are filenames that indicate the project root when walking
 	// upward from the file's directory (e.g. "go.mod", "pyproject.toml").
 	rootMarkers []string
+}
+
+// hasDebugAdapter reports whether debug-start has any way of obtaining a debug
+// adapter for this mode.
+func (i *langModeInfo) hasDebugAdapter() bool {
+	return len(i.dapCmd) > 0 || i.dapKind != dapAdapterProcess
+}
+
+// dapAdapterName returns a human-readable name for the mode's debug adapter,
+// used in the "Debugger: starting …" message.
+func (i *langModeInfo) dapAdapterName() string {
+	if len(i.dapCmd) > 0 {
+		return i.dapCmd[0]
+	}
+	if i.dapKind == dapAdapterJdtls {
+		return "jdtls"
+	}
+	return "debug adapter"
 }
 
 // langModes lists every supported language mode.
 var langModes = []langModeInfo{
 	{modeName: "go", lspCmd: []string{"gopls"}, dapCmd: []string{"dlv", "dap"}, rootMarkers: []string{"go.mod", "go.work"}},
 	{modeName: "python", rootMarkers: []string{"pyproject.toml", "setup.py", "setup.cfg"}},
-	{modeName: "java", dapCmd: []string{}, rootMarkers: []string{"pom.xml", "build.gradle"}},
+	{modeName: "java", dapKind: dapAdapterJdtls, rootMarkers: []string{"pom.xml", "build.gradle", "build.gradle.kts"}},
 	{modeName: "bash", rootMarkers: []string{}},
 	{modeName: "perl", rootMarkers: []string{}},
 	{modeName: "gherkin", rootMarkers: []string{}},

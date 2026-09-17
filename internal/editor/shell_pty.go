@@ -26,36 +26,76 @@ type shellState struct {
 
 func (s *shellState) close() { _ = s.master.Close() }
 
-// cmdShell creates (or switches to) a VC-repo-specific shell buffer backed by
-// a real PTY.  The buffer is named *shell/<repo>* when a VC root is found, or
-// *shell* otherwise.  Each repo gets its own persistent shell buffer.
+// shellBufferName determines the name of the buffer that cmdShell should
+// create or switch to, following the spec's two-step naming rule:
+//
+//  1. The first shell buffer is always named "*shell*".
+//  2. If "*shell*" already exists, an additional shell is named
+//     "*shell/<repo>*", using the VC repo name (basename of vcRoot), or the
+//     basename of curDir when the current buffer is not in a VC repo. If
+//     "*shell/<repo>*" already exists too, it reports exists=true so the
+//     caller can jump to it instead of spawning another PTY.
+//
+// existingNames is the set of currently open buffer names, vcRoot is the VC
+// root for the current buffer ("" if none), and curDir is the current
+// buffer's directory (used for the basename fallback when vcRoot is "").
+func shellBufferName(existingNames []string, vcRoot, curDir string) (name string, exists bool) {
+	has := func(n string) bool {
+		for _, existing := range existingNames {
+			if existing == n {
+				return true
+			}
+		}
+		return false
+	}
+
+	const plainShell = "*shell*"
+	if !has(plainShell) {
+		return plainShell, false
+	}
+
+	repo := filepath.Base(vcRoot)
+	if vcRoot == "" {
+		repo = filepath.Base(curDir)
+	}
+	repoShell := "*shell/" + repo + "*"
+	return repoShell, has(repoShell)
+}
+
+// cmdShell creates (or switches to) a shell buffer backed by a real PTY,
+// following the naming rule described by shellBufferName: the first shell is
+// named *shell*, subsequent ones are named *shell/<repo>*.
 func (e *Editor) cmdShell() {
 	e.clearArg()
 
 	// Resolve the VC root for the current buffer to derive the buffer name and
 	// starting directory.  Use bufferDir so dired buffers resolve to their
 	// listed directory rather than os.Getwd().
-	_, vcRoot := vcFind(e.bufferDir(e.ActiveBuffer()))
-	var shellBufName, startDir string
+	curDir := e.bufferDir(e.ActiveBuffer())
+	_, vcRoot := vcFind(curDir)
+	startDir := curDir
 	if vcRoot != "" {
-		repoName := filepath.Base(vcRoot)
-		shellBufName = "*shell/" + repoName + "*"
 		startDir = vcRoot
-	} else {
-		shellBufName = "*shell*"
-		startDir, _ = os.Getwd()
 	}
+
+	existingNames := make([]string, len(e.buffers))
+	for i, b := range e.buffers {
+		existingNames[i] = b.Name()
+	}
+	shellBufName, exists := shellBufferName(existingNames, vcRoot, curDir)
 
 	// Initialise the shellStates map lazily.
 	if e.shellStates == nil {
 		e.shellStates = make(map[*buffer.Buffer]*shellState)
 	}
 
-	// If a shell buffer for this repo already exists, just switch to it.
-	for _, b := range e.buffers {
-		if b.Name() == shellBufName {
-			e.showBuf(b)
-			return
+	// If a shell buffer with this name already exists, just switch to it.
+	if exists {
+		for _, b := range e.buffers {
+			if b.Name() == shellBufName {
+				e.showBuf(b)
+				return
+			}
 		}
 	}
 

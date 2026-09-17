@@ -54,6 +54,9 @@ var (
 	FaceBreakpoint = Face{Fg: "#00c800", Bold: true}
 	// FaceExecPos is the face for the current execution position (→) in the debug gutter.
 	FaceExecPos = Face{Fg: "yellow", Bold: true}
+	// FaceWindowJump is the face for the one-letter window-jump badges (M-o).
+	// The spec asks for the letter to be green.
+	FaceWindowJump = Face{Fg: "black", Bg: "green", Bold: true}
 )
 
 // Span is a highlighted range in the buffer

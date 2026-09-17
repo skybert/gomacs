@@ -26,7 +26,8 @@ type lspConn struct {
 	isReady bool // true after initialize handshake completes
 
 	filesMu   sync.Mutex
-	openFiles map[string]int // uri → last-sent modCount
+	openFiles map[string]int       // uri → last-sent modCount
+	lastSent  map[string]time.Time // uri → time of last didChange/didSave/didOpen send
 
 	diagMu      sync.RWMutex
 	diagnostics map[string][]lsp.Diagnostic // uri → diagnostics
@@ -85,6 +86,7 @@ func (e *Editor) lspActivate(buf *buffer.Buffer) {
 			client:      c,
 			rootURI:     lsp.FileURI(root),
 			openFiles:   make(map[string]int),
+			lastSent:    make(map[string]time.Time),
 			diagnostics: make(map[string][]lsp.Diagnostic),
 		}
 		e.lspConns[buf.Mode()] = conn
@@ -129,9 +131,40 @@ func (e *Editor) lspClose() {
 	}
 }
 
+// lspDidChangeDebounce is the minimum interval between two
+// textDocument/didChange notifications for the same file sent via
+// lspMaybeDidChange.  Redraw() calls lspMaybeDidChange after every keystroke;
+// without this, a fast typist (or a keyboard macro) triggers an O(n)
+// buf.String() copy, a JSON marshal, and a full-document write down the LSP
+// pipe on every single character.  Call sites whose result depends on the
+// server having current text right now — completion, hover, definition,
+// references — must call lspFlushDidChange instead, which bypasses the
+// debounce so a coalesced-away edit is never missed.  It is a var (not a
+// const) so tests can shrink it for determinism.
+var lspDidChangeDebounce = 150 * time.Millisecond
+
 // lspMaybeDidChange sends textDocument/didChange if buf has been modified
-// since the last send.  Called from Redraw so diagnostics stay fresh.
+// since the last send, coalescing sends that happen within
+// lspDidChangeDebounce of each other.  Called from Redraw so diagnostics stay
+// reasonably fresh without resending the whole file on every keystroke.
 func (e *Editor) lspMaybeDidChange(buf *buffer.Buffer) {
+	e.lspSendDidChange(buf, false)
+}
+
+// lspFlushDidChange forces an immediate textDocument/didChange send if buf
+// has been modified since the last send, ignoring lspDidChangeDebounce.
+// Call this before issuing any LSP request whose result depends on the
+// server already having the buffer's current text.
+func (e *Editor) lspFlushDidChange(buf *buffer.Buffer) {
+	e.lspSendDidChange(buf, true)
+}
+
+// lspSendDidChange implements both lspMaybeDidChange and lspFlushDidChange.
+// When force is false, the send is skipped if one already happened for this
+// file within lspDidChangeDebounce; a later call (forced or not) will pick up
+// the latest text once the window has elapsed. When force is true the
+// debounce window is ignored.
+func (e *Editor) lspSendDidChange(buf *buffer.Buffer, force bool) {
 	if buf.Filename() == "" {
 		return
 	}
@@ -140,19 +173,31 @@ func (e *Editor) lspMaybeDidChange(buf *buffer.Buffer) {
 		return
 	}
 	uri := lsp.FileURI(buf.Filename())
+	modCount := buf.ModCount()
+
 	conn.filesMu.Lock()
 	lastMod, open := conn.openFiles[uri]
-	conn.filesMu.Unlock()
-	if !open || lastMod == buf.ModCount() {
+	if !open || lastMod == modCount {
+		conn.filesMu.Unlock()
 		return
 	}
-	conn.filesMu.Lock()
-	conn.openFiles[uri] = buf.ModCount()
+	if !force {
+		if last, ok := conn.lastSent[uri]; ok && time.Since(last) < lspDidChangeDebounce {
+			conn.filesMu.Unlock()
+			return
+		}
+	}
+	conn.openFiles[uri] = modCount
+	if conn.lastSent == nil {
+		conn.lastSent = make(map[string]time.Time)
+	}
+	conn.lastSent[uri] = time.Now()
 	conn.filesMu.Unlock()
+
 	_ = conn.client.Notify("textDocument/didChange", map[string]any{
 		"textDocument": map[string]any{
 			"uri":     uri,
-			"version": buf.ModCount(),
+			"version": modCount,
 		},
 		"contentChanges": []map[string]any{
 			{"text": buf.String()},
@@ -161,6 +206,9 @@ func (e *Editor) lspMaybeDidChange(buf *buffer.Buffer) {
 }
 
 // lspDidSave sends textDocument/didSave for buf.  Called from cmdSaveBuffer.
+// It also records the send in the debounce state, since didSave includes the
+// full current text: without this, the very next lspMaybeDidChange call would
+// immediately resend content the server already has.
 func (e *Editor) lspDidSave(buf *buffer.Buffer) {
 	if buf.Filename() == "" {
 		return
@@ -174,6 +222,16 @@ func (e *Editor) lspDidSave(buf *buffer.Buffer) {
 		"textDocument": map[string]any{"uri": uri},
 		"text":         buf.String(),
 	})
+
+	conn.filesMu.Lock()
+	if _, open := conn.openFiles[uri]; open {
+		conn.openFiles[uri] = buf.ModCount()
+		if conn.lastSent == nil {
+			conn.lastSent = make(map[string]time.Time)
+		}
+		conn.lastSent[uri] = time.Now()
+	}
+	conn.filesMu.Unlock()
 }
 
 // ---- notifications from server --------------------------------------------
@@ -258,6 +316,9 @@ func (e *Editor) cmdLSPFindDefinition() {
 		e.Message("LSP server is initializing, please wait…")
 		return
 	}
+	// Make sure the server has seen any edits made since the last debounced
+	// didChange before asking it where the symbol is defined.
+	e.lspFlushDidChange(buf)
 	ctx := e.lspNewOpCtx()
 	pos := e.bufPointToLSP(buf)
 	uri := lsp.FileURI(buf.Filename())
@@ -343,6 +404,9 @@ func (e *Editor) cmdLSPShowDoc() {
 		e.Message("LSP server is initializing, please wait…")
 		return
 	}
+	// Make sure the server has seen any edits made since the last debounced
+	// didChange before asking for hover text.
+	e.lspFlushDidChange(buf)
 	ctx := e.lspNewOpCtx()
 	pos := e.bufPointToLSP(buf)
 	uri := lsp.FileURI(buf.Filename())
@@ -387,6 +451,9 @@ func (e *Editor) cmdLSPFindReferences() {
 		e.Message("LSP server is initializing, please wait…")
 		return
 	}
+	// Make sure the server has seen any edits made since the last debounced
+	// didChange before asking for references.
+	e.lspFlushDidChange(buf)
 	ctx := e.lspNewOpCtx()
 	pos := e.bufPointToLSP(buf)
 	uri := lsp.FileURI(buf.Filename())
@@ -517,6 +584,9 @@ func (e *Editor) lspMaybeHover() {
 	if time.Now().UnixNano()-e.messageTime < 2e9 {
 		return
 	}
+	// Make sure the server has seen any edits made since the last debounced
+	// didChange before asking for hover text at the new cursor position.
+	e.lspFlushDidChange(buf)
 	e.lastHoverFile = buf.Filename()
 	e.lastHoverPoint = buf.Point()
 	e.hoverInflight = true
@@ -826,20 +896,35 @@ func (e *Editor) renderLSPDocPopup() {
 	}
 	e.term.SetCell(left+popupW+1, borderTop, '╮', border)
 
-	// Content rows.
+	// Content rows.  Each line is highlighted with the active buffer's mode
+	// highlighter so the API doc reads like code, the same treatment the
+	// eldoc message gets in the minibuffer.  The syntax colour supplies the
+	// foreground only; the popup keeps its own background.
+	hl := highlighterFor(buf)
 	for i, docLine := range lines {
 		row := borderTop + 1 + i
 		if row >= totalH-1 {
 			break
 		}
 		runes := []rune(docLine)
+		spans := hl.Highlight(docLine, 0, len(runes))
 		e.term.SetCell(left, row, '│', border)
 		for j := 0; j < popupW; j++ {
 			ch := ' '
+			face := text
 			if j < len(runes) {
 				ch = runes[j]
+				if f := faceAtPos(spans, j); f.Fg != "" {
+					face = syntax.Face{
+						Fg:        f.Fg,
+						Bg:        text.Bg,
+						Bold:      f.Bold,
+						Italic:    f.Italic,
+						Underline: f.Underline,
+					}
+				}
 			}
-			e.term.SetCell(left+1+j, row, ch, text)
+			e.term.SetCell(left+1+j, row, ch, face)
 		}
 		e.term.SetCell(left+popupW+1, row, '│', border)
 	}

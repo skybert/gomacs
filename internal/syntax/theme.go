@@ -89,6 +89,7 @@ var faceByName = map[string]*Face{
 	"compilation-fail":  &FaceCompilationFail,
 	"breakpoint":        &FaceBreakpoint,
 	"exec-pos":          &FaceExecPos,
+	"window-jump":       &FaceWindowJump,
 }
 
 // applyDefaultTheme resets all faces to the built-in terminal-colour defaults.
@@ -111,13 +112,15 @@ func applyDefaultTheme() {
 	FaceBlockquote = Face{Fg: "green", Italic: true}
 	FaceModeline = Face{Fg: "black", Bg: "white", Bold: true}
 	FaceMinibuffer = Face{Fg: "default", Bg: "default"}
-	FaceRegion = Face{Fg: "black", Bg: "cyan"}
+	// The spec requires the selection to use the theme's green.
+	FaceRegion = Face{Fg: "black", Bg: "green"}
 	FaceIsearch = Face{Fg: "black", Bg: "yellow"}
 	FaceCandidate = Face{Fg: "default", Bg: "default"}
 	FaceSelected = Face{Reverse: true}
 	FaceCompletionBorder = Face{Fg: "bright-black"}
 	FaceCompilationOK = Face{Fg: "green", Bold: true}
 	FaceCompilationFail = Face{Fg: "red", Bold: true}
+	FaceWindowJump = Face{Fg: "black", Bg: "green", Bold: true}
 }
 
 // applySweetTheme sets faces to the Sweet colour palette.
@@ -171,4 +174,5 @@ func applySweetTheme() {
 	FaceCompletionBorder = Face{Fg: sweetMono3, Bg: sweetBg}
 	FaceCompilationOK = Face{Fg: sweetGreen, Bold: true}
 	FaceCompilationFail = Face{Fg: sweetRed1, Bold: true}
+	FaceWindowJump = Face{Fg: sweetBlack, Bg: sweetGreen, Bold: true}
 }

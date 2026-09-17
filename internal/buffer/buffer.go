@@ -1,5 +1,7 @@
 package buffer
 
+import "strings"
+
 const (
 	initialGapSize  = 64
 	modeFundamental = "fundamental"
@@ -57,6 +59,16 @@ type Buffer struct {
 	// LineCount() is O(1) after the first call instead of O(buffer_size).
 	lineCountDelta int  // number of '\n' runes currently in the buffer
 	lineCountReady bool // true after first LineCount() call seeds the delta
+
+	// Line-start index: lineStarts[i] is the buffer position of the first rune
+	// on 1-based line i+1 (so lineStarts[0] is always 0).  It is built lazily
+	// by ensureLineStarts() and kept in step by insertRunes/deleteRunes, which
+	// extend or truncate it for edits at the end of the buffer and otherwise
+	// drop it so the next LineStart() rebuilds.  Like lineCountDelta, this
+	// makes LineStart() O(1) after the first call instead of O(buffer_size).
+	// The index is absolute: it ignores narrowing, matching LineStart().
+	lineStarts      []int
+	lineStartsReady bool
 }
 
 // New creates an empty buffer with the given name.
@@ -85,6 +97,7 @@ func NewWithContent(name, content string) *Buffer {
 		// The InsertString above incremented lineCountDelta; reset so the
 		// next LineCount() re-seeds from the actual buffer content.
 		b.lineCountReady = false
+		b.invalidateLineStarts()
 	}
 	return b
 }
@@ -122,7 +135,10 @@ func (b *Buffer) SetMode(mode string) {
 	case "go", "markdown", "elisp", "python", "java", "bash", "perl", "gherkin", "json", "yaml", "makefile", "conf", "text", "diff", "dired", "vc-log", "vc-status", "vc-grep", "vc-commit", "vc-show", "vc-fixup-select", "vc-annotate", "buffer-list", "help", "compilation", "man", "lsp-refs", "shell", "debug-locals", "debug-stack", "debug-repl", modeFundamental:
 		b.mode = mode
 	default:
-		if len(mode) > 11 && mode[:12] == "vc-annotate+" {
+		// Modes carrying a language suffix (e.g. "vc-annotate+go",
+		// "debug-repl+java") are accepted verbatim so the renderer can pick the
+		// debugged/annotated language's highlighter.
+		if strings.HasPrefix(mode, "vc-annotate+") || strings.HasPrefix(mode, "debug-repl+") {
 			b.mode = mode
 		} else {
 			b.mode = modeFundamental
@@ -255,6 +271,7 @@ func (b *Buffer) insertRunes(pos int, runes []rune) {
 			}
 		}
 	}
+	b.insertLineStarts(pos, runes)
 	n := len(runes)
 	b.growGap(n)
 	b.moveGap(pos)
@@ -304,6 +321,7 @@ func (b *Buffer) deleteRunes(pos, count int) {
 			}
 		}
 	}
+	b.deleteLineStarts(pos, count)
 	b.moveGap(pos)
 	b.gapEnd += count
 	// Adjust point and mark.
@@ -459,6 +477,85 @@ func (b *Buffer) NarrowMax() int {
 	return b.Len()
 }
 
+// ---- line-start index ------------------------------------------------------
+
+// invalidateLineStarts drops the line-start index, keeping the backing array so
+// the next rebuild does not have to reallocate.
+func (b *Buffer) invalidateLineStarts() {
+	b.lineStarts = b.lineStarts[:0]
+	b.lineStartsReady = false
+}
+
+// ensureLineStarts builds the line-start index if it is not currently valid.
+// The scan walks the two contiguous gap-buffer segments in bulk rather than
+// calling RuneAt() per rune (see LineStartsFromPos for the same technique).
+// Because the index records every '\n', it also seeds the incremental line
+// count for free.
+func (b *Buffer) ensureLineStarts() {
+	if b.lineStartsReady {
+		return
+	}
+	b.lineStarts = append(b.lineStarts[:0], 0)
+	logPos := 0
+	for _, r := range b.data[:b.gapStart] {
+		logPos++
+		if r == '\n' {
+			b.lineStarts = append(b.lineStarts, logPos)
+		}
+	}
+	for _, r := range b.data[b.gapEnd:] {
+		logPos++
+		if r == '\n' {
+			b.lineStarts = append(b.lineStarts, logPos)
+		}
+	}
+	b.lineStartsReady = true
+	// One entry per '\n' plus the always-present line 1 entry.
+	b.lineCountDelta = len(b.lineStarts) - 1
+	b.lineCountReady = true
+}
+
+// insertLineStarts keeps the line-start index in step with an insertion of
+// `runes` at pos.  Appending at the end of the buffer — the common case for
+// output buffers and for typing at end of file — only ever adds entries, so it
+// is handled in O(len(runes)).  Any other insertion shifts existing entries and
+// is handled by dropping the index for a lazy rebuild.
+func (b *Buffer) insertLineStarts(pos int, runes []rune) {
+	if !b.lineStartsReady {
+		return
+	}
+	if pos != b.Len() {
+		b.invalidateLineStarts()
+		return
+	}
+	for i, r := range runes {
+		if r == '\n' {
+			b.lineStarts = append(b.lineStarts, pos+i+1)
+		}
+	}
+	b.lineCountDelta = len(b.lineStarts) - 1
+}
+
+// deleteLineStarts keeps the line-start index in step with a deletion of count
+// runes at pos.  A deletion that reaches the end of the buffer only ever
+// removes trailing entries, so it is handled by truncation; anything else drops
+// the index for a lazy rebuild.
+func (b *Buffer) deleteLineStarts(pos, count int) {
+	if !b.lineStartsReady {
+		return
+	}
+	if pos+count != b.Len() {
+		b.invalidateLineStarts()
+		return
+	}
+	// Entries are ascending, so drop from the tail while they lie past pos.
+	// Line 1 always starts at 0 and is never dropped.
+	for len(b.lineStarts) > 1 && b.lineStarts[len(b.lineStarts)-1] > pos {
+		b.lineStarts = b.lineStarts[:len(b.lineStarts)-1]
+	}
+	b.lineCountDelta = len(b.lineStarts) - 1
+}
+
 // ---- line / column helpers -------------------------------------------------
 
 // LineCount returns the number of lines (newlines + 1).
@@ -511,27 +608,25 @@ func (b *Buffer) LineCol(pos int) (line, col int) {
 
 // LineStart returns the logical position of the first rune on the given
 // 1-based line number.  Returns 0 for line <= 1 and Len() for lines beyond
-// the last line.
+// the last line.  The position is absolute: narrowing is not taken into
+// account.
+//
+// The lookup goes through the lazily built line-start index, so it is O(1)
+// after the first call rather than an O(buffer_size) scan every time.
 func (b *Buffer) LineStart(line int) int {
 	if line <= 1 {
 		return 0
 	}
-	current := 1
-	length := b.Len()
-	for i := range length {
-		if b.RuneAt(i) == '\n' {
-			current++
-			if current == line {
-				return i + 1
-			}
-		}
+	b.ensureLineStarts()
+	if line-1 >= len(b.lineStarts) {
+		return b.Len()
 	}
-	return b.Len()
+	return b.lineStarts[line-1]
 }
 
 // LineStartsFrom returns the buffer start positions for `count` consecutive
-// lines beginning at 1-based line `from`. It does a single forward scan so
-// the cost is O(pos_of_last_line) rather than O(count × pos_of_first_line).
+// lines beginning at 1-based line `from`.  Each entry is an index lookup, so
+// the cost is O(count) once the line-start index exists.
 // Positions beyond the last buffer line are set to b.Len().
 func (b *Buffer) LineStartsFrom(from, count int) []int {
 	if count <= 0 {
@@ -540,32 +635,15 @@ func (b *Buffer) LineStartsFrom(from, count int) []int {
 	if from < 1 {
 		from = 1
 	}
+	b.ensureLineStarts()
 	out := make([]int, count)
 	length := b.Len()
-	cur := 1    // 1-based line counter
-	filled := 0 // how many entries in out[] have been filled
-
-	if from == 1 {
-		out[0] = 0
-		filled = 1
-	}
-
-	for i := range length {
-		if filled >= count {
-			break
+	for i := range count {
+		if idx := from + i - 1; idx < len(b.lineStarts) {
+			out[i] = b.lineStarts[idx]
+		} else {
+			out[i] = length
 		}
-		if b.RuneAt(i) == '\n' {
-			cur++
-			if cur >= from && cur < from+count {
-				out[cur-from] = i + 1
-				filled++
-			}
-		}
-	}
-	// Fill any remaining entries (lines beyond EOF) with Len().
-	for filled < count {
-		out[filled] = length
-		filled++
 	}
 	return out
 }

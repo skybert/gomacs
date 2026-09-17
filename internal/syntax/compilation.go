@@ -14,10 +14,15 @@ var compErrRe = regexp.MustCompile(`^([^:\s][^:]*):(\d+)(?::(\d+))?:`)
 // with FaceType (cyan) and the :line:col: portion with FaceNumber (magenta).
 type CompilationHighlighter struct{}
 
+// Highlight scans compilation output line by line.  Each line is independent,
+// so scanning stops as soon as a line begins at or past end.
 func (CompilationHighlighter) Highlight(text string, start, end int) []Span {
 	var spans []Span
 	pos := 0
 	for line := range strings.SplitSeq(text, "\n") {
+		if pos >= end {
+			break
+		}
 		m := compErrRe.FindStringSubmatchIndex(line)
 		if m != nil {
 			// m[2]:m[3] = file, m[4]:m[5] = line number, m[6]:m[7] = col (optional)

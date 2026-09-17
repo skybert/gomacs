@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/gdamore/tcell/v3"
@@ -18,11 +19,33 @@ import (
 // Types
 // ---------------------------------------------------------------------------
 
-// spellCache holds pre-computed spell-check spans for a buffer.
+// spellCache holds pre-computed spell-check spans for a buffer, plus the
+// debounce bookkeeping getSpellSpans needs across calls.  A single instance
+// is created per buffer and mutated in place (never replaced) so lastSpawn
+// and wakeArmed survive across generations.
 type spellCache struct {
 	gen   int
 	spans []syntax.Span
+	// spansSet is true once spans for gen have actually been stored.  It is
+	// needed because gen alone cannot mark "nothing computed yet": ApplyUndo
+	// decrements ChangeGen, so any sentinel value is a reachable generation.
+	spansSet bool
+
+	// lastSpawn is when an async spell check was last dispatched for this
+	// buffer. Zero value means none has ever been dispatched.
+	lastSpawn time.Time
+	// wakeArmed is true while a armSpellRecheck wakeup timer is pending, so
+	// a burst of debounced calls only ever arms one timer.
+	wakeArmed bool
 }
+
+// spellCheckDebounce is the minimum time between successive async spell
+// checks dispatched for the same buffer. Without it, every redraw during a
+// burst of rapid edits would re-copy the whole buffer text and spawn a new
+// background aspell run; with it, only the first edit in the window triggers
+// a check, and armSpellRecheck guarantees the buffer's final state still gets
+// checked once the burst settles, even without a further redraw.
+var spellCheckDebounce = 300 * time.Millisecond
 
 // commentMapping records where a comment span lives in the original buffer
 // and in the virtual text built for aspell.
@@ -120,17 +143,30 @@ func (e *Editor) getSpellSpans(buf *buffer.Buffer) []syntax.Span {
 	}
 	gen := buf.ChangeGen()
 	c := e.spellCaches[buf]
-	if c != nil && c.gen == gen {
+	if c == nil {
+		c = &spellCache{}
+		e.spellCaches[buf] = c
+	}
+	if c.spansSet && c.gen == gen {
 		return c.spans
 	}
 	// Don't start a new check if one is already in-flight for this generation.
-	if e.spellPending[buf] == gen {
-		if c != nil {
-			return c.spans
-		}
+	// The key must be tested for presence: a missing entry reads back as 0,
+	// which is exactly the generation of a freshly loaded buffer, so a bare
+	// lookup would skip the very first check of every file.
+	if pg, ok := e.spellPending[buf]; ok && pg == gen {
+		return c.spans
+	}
+	// Debounce: during a burst of rapid edits every redraw would otherwise
+	// re-copy the whole buffer and spawn another aspell run.  Only the first
+	// edit in each window dispatches; armSpellRecheck makes sure the final
+	// state is still checked once the user stops typing.
+	if !c.lastSpawn.IsZero() && time.Since(c.lastSpawn) < spellCheckDebounce {
+		e.armSpellRecheck(buf, c)
 		return nil
 	}
 	// Start an async spell check; capture only data (no buf reference in goroutine).
+	c.lastSpawn = time.Now()
 	e.spellPending[buf] = gen
 	text := buf.String()
 	spellCmd := e.spellCommand
@@ -142,8 +178,17 @@ func (e *Editor) getSpellSpans(buf *buffer.Buffer) []syntax.Span {
 				e.spellCaches = make(map[*buffer.Buffer]*spellCache)
 			}
 			// Only store if the buffer content matches what we checked.
+			// The record is mutated in place so the debounce bookkeeping
+			// survives across generations.
 			if buf.ChangeGen() == gen {
-				e.spellCaches[buf] = &spellCache{gen: gen, spans: spans}
+				cc := e.spellCaches[buf]
+				if cc == nil {
+					cc = &spellCache{}
+					e.spellCaches[buf] = cc
+				}
+				cc.gen = gen
+				cc.spans = spans
+				cc.spansSet = true
 			}
 			delete(e.spellPending, buf)
 		}
@@ -151,6 +196,27 @@ func (e *Editor) getSpellSpans(buf *buffer.Buffer) []syntax.Span {
 	// Don't return stale spans: their positions are relative to old content
 	// and would mark wrong characters as misspelled during undo/edit.
 	return nil
+}
+
+// armSpellRecheck schedules a wakeup once buf's debounce window has elapsed, so
+// the buffer's final state is spell-checked even if the user stops typing and no
+// further redraw would otherwise occur.  At most one wakeup is armed per buffer.
+func (e *Editor) armSpellRecheck(buf *buffer.Buffer, c *spellCache) {
+	if c.wakeArmed {
+		return
+	}
+	c.wakeArmed = true
+	wait := max(spellCheckDebounce-time.Since(c.lastSpawn), 0)
+	e.lspAsync(func() func() {
+		time.Sleep(wait)
+		// The callback runs on the main goroutine and its PostWakeup triggers
+		// the redraw whose getSpellSpans call dispatches the real check.
+		return func() {
+			if cc := e.spellCaches[buf]; cc != nil {
+				cc.wakeArmed = false
+			}
+		}
+	})
 }
 
 // computeSpellSpansForMode runs aspell on text and returns spell-error spans.

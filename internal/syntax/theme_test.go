@@ -66,6 +66,66 @@ func TestApplyDefaultTheme(t *testing.T) {
 	}
 }
 
+// TestSelectionIsGreenInEveryTheme pins the spec requirement that the selection
+// colour is the theme's green.  It previously regressed to cyan in the default
+// theme, which only the sweet theme's assertions covered.
+func TestSelectionIsGreenInEveryTheme(t *testing.T) {
+	tests := []struct {
+		theme string
+		apply func()
+		want  string
+	}{
+		{"default", applyDefaultTheme, "green"},
+		{"sweet", applySweetTheme, "#06c993"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.theme, func(t *testing.T) {
+			tt.apply()
+			if FaceRegion.Bg != tt.want {
+				t.Errorf("%s theme FaceRegion.Bg = %q, want the theme green %q",
+					tt.theme, FaceRegion.Bg, tt.want)
+			}
+		})
+	}
+}
+
+// TestWindowJumpBadgeIsGreenInEveryTheme covers the "# One letter window jump"
+// requirement that the overlay letter is green.
+func TestWindowJumpBadgeIsGreenInEveryTheme(t *testing.T) {
+	tests := []struct {
+		theme string
+		apply func()
+		want  string
+	}{
+		{"default", applyDefaultTheme, "green"},
+		{"sweet", applySweetTheme, "#06c993"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.theme, func(t *testing.T) {
+			tt.apply()
+			if FaceWindowJump.Bg != tt.want {
+				t.Errorf("%s theme FaceWindowJump.Bg = %q, want the theme green %q",
+					tt.theme, FaceWindowJump.Bg, tt.want)
+			}
+			if !FaceWindowJump.Bold {
+				t.Errorf("%s theme FaceWindowJump should be bold", tt.theme)
+			}
+		})
+	}
+}
+
+// TestWindowJumpFaceIsThemeable checks the badge face is reachable by name so
+// users can override it from init.el via set-face-attribute.
+func TestWindowJumpFaceIsThemeable(t *testing.T) {
+	p, ok := GetFacePtr("window-jump")
+	if !ok {
+		t.Fatal(`GetFacePtr("window-jump"): not found`)
+	}
+	if p != &FaceWindowJump {
+		t.Error(`GetFacePtr("window-jump"): returned wrong pointer`)
+	}
+}
+
 func TestGetFacePtr(t *testing.T) {
 	p, ok := GetFacePtr("keyword")
 	if !ok {

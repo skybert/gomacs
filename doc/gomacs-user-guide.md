@@ -84,6 +84,24 @@ Skip loading the init file.
 | M-x replace-string | Replace string (no prompting) |
 
 
+During incremental search,
+**C-w**
+pulls the next word of buffer text (following the current match) into the
+search string.  For example, searching for
+**Camel**
+and landing inside
+**CamelCase**
+can be extended to
+**CamelCase**
+with a single
+**C-w**;
+pressing it again pulls in the following word.  When a search runs off
+the end (or beginning) of the buffer it wraps around to the other end
+and reports this in the minibuffer, e.g.
+**Wrapped isearch (hit bottom of buffer): ...**
+or
+**Wrapped isearch (hit top of buffer): ...**.
+
 ### Mark and Region
 
 | | |
@@ -103,12 +121,21 @@ Skip loading the init file.
 | C-x 3 | Split window right |
 | C-x o | Other window |
 | C-x 1 | Delete other windows |
+| M-o | Jump to a window by its letter (window-jump) |
 | C-x b | Switch buffer (tab-completion of open buffers) |
 | C-x k | Kill buffer |
 | C-x C-f | Find (open) file |
 | C-x C-s | Save buffer |
 | C-x C-w | Write file (save as) |
 
+
+**M-o**
+labels every visible window with a green home-row letter (from
+**asdfghkl**),
+suppressing syntax highlighting while the overlay is shown so the
+letters stand out.  Press the letter to move point to that window, or
+**C-g**
+to cancel.
 
 ### Registers
 
@@ -169,13 +196,79 @@ to commit or
 **C-c C-k**
 to abort.
 
+### Project
+
+| | |
+|---|---|
+| C-x p f | Fuzzy find a file in the current project (project-find-file) |
+| C-x p g | Grep the current project (project-grep) |
+| C-x p ! | Run the project build (project-build) |
+
+
+The project root is determined by the current buffer's VC backend
+(e.g. the git repository root).
+**C-x p f**
+lists every file under that root with fuzzy completion in the
+minibuffer.
+**C-x p g**
+prompts for a pattern and searches the project, using the VC backend's
+grep when one is available or falling back to
+**grep -R -i -n**
+otherwise; results are shown in a
+***grep***
+buffer navigable with
+**next-error** (see below).
+
+### Compilation and Errors
+
+| | |
+|---|---|
+| M-x project-build | Run a build command in the project root, output to *compilation* |
+| C-x ` | Visit the next error/match (next-error) |
+| M-g n | Visit the next error/match (next-error) |
+| M-g p | Visit the previous error/match (previous-error) |
+
+
+**M-x project-build**
+prompts for a build command (defaulting to
+**make ,**
+or
+**mvn clean install**
+when the project root contains a
+**pom.xml**)
+and runs it in the VC root, showing the output in a
+***compilation***
+buffer.  In that buffer,
+**q**
+quits,
+**g**
+reruns the build, and
+**n / p**
+move to the next/previous error.
+
+**next-error** (**C-x `** or **M-g n**) and **previous-error**
+(**M-g p**) step through file/line hits recorded by the most recent
+***compilation***, ***grep*** (from **project-grep** or
+**vc-grep**), or Gherkin step-definition search.
+
 ### Shell
 
 | | |
 |---|---|
 | M-! | Run shell command |
 | M-\| | Shell command on region |
+| M-x shell | Open a PTY-backed shell buffer running $SHELL |
 
+
+**M-x shell** opens a full terminal emulator buffer capable of running
+full-screen programs such as **top**, with ANSI escape sequences
+interpreted.  The first shell buffer is named ***shell***; a second
+invocation creates ***shell/<repo>*** (named after the VC repository, or
+the current directory's basename outside a repository) and switches to it
+if it already exists.  Inside a shell buffer, **C-SPC**, **C-v**,
+**M-v**, **M-w**, **M-x** and the **C-x** prefix (including
+**C-x b** and **C-x k**) remain bound to gomacs; all other keys are
+sent to the shell.
 
 ### Text Manipulation
 
@@ -194,6 +287,7 @@ to abort.
 |---|---|
 | M-. | Go to definition |
 | M-, | Pop back from definition |
+| M-? | Find references (lsp-find-references) |
 | C-c h | Show hover documentation |
 
 
@@ -222,11 +316,38 @@ the cursor rests on a symbol (eldoc-style).
 | q | Quit dired |
 
 
+### Debugger (C-c d prefix)
+
+| | |
+|---|---|
+| C-c d b | Toggle breakpoint at the current line (debug-toggle-breakpoint) |
+| C-c d d | Start a debug session (debug-start) |
+| C-c d c | Continue execution (debug-continue) |
+| C-c d n | Step to the next line (debug-step-next) |
+| C-c d i | Step into the current call (debug-step-in) |
+| C-c d o | Step out of the current function (debug-step-out) |
+| C-c d e | Evaluate the expression at point or region (debug-eval) |
+| C-c d q | Exit the debug session (debug-exit) |
+
+
+While a debug session is active, **n**, **i**, **o**, **c**, **e**
+and **q** also work as single-letter shortcuts (without the
+**C-c d**
+prefix) when the active buffer is a source file.
+**debug-start**
+inspects the current context (test file, main program, or server) to
+decide how to launch the program.  Breakpoints are shown in a gutter
+in the left margin of the source buffer; while stopped, the
+***Debug Locals***, ***Debug Stack*** and ***Debug REPL***
+buffers show local variables, the call stack, and an evaluation
+prompt.
+
 ### Spell Checking
 
 | | |
 |---|---|
 | M-x spell | Interactive spell check of current buffer |
+| M-x ispell-buffer | Interactive spell check of current buffer (same as spell) |
 | M-$ (M-x ispell-word) | Check spelling of word at point |
 
 
@@ -262,12 +383,26 @@ when no completion popup is active.
 | M-x json-mode | JSON |
 | M-x yaml-mode | YAML |
 | M-x makefile-mode | Makefile |
+| M-x gherkin-mode | Gherkin (.feature) |
 | M-x text-mode | Plain text (spell checking enabled) |
 | M-x fundamental-mode | No syntax or indentation |
 
 
 Modes are set automatically from the file extension
-(.go, .py, .java, .sh/.bash, .md/.markdown, .el, .json, .yaml/.yml, .mk/Makefile).
+(.go, .py, .java, .sh/.bash, .md/.markdown, .el, .json, .yaml/.yml, .mk/Makefile, .feature).
+
+In Gherkin buffers,
+**M-.**
+on a step line (e.g.
+**Given user logs in**)
+converts the step to a CamelCase identifier and searches the project
+for a matching Go/gocuke function or Java
+**@Given/@When/@Then**
+annotation, jumping there directly on a single match.
+**M-,**
+pops back.  Multiple matches are listed in a grep buffer navigable
+with
+**next-error**.
 
 ### Help
 
@@ -400,6 +535,14 @@ The directory is created if it does not exist.
 Example: **(setq screenshot-dir "~/pictures/screenshots")**
 
 
+**debug-locals-auto-expand-depth**  
+Number of struct levels to auto-expand in the
+***Debug Locals***
+panel when the debugger stops.
+Default: 1.
+Example: **(setq debug-locals-auto-expand-depth 2)**
+
+
 ### Key bindings
 
 Custom key bindings can be set in the init file using
@@ -475,7 +618,7 @@ Torstein Krause Johansen <torstein@skybert.net>
 
 ## VERSION
 
-v1.7.1-6-g0aabbf0
+v1.9.0-18-ga5dbe52-dirty
 
 ## Screenshots
 

@@ -8,10 +8,15 @@ import (
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/dap"
+	"github.com/skybert/gomacs/internal/lsp"
 	"github.com/skybert/gomacs/internal/terminal"
 )
 
 const dapReplPrompt = "> "
+
+// debugReplMode is the base buffer mode of the *Debug REPL* buffer.  An active
+// session appends the debugged language ("debug-repl+java"); see dapReplModeFor.
+const debugReplMode = "debug-repl"
 
 // dapReplReset clears replBuf and writes the initial prompt line.
 func dapReplReset(replBuf *buffer.Buffer) {
@@ -155,10 +160,11 @@ func (e *Editor) debugReplDispatch(ke terminal.KeyEvent) bool {
 	return false
 }
 
-// dapReplComplete performs Tab completion in the REPL using known local
-// variable names.  It finds the identifier token just before the cursor,
-// matches it against all variables in scope, and either completes (single
-// match) or shows candidates (multiple matches).
+// dapReplComplete performs Tab completion in the REPL.  It finds the identifier
+// token just before the cursor and matches it against the names in scope; the
+// token is first extended to the longest common prefix of the matches, and if
+// more than one candidate remains they are offered in the same bordered popup
+// the code buffer uses (arrows / M-n / M-p to navigate, Tab or Enter to insert).
 func (e *Editor) dapReplComplete() {
 	if e.dap == nil || e.dap.replBuf == nil {
 		return
@@ -180,27 +186,16 @@ func (e *Editor) dapReplComplete() {
 	}
 	prefix := buf.Substring(start, pt)
 
-	// Collect all variable names from locals.
-	e.dap.localsMu.RLock()
-	names := dapCollectVarNames(e.dap.locals)
-	e.dap.localsMu.RUnlock()
-
-	// Filter by prefix.
-	var matches []string
-	for _, n := range names {
-		if strings.HasPrefix(n, prefix) {
-			matches = append(matches, n)
-		}
-	}
+	matches := e.dapReplCandidates(prefix)
 	if len(matches) == 0 {
 		e.Message("No completions for %q", prefix)
 		return
 	}
 
 	// Find longest common prefix of all matches.
-	common := matches[0]
+	common := matches[0].Label
 	for _, m := range matches[1:] {
-		common = commonPrefixTwo(common, m)
+		common = commonPrefixTwo(common, m.Label)
 	}
 
 	if common != prefix {
@@ -217,7 +212,56 @@ func (e *Editor) dapReplComplete() {
 	if len(matches) == 1 {
 		return // single match, already inserted
 	}
-	e.Message("Completions: %s", strings.Join(matches, "  "))
+
+	// Several candidates: show the shared completion popup.  It inserts into
+	// e.ActiveBuffer(), so only offer it while the REPL window has focus.
+	if e.ActiveBuffer() != buf {
+		e.Message("Completions: %s", dapReplJoinLabels(matches))
+		return
+	}
+	e.lspCompItems = matches
+	e.lspCompSelectedIdx = 0
+	e.lspCompOffset = 0
+	e.lspCompWordStart = start
+	e.lspCompActive = true
+}
+
+// dapReplCandidates returns the completion candidates for prefix: the variables
+// in scope (annotated with their type) followed by expressions the user has
+// already evaluated in this session.  Sorted by nothing in particular — the
+// locals come first because they are the most useful.
+func (e *Editor) dapReplCandidates(prefix string) []lsp.CompletionItem {
+	e.dap.localsMu.RLock()
+	names := dapCollectVarNames(e.dap.locals)
+	types := dapCollectVarTypes(e.dap.locals)
+	e.dap.localsMu.RUnlock()
+
+	seen := make(map[string]bool, len(names))
+	var items []lsp.CompletionItem
+	for _, n := range names {
+		if seen[n] || !strings.HasPrefix(n, prefix) {
+			continue
+		}
+		seen[n] = true
+		items = append(items, lsp.CompletionItem{Label: n, Detail: types[n]})
+	}
+	for _, h := range e.dap.replHistory {
+		if seen[h] || h == prefix || !strings.HasPrefix(h, prefix) {
+			continue
+		}
+		seen[h] = true
+		items = append(items, lsp.CompletionItem{Label: h, Detail: "history"})
+	}
+	return items
+}
+
+// dapReplJoinLabels renders candidate labels for a one-line minibuffer listing.
+func dapReplJoinLabels(items []lsp.CompletionItem) string {
+	labels := make([]string, len(items))
+	for i, it := range items {
+		labels[i] = it.Label
+	}
+	return strings.Join(labels, "  ")
 }
 
 // dapCollectVarNames returns all variable names from the given variable tree.
@@ -230,6 +274,25 @@ func dapCollectVarNames(vars []dapVariable) []string {
 		}
 	}
 	return names
+}
+
+// dapCollectVarTypes maps variable name → type string over the same tree walk
+// dapCollectVarNames performs, for annotating completion candidates.
+func dapCollectVarTypes(vars []dapVariable) map[string]string {
+	types := make(map[string]string)
+	var walk func([]dapVariable)
+	walk = func(vs []dapVariable) {
+		for _, v := range vs {
+			if _, dup := types[v.name]; !dup {
+				types[v.name] = v.typeStr
+			}
+			if v.expanded {
+				walk(v.children)
+			}
+		}
+	}
+	walk(vars)
+	return types
 }
 
 // commonPrefixTwo returns the longest common prefix of a and b.

@@ -67,11 +67,107 @@ func TestFilterManPages_AlphaWithinSameTier(t *testing.T) {
 }
 
 func TestManpathDirs_FallbackNotEmpty(t *testing.T) {
-	// manpathDirs must return at least one directory (even if manpath binary
-	// is absent we fall back to standard paths).
+	// manpathDirs must return at least one directory (even if MANPATH is
+	// unset and the manpath binary is absent we fall back to standard paths).
 	dirs := manpathDirs()
 	if len(dirs) == 0 {
 		t.Fatal("manpathDirs returned no directories")
+	}
+}
+
+func TestManPathEnvDirs_SetWithSeveralDirs(t *testing.T) {
+	got := manPathEnvDirs("/a/man:/b/man:/c/man")
+	want := []string{"/a/man", "/b/man", "/c/man"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestManPathEnvDirs_Unset(t *testing.T) {
+	if got := manPathEnvDirs(""); got != nil {
+		t.Fatalf("unset MANPATH: got %v, want nil", got)
+	}
+}
+
+func TestManPathEnvDirs_LeadingColonAppendsDefaults(t *testing.T) {
+	got := manPathEnvDirs(":/a/man")
+	want := append(append([]string{}, defaultManPageDirs...), "/a/man")
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestManPathEnvDirs_TrailingColonAppendsDefaults(t *testing.T) {
+	got := manPathEnvDirs("/a/man:")
+	want := append([]string{"/a/man"}, defaultManPageDirs...)
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestManPathEnvDirs_DoubledColonAppendsDefaults(t *testing.T) {
+	got := manPathEnvDirs("/a/man::/b/man")
+	want := append(append([]string{"/a/man"}, defaultManPageDirs...), "/b/man")
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestDedupDirs_PreservesOrderAndRemovesDuplicates(t *testing.T) {
+	got := dedupDirs([]string{"/a", "/b", "/a", "/c", "/b"})
+	want := []string{"/a", "/b", "/c"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestManpathDirs_HonoursManpathEnv(t *testing.T) {
+	t.Setenv("MANPATH", "/custom/man1:/custom/man2:/custom/man1")
+	got := manpathDirs()
+	want := []string{"/custom/man1", "/custom/man2"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestManpathDirs_EmptyManpathFallsThrough(t *testing.T) {
+	// An empty (but set) MANPATH should not itself be treated as a set of
+	// directories; manpathDirs should fall through to the manpath binary or
+	// the hardcoded defaults, both of which are non-empty.
+	t.Setenv("MANPATH", "")
+	dirs := manpathDirs()
+	if len(dirs) == 0 {
+		t.Fatal("manpathDirs returned no directories for empty MANPATH")
 	}
 }
 

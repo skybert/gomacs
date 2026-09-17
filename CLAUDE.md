@@ -96,6 +96,11 @@ Example `~/.gomacs`:
 Set `(setq isearch-case-insensitive nil)` in `~/.gomacs` to restore case-sensitive search.
 `applyElispConfig()` reads this variable after loading the init file.
 
+**save-buffer-delete-trailing-whitespace** — when `t` (the default), `save-buffer` strips
+trailing whitespace from every line before writing. Set to `nil` to disable. This is global
+(not mode-specific); `applyElispConfig()` reads it — and the older `delete-trailing-whitespace`
+alias — after loading the init file.
+
 ## Configuration
 
 All configuration variables are documented in the man page in

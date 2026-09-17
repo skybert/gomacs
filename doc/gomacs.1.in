@@ -66,6 +66,24 @@ C\-r	Incremental search backward (case\-insensitive by default)
 M\-%	Query replace
 M\-x replace\-string	Replace string (no prompting)
 .TE
+.PP
+During incremental search,
+.B C\-w
+pulls the next word of buffer text (following the current match) into the
+search string.  For example, searching for
+.B Camel
+and landing inside
+.B CamelCase
+can be extended to
+.B CamelCase
+with a single
+.BR C\-w ;
+pressing it again pulls in the following word.  When a search runs off
+the end (or beginning) of the buffer it wraps around to the other end
+and reports this in the minibuffer, e.g.\&
+.B "Wrapped isearch (hit bottom of buffer): ..."
+or
+.BR "Wrapped isearch (hit top of buffer): ..." .
 .SS Mark and Region
 .TS
 l l.
@@ -82,12 +100,21 @@ C\-x 2	Split window below
 C\-x 3	Split window right
 C\-x o	Other window
 C\-x 1	Delete other windows
+M\-o	Jump to a window by its letter (window\-jump)
 C\-x b	Switch buffer (tab\-completion of open buffers)
 C\-x k	Kill buffer
 C\-x C\-f	Find (open) file
 C\-x C\-s	Save buffer
 C\-x C\-w	Write file (save as)
 .TE
+.PP
+.B M\-o
+labels every visible window with a green home\-row letter (from
+.BR asdfghkl ),
+suppressing syntax highlighting while the overlay is shown so the
+letters stand out.  Press the letter to move point to that window, or
+.B C\-g
+to cancel.
 .SS Registers
 .TS
 l l.
@@ -141,12 +168,74 @@ buffer, write a commit message and press
 to commit or
 .B C\-c C\-k
 to abort.
+.SS Project
+.TS
+l l.
+C\-x p f	Fuzzy find a file in the current project (project\-find\-file)
+C\-x p g	Grep the current project (project\-grep)
+C\-x p !	Run the project build (project\-build)
+.TE
+.PP
+The project root is determined by the current buffer's VC backend
+(e.g.\& the git repository root).
+.B C\-x p f
+lists every file under that root with fuzzy completion in the
+minibuffer.
+.B C\-x p g
+prompts for a pattern and searches the project, using the VC backend's
+grep when one is available or falling back to
+.B "grep \-R \-i \-n"
+otherwise; results are shown in a
+.B *grep*
+buffer navigable with
+.BR next\-error " (see below)."
+.SS Compilation and Errors
+.TS
+l l.
+M\-x project\-build	Run a build command in the project root, output to *compilation*
+C\-x `	Visit the next error/match (next\-error)
+M\-g n	Visit the next error/match (next\-error)
+M\-g p	Visit the previous error/match (previous\-error)
+.TE
+.PP
+.B M\-x project\-build
+prompts for a build command (defaulting to
+.B make ,
+or
+.B "mvn clean install"
+when the project root contains a
+.BR pom.xml )
+and runs it in the VC root, showing the output in a
+.B *compilation*
+buffer.  In that buffer,
+.B q
+quits,
+.B g
+reruns the build, and
+.B n / p
+move to the next/previous error.
+.PP
+\fBnext\-error\fR (\fBC\-x `\fR or \fBM\-g n\fR) and \fBprevious\-error\fR
+(\fBM\-g p\fR) step through file/line hits recorded by the most recent
+\fB*compilation*\fR, \fB*grep*\fR (from \fBproject\-grep\fR or
+\fBvc\-grep\fR), or Gherkin step\-definition search.
 .SS Shell
 .TS
 l l.
 M\-!	Run shell command
 M\-|	Shell command on region
+M\-x shell	Open a PTY\-backed shell buffer running $SHELL
 .TE
+.PP
+\fBM\-x shell\fR opens a full terminal emulator buffer capable of running
+full\-screen programs such as \fBtop\fR, with ANSI escape sequences
+interpreted.  The first shell buffer is named \fB*shell*\fR; a second
+invocation creates \fB*shell/<repo>*\fR (named after the VC repository, or
+the current directory's basename outside a repository) and switches to it
+if it already exists.  Inside a shell buffer, \fBC\-SPC\fR, \fBC\-v\fR,
+\fBM\-v\fR, \fBM\-w\fR, \fBM\-x\fR and the \fBC\-x\fR prefix (including
+\fBC\-x b\fR and \fBC\-x k\fR) remain bound to gomacs; all other keys are
+sent to the shell.
 .SS Text Manipulation
 .TS
 l l.
@@ -161,6 +250,7 @@ C\-x l	Count buffer lines (total, before and after point)
 l l.
 M\-.	Go to definition
 M\-,	Pop back from definition
+M\-?	Find references (lsp\-find\-references)
 C\-c h	Show hover documentation
 .TE
 .PP
@@ -184,10 +274,35 @@ g	Refresh listing
 ^	Go to parent directory
 q	Quit dired
 .TE
+.SS Debugger (C\-c d prefix)
+.TS
+l l.
+C\-c d b	Toggle breakpoint at the current line (debug\-toggle\-breakpoint)
+C\-c d d	Start a debug session (debug\-start)
+C\-c d c	Continue execution (debug\-continue)
+C\-c d n	Step to the next line (debug\-step\-next)
+C\-c d i	Step into the current call (debug\-step\-in)
+C\-c d o	Step out of the current function (debug\-step\-out)
+C\-c d e	Evaluate the expression at point or region (debug\-eval)
+C\-c d q	Exit the debug session (debug\-exit)
+.TE
+.PP
+While a debug session is active, \fBn\fR, \fBi\fR, \fBo\fR, \fBc\fR, \fBe\fR
+and \fBq\fR also work as single\-letter shortcuts (without the
+.B C\-c d
+prefix) when the active buffer is a source file.
+.B debug\-start
+inspects the current context (test file, main program, or server) to
+decide how to launch the program.  Breakpoints are shown in a gutter
+in the left margin of the source buffer; while stopped, the
+\fB*Debug Locals*\fR, \fB*Debug Stack*\fR and \fB*Debug REPL*\fR
+buffers show local variables, the call stack, and an evaluation
+prompt.
 .SS Spell Checking
 .TS
 l l.
 M\-x spell	Interactive spell check of current buffer
+M\-x ispell\-buffer	Interactive spell check of current buffer (same as spell)
 M\-$ (M\-x ispell\-word)	Check spelling of word at point
 .TE
 .PP
@@ -219,12 +334,26 @@ M\-x elisp\-mode	Emacs Lisp
 M\-x json\-mode	JSON
 M\-x yaml\-mode	YAML
 M\-x makefile\-mode	Makefile
+M\-x gherkin\-mode	Gherkin (.feature)
 M\-x text\-mode	Plain text (spell checking enabled)
 M\-x fundamental\-mode	No syntax or indentation
 .TE
 .PP
 Modes are set automatically from the file extension
-(.go, .py, .java, .sh/.bash, .md/.markdown, .el, .json, .yaml/.yml, .mk/Makefile).
+(.go, .py, .java, .sh/.bash, .md/.markdown, .el, .json, .yaml/.yml, .mk/Makefile, .feature).
+.PP
+In Gherkin buffers,
+.B M\-.
+on a step line (e.g.\&
+.BR "Given user logs in" )
+converts the step to a CamelCase identifier and searches the project
+for a matching Go/gocuke function or Java
+.B @Given/@When/@Then
+annotation, jumping there directly on a single match.
+.B M\-,
+pops back.  Multiple matches are listed in a grep buffer navigable
+with
+.BR next\-error .
 .SS Help
 .TS
 l l.
@@ -335,12 +464,12 @@ If not set, files are saved to the working directory from which gomacs was start
 The directory is created if it does not exist.
 Example: \fB(setq screenshot\-dir "~/pictures/screenshots")\fR
 .TP
-.B dap\-locals\-auto\-expand\-depth
+.B debug\-locals\-auto\-expand\-depth
 Number of struct levels to auto\-expand in the
-.B *DAP Locals*
+.B *Debug Locals*
 panel when the debugger stops.
 Default: 1.
-Example: \fB(setq dap\-locals\-auto\-expand\-depth 2)\fR
+Example: \fB(setq debug\-locals\-auto\-expand\-depth 2)\fR
 .SS Key bindings
 Custom key bindings can be set in the init file using
 .BR global\-set\-key :

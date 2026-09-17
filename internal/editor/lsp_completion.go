@@ -222,11 +222,13 @@ func (e *Editor) isProseContext(buf *buffer.Buffer) bool {
 		return true
 	}
 	// For programming modes, check whether the cursor sits in a comment span.
-	cache := e.getSpanCache(buf)
+	// Only the face at point is needed, so bound the highlighting there rather
+	// than paying for the whole buffer on every keystroke.
 	pt := buf.Point()
 	if pt > 0 {
 		pt-- // check the character just before the cursor
 	}
+	cache := e.getSpanCacheUpTo(buf, pt+1)
 	f := faceAtPos(cache.spans, pt)
 	return f == syntax.FaceComment
 }

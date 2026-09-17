@@ -1,10 +1,13 @@
 package editor
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v3"
+	"github.com/skybert/gomacs/internal/syntax"
 	"github.com/skybert/gomacs/internal/terminal"
+	"github.com/skybert/gomacs/internal/window"
 )
 
 // keCtrlG builds a KeyEvent for C-g.
@@ -27,25 +30,19 @@ func TestCmdWindowJump_OneWindow(t *testing.T) {
 	}
 }
 
-func TestCmdWindowJump_TwoWindows_InstantJump(t *testing.T) {
+// The spec requires a letter badge in every visible window, so even the
+// two-window case shows the overlay rather than jumping instantly.
+func TestCmdWindowJump_TwoWindows_EntersOverlayMode(t *testing.T) {
 	e := newTestEditor("hello")
 	e.cmdSplitWindowBelow()
-	first := e.activeWin
-	second := e.windows[1]
 
 	e.cmdWindowJump()
 
-	// Should jump instantly without entering overlay mode.
-	if e.windowJumpActive {
-		t.Error("windowJumpActive should not be set for two-window jump")
+	if !e.windowJumpActive {
+		t.Error("windowJumpActive should be set for a two-window jump")
 	}
-	if e.activeWin != second {
-		t.Errorf("expected active window to be second, got first=%p active=%p", first, e.activeWin)
-	}
-	// Jumping again should cycle back.
-	e.cmdWindowJump()
-	if e.activeWin != first {
-		t.Errorf("expected active window to cycle back to first")
+	if len(e.windowJumpMap) != 2 {
+		t.Errorf("expected 2 entries in jump map, got %d", len(e.windowJumpMap))
 	}
 }
 
@@ -66,15 +63,42 @@ func TestCmdWindowJump_ThreeWindows_EntersOverlayMode(t *testing.T) {
 	if e.windowJumpMap == nil {
 		t.Fatal("windowJumpMap should be non-nil")
 	}
-	// Active window should not be in the map.
-	for r, w := range e.windowJumpMap {
+	// Every visible window gets a letter, including the active one.
+	if len(e.windowJumpMap) != 3 {
+		t.Errorf("expected 3 entries in jump map, got %d", len(e.windowJumpMap))
+	}
+	found := false
+	for _, w := range e.windowJumpMap {
 		if w == original {
-			t.Errorf("active window must not appear in jump map (key %q)", r)
+			found = true
 		}
 	}
-	// The two non-active windows should each have an entry.
-	if len(e.windowJumpMap) != 2 {
-		t.Errorf("expected 2 entries in jump map, got %d", len(e.windowJumpMap))
+	if !found {
+		t.Error("active window must also get a jump letter")
+	}
+}
+
+// TestCmdWindowJump_LabelsAllWindowsDistinctly checks that each window gets a
+// distinct home-row letter drawn from the documented key set.
+func TestCmdWindowJump_LabelsAllWindowsDistinctly(t *testing.T) {
+	e := newTestEditor("hello")
+	e.cmdSplitWindowBelow()
+	e.cmdSplitWindowBelow()
+
+	e.cmdWindowJump()
+
+	seen := make(map[*window.Window]bool)
+	for r, w := range e.windowJumpMap {
+		if !strings.ContainsRune(windowJumpKeys, r) {
+			t.Errorf("jump key %q is not one of %q", r, windowJumpKeys)
+		}
+		if seen[w] {
+			t.Errorf("window mapped to more than one letter")
+		}
+		seen[w] = true
+	}
+	if len(seen) != len(e.windows) {
+		t.Errorf("labelled %d windows, expected %d", len(seen), len(e.windows))
 	}
 }
 
@@ -93,11 +117,14 @@ func TestWindowJumpHandleKey_ValidLetter(t *testing.T) {
 		t.Fatal("expected overlay mode to be active")
 	}
 
-	// Pick the first key in the map and press it.
+	// Pick the letter of a window that is not already active, so the jump is
+	// observable.
 	var targetKey rune
-	for r := range e.windowJumpMap {
-		targetKey = r
-		break
+	for r, w := range e.windowJumpMap {
+		if w != original {
+			targetKey = r
+			break
+		}
 	}
 
 	e.windowJumpHandleKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: targetKey})
@@ -222,4 +249,28 @@ func TestRenderWindowJumpOverlays_WithBreakpointGutter(t *testing.T) {
 	e.cmdSplitWindowBelow()
 	e.cmdSplitWindowBelow()
 	e.renderWindowJumpOverlays()
+}
+
+// TestRenderWindowJumpOverlays_BadgesEveryWindow asserts the spec requirement
+// that every visible window carries a green home-row letter badge.
+func TestRenderWindowJumpOverlays_BadgesEveryWindow(t *testing.T) {
+	e := newCapTestEditor("line1\nline2\nline3\nline4\nline5\nline6\n")
+	e.cmdSplitWindowBelow()
+	e.cmdSplitWindowBelow()
+	if len(e.windows) != 3 {
+		t.Fatalf("expected 3 windows, got %d", len(e.windows))
+	}
+
+	e.cmdWindowJump()
+	e.renderWindowJumpOverlays()
+
+	for i, w := range e.windows {
+		ch, face := e.term.CaptureCell(w.Left(), w.Top())
+		if !strings.ContainsRune(windowJumpKeys, ch) {
+			t.Errorf("window %d: badge rune %q is not one of %q", i, ch, windowJumpKeys)
+		}
+		if face != syntax.FaceWindowJump {
+			t.Errorf("window %d: badge face = %+v, want FaceWindowJump", i, face)
+		}
+	}
 }

@@ -2,6 +2,7 @@ package editor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -207,6 +208,14 @@ func (e *Editor) vcQuit(skipMode string) {
 // VC commands
 // ---------------------------------------------------------------------------
 
+const (
+	// grepBufferName is the buffer vc-grep and project-grep present their hits
+	// in; Emacs calls it *grep*.
+	grepBufferName = "*grep*"
+	// grepNoMatches is shown in grepBufferName when a search found nothing.
+	grepNoMatches = "No matches found."
+)
+
 // cmdVcPrintLog shows the VCS log (C-x v l).
 func (e *Editor) cmdVcPrintLog() {
 	e.clearArg()
@@ -277,13 +286,12 @@ func (e *Editor) cmdVcGrep() {
 		}
 		text, err := be.Grep(root, pattern)
 		if err != nil && text == "" {
-			text = "No matches found."
+			text = grepNoMatches
 		}
 		if text == "" {
-			text = "No matches found."
+			text = grepNoMatches
 		}
-		e.vcShowOutput("*vc grep*", text, "vc-grep")
-		e.vcLogRoots[e.ActiveBuffer()] = root
+		e.vcShowGrepResults(text, root)
 	})
 }
 
@@ -306,7 +314,7 @@ func (e *Editor) cmdProjectGrep() {
 			var err error
 			text, err = be.Grep(root, pattern)
 			if err != nil && text == "" {
-				text = "No matches found."
+				text = grepNoMatches
 			}
 		} else {
 			// No VC backend — use plain grep.
@@ -316,17 +324,61 @@ func (e *Editor) cmdProjectGrep() {
 			out, err := exec.Command("grep", "-R", "-i", "-n", pattern, root).CombinedOutput()
 			text = string(out)
 			if err != nil && text == "" {
-				text = "No matches found."
+				text = grepNoMatches
 			}
 		}
 		if text == "" {
-			text = "No matches found."
+			text = grepNoMatches
 		}
-		e.vcShowOutput("*vc grep*", text, "vc-grep")
-		if root != "" {
-			e.vcLogRoots[e.ActiveBuffer()] = root
-		}
+		e.vcShowGrepResults(text, root)
 	})
+}
+
+// vcShowGrepResults presents grep output in the *grep* buffer and feeds the
+// hits into the next-error list, so C-x ` / M-g n / M-g p walk through them
+// just like they do for *compilation* errors.
+func (e *Editor) vcShowGrepResults(text, root string) {
+	e.vcShowOutput(grepBufferName, text, "vc-grep")
+	if root != "" {
+		e.vcLogRoots[e.ActiveBuffer()] = root
+	}
+	hits := parseGrepHits(text, root)
+	e.compilationErrors = hits
+	e.compilationErrorIdx = -1
+	if len(hits) > 0 {
+		e.Message("%d hit(s) — C-x ` or M-g n to cycle", len(hits))
+	}
+}
+
+// parseGrepHits parses "file:line:content" grep output into compilationError
+// entries. Relative paths are resolved against root; absolute paths (as
+// produced by grep -R over an absolute directory) are kept as they are. Lines
+// without a positive line number — headers, "No matches found.", binary-file
+// notices — are skipped. Content containing further colons is left alone.
+func parseGrepHits(output, root string) []compilationError {
+	var hits []compilationError
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		lineNum, err := strconv.Atoi(parts[1])
+		if err != nil || lineNum < 1 {
+			continue
+		}
+		file := strings.TrimPrefix(parts[0], "./")
+		if file == "" {
+			continue
+		}
+		if !filepath.IsAbs(file) {
+			file = filepath.Join(root, file)
+		}
+		hits = append(hits, compilationError{File: file, Line: lineNum})
+	}
+	return hits
 }
 
 // cmdVcRevert reverts the current file to its last committed version (C-x v u).
@@ -927,6 +979,85 @@ func vcStatusFileAtPoint(buf *buffer.Buffer, root string) string {
 	return rel
 }
 
+// vcGitAddModified stages modifications and deletions of files git already
+// tracks. Untracked files are deliberately left alone.
+func vcGitAddModified(root string) error {
+	out, err := exec.CommandContext(context.Background(), "git", "-C", root, "add", "-u").CombinedOutput() //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("git add -u: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// vcGitAddUntracked stages every file git reports as untracked, honouring
+// .gitignore. "git add -u" does not cover these, so they are listed explicitly
+// and handed to "git add" — that way no tracked modification is staged by
+// accident either.
+func vcGitAddUntracked(root string) error {
+	listOut, err := exec.CommandContext(context.Background(), "git", "-C", root, "ls-files", "--others", "--exclude-standard").Output() //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("git ls-files --others: %w", err)
+	}
+	var files []string
+	for f := range strings.SplitSeq(strings.TrimSpace(string(listOut)), "\n") {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	if len(files) == 0 {
+		return errNoUntrackedFiles
+	}
+	args := append([]string{"-C", root, "add", "--"}, files...)
+	out, err := exec.CommandContext(context.Background(), "git", args...).CombinedOutput() //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("git add: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// errNoUntrackedFiles is reported when the untracked section is empty by the
+// time the user confirms staging it.
+var errNoUntrackedFiles = errors.New("no untracked files to stage")
+
+// vcStatusStageSection handles `c` pressed on a *vc-status* section header. It
+// asks whether to stage exactly what that section lists — tracked
+// modifications for "Changes not staged for commit", untracked files for
+// "Untracked files" — and on confirmation stages them and opens the commit
+// buffer. Returns false when the current line is not a header it handles, so
+// the caller can fall through to opening the commit buffer directly.
+func (e *Editor) vcStatusStageSection(buf *buffer.Buffer, root string) bool {
+	pt := buf.Point()
+	line := strings.ToLower(buf.Substring(buf.BeginningOfLine(pt), buf.EndOfLine(pt)))
+
+	var prompt string
+	var stage func(string) error
+	switch {
+	case strings.Contains(line, "untracked"):
+		prompt = "Stage all untracked files and commit? (y/n)"
+		stage = vcGitAddUntracked
+	case strings.Contains(line, "not staged"):
+		prompt = "Stage all modified tracked files and commit? (y/n)"
+		stage = vcGitAddModified
+	default:
+		return false
+	}
+
+	e.Message("%s", prompt)
+	e.readCharPending = true
+	e.readCharCallback = func(r rune) {
+		if r != 'y' && r != 'Y' {
+			e.Message("Commit cancelled")
+			return
+		}
+		if err := stage(root); err != nil {
+			e.Message("vc-status: %v", err)
+			return
+		}
+		e.vcOpenCommitBuffer(root, "")
+	}
+	return true
+}
+
 func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
 		return false
@@ -1087,30 +1218,10 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 		if root == "" {
 			return true
 		}
-		// If point is on a header line (no file), check whether it's the
-		// "not staged" or "untracked" section and offer to stage everything.
-		relPath := vcStatusFileAtPoint(buf, root)
-		if relPath == "" {
-			pt := buf.Point()
-			bol := buf.BeginningOfLine(pt)
-			eol := buf.EndOfLine(pt)
-			line := strings.ToLower(buf.Substring(bol, eol))
-			if strings.Contains(line, "not staged") || strings.Contains(line, "untracked") {
-				e.Message("Stage all unstaged/untracked files and commit? (y/n)")
-				e.readCharPending = true
-				e.readCharCallback = func(r rune) {
-					if r != 'y' && r != 'Y' {
-						e.Message("Commit cancelled")
-						return
-					}
-					if err := exec.CommandContext(context.Background(), "git", "-C", root, "add", "-u").Run(); err != nil { //nolint:gosec
-						e.Message("git add -u failed: %v", err)
-						return
-					}
-					e.vcOpenCommitBuffer(root, "")
-				}
-				return true
-			}
+		// If point is on a header line (no file), offer to stage everything the
+		// section under that header lists before opening the commit buffer.
+		if vcStatusFileAtPoint(buf, root) == "" && e.vcStatusStageSection(buf, root) {
+			return true
 		}
 		e.vcOpenCommitBuffer(root, "")
 		return true
@@ -1137,7 +1248,7 @@ func (e *Editor) vcStatusDispatch(ke terminal.KeyEvent) bool {
 	return true
 }
 
-// vcGrepDispatch handles keys in a *vc grep* buffer.
+// vcGrepDispatch handles keys in a *grep* buffer.
 func (e *Editor) vcGrepDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune && ke.Key != tcell.KeyEnter {
 		return false

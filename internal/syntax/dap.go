@@ -25,8 +25,10 @@ var (
 func (DapLocalsHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
 	var spans []Span
+	// Each line is independent, so stop as soon as a line starts at or past end.
+	lineLimit := min(len(runes), end)
 	pos := 0
-	for pos < len(runes) {
+	for pos < lineLimit {
 		// Find end of line.
 		eol := pos
 		for eol < len(runes) && runes[eol] != '\n' {
@@ -117,8 +119,10 @@ type DapStackHighlighter struct{}
 func (DapStackHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
 	var spans []Span
+	// Each line is independent, so stop as soon as a line starts at or past end.
+	lineLimit := min(len(runes), end)
 	pos := 0
-	for pos < len(runes) {
+	for pos < lineLimit {
 		eol := pos
 		for eol < len(runes) && runes[eol] != '\n' {
 			eol++

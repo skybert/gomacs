@@ -6,6 +6,7 @@ import (
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
+	"github.com/skybert/gomacs/internal/dap"
 	"github.com/skybert/gomacs/internal/terminal"
 )
 
@@ -74,7 +75,20 @@ func dapWriteVariable(sb *strings.Builder, v *dapVariable, depth int, lineMap *[
 	}
 }
 
-// dapRenderStack writes the call stack to the Stack buffer.
+// dapFrameFile returns the path to show for a stack frame, falling back to the
+// source's bare name when the adapter reported no path.
+func dapFrameFile(f dap.StackFrame) string {
+	if f.Source.Path != "" {
+		return f.Source.Path
+	}
+	return f.Source.Name
+}
+
+// dapRenderStack writes the call stack of every thread to the Stack buffer and
+// rebuilds e.dap.stackLineMap so that dapStackJumpToFrame can map a line back to
+// its frame.  Threads are grouped under a header line, the stopped thread first
+// and marked with an arrow.  Frame lines stay unindented so that
+// syntax.DapStackHighlighter still recognises them.
 func dapRenderStack(e *Editor) {
 	if e.dap == nil || e.dap.stackBuf == nil {
 		return
@@ -84,23 +98,53 @@ func dapRenderStack(e *Editor) {
 	buf.Delete(0, buf.Len())
 
 	e.dap.framesMu.RLock()
+	threads := e.dap.threads
 	frames := e.dap.frames
 	e.dap.framesMu.RUnlock()
 
 	var sb strings.Builder
-	for i, f := range frames {
-		file := f.Source.Path
-		if file == "" {
-			file = f.Source.Name
+	var lineMap []*dap.StackFrame
+	switch {
+	case len(threads) > 0:
+		for ti := range threads {
+			th := &threads[ti]
+			marker := " "
+			if th.stopped {
+				marker = "→"
+			}
+			name := th.name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			fmt.Fprintf(&sb, "%s Thread %d: %s\n", marker, th.id, name)
+			lineMap = append(lineMap, nil)
+			for fi := range th.frames {
+				f := &th.frames[fi]
+				fmt.Fprintf(&sb, "#%d  %s (%s:%d)\n", fi, f.Name, dapFrameFile(*f), f.Line)
+				lineMap = append(lineMap, f)
+			}
+			if len(th.frames) == 0 {
+				sb.WriteString("(no frames)\n")
+				lineMap = append(lineMap, nil)
+			}
 		}
-		fmt.Fprintf(&sb, "#%d  %s (%s:%d)\n", i, f.Name, file, f.Line)
-	}
-	if sb.Len() == 0 {
+	case len(frames) > 0:
+		// No thread list (adapter without a threads request, or state set up
+		// directly): show the stopped thread's frames on their own.
+		for i := range frames {
+			f := &frames[i]
+			fmt.Fprintf(&sb, "#%d  %s (%s:%d)\n", i, f.Name, dapFrameFile(*f), f.Line)
+			lineMap = append(lineMap, f)
+		}
+	default:
 		sb.WriteString("(no stack)\n")
+		lineMap = append(lineMap, nil)
 	}
 	buf.InsertString(0, sb.String())
 	buf.SetPoint(0)
 	buf.SetReadOnly(true)
+
+	e.dap.stackLineMap = lineMap
 }
 
 // debugLocalsDispatch handles key events in the *Debug Locals* buffer.
@@ -229,7 +273,8 @@ func (e *Editor) debugStackDispatch(ke terminal.KeyEvent) bool {
 }
 
 // dapStackJumpToFrame opens the source file for the frame on the current line
-// and scrolls to the stopped line.
+// and scrolls to that frame's line.  Thread header lines have no frame and are
+// ignored.
 func (e *Editor) dapStackJumpToFrame() {
 	if e.dap == nil {
 		return
@@ -239,16 +284,14 @@ func (e *Editor) dapStackJumpToFrame() {
 		return
 	}
 	line, _ := buf.LineCol(buf.Point())
-	frameIdx := line - 1
-
-	e.dap.framesMu.RLock()
-	frames := e.dap.frames
-	e.dap.framesMu.RUnlock()
-
-	if frameIdx < 0 || frameIdx >= len(frames) {
+	lineIdx := line - 1
+	if lineIdx < 0 || lineIdx >= len(e.dap.stackLineMap) {
 		return
 	}
-	frame := frames[frameIdx]
+	frame := e.dap.stackLineMap[lineIdx]
+	if frame == nil {
+		return // thread header or placeholder line
+	}
 	path := frame.Source.Path
 	if path == "" {
 		return
@@ -269,6 +312,7 @@ func (e *Editor) dapStackJumpToFrame() {
 		return
 	}
 	srcWin.SetBuf(fileBuf)
+	e.debugMarkSourceReadOnly(fileBuf)
 	e.activeWin = srcWin
 	fileBuf.SetPoint(fileBuf.LineStart(frame.Line))
 	e.scrollWindowToLine(srcWin, frame.Line)

@@ -4,13 +4,21 @@ package syntax
 type JSONHighlighter struct{}
 
 // Highlight implements Highlighter for JSON.
+//
+// Scanning always begins at offset 0 so that multi-line string literals are
+// tracked from the top of the file, but it stops as soon as the next token
+// starts at or past end.
 func (h JSONHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
 	n := len(runes)
 	var spans []Span
 
+	// scanLimit bounds where a *new* token may start.  Inner scans still use n
+	// so a token beginning just before end is emitted in full.
+	scanLimit := min(n, end)
+
 	i := 0
-	for i < n {
+	for i < scanLimit {
 		r := runes[i]
 		switch {
 		case r == '"':

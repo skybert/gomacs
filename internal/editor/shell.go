@@ -63,17 +63,76 @@ func manPageNames() []string {
 	return manPageCacheNames
 }
 
-// manpathDirs returns the list of man page root directories.
+// defaultManPageDirs are the standard system man page locations, used to
+// fill in for the "system default paths" placeholder in $MANPATH (a leading,
+// trailing, or doubled colon per the GNU man convention) and as the final
+// fallback when neither $MANPATH nor the manpath command is available.
+var defaultManPageDirs = []string{"/usr/share/man", "/usr/local/share/man", "/opt/homebrew/share/man"}
+
+// manpathDirs returns the list of man page root directories, honouring
+// $MANPATH first, falling back to the `manpath` command (which resolves the
+// system's own configuration), and finally to defaultManPageDirs.
 func manpathDirs() []string {
+	if dirs := manPathEnvDirs(os.Getenv("MANPATH")); len(dirs) > 0 {
+		return dedupDirs(dirs)
+	}
+
 	out, err := exec.Command("manpath").Output() //nolint:gosec
 	if err == nil {
 		raw := strings.TrimSpace(string(out))
 		if raw != "" {
-			return strings.Split(raw, ":")
+			return dedupDirs(splitManPath(raw))
 		}
 	}
-	// Fall back to common locations.
-	return []string{"/usr/share/man", "/usr/local/share/man", "/opt/homebrew/share/man"}
+
+	return defaultManPageDirs
+}
+
+// manPathEnvDirs parses a $MANPATH value into a list of directories,
+// following the GNU man convention: a leading, trailing, or doubled colon
+// means "splice in the system default paths here". Empty entries that don't
+// signal this (e.g. from stray whitespace) are skipped.
+func manPathEnvDirs(manpath string) []string {
+	if manpath == "" {
+		return nil
+	}
+
+	fields := strings.Split(manpath, ":")
+	dirs := make([]string, 0, len(fields)+len(defaultManPageDirs))
+	for _, f := range fields {
+		if f == "" {
+			dirs = append(dirs, defaultManPageDirs...)
+			continue
+		}
+		dirs = append(dirs, f)
+	}
+	return dirs
+}
+
+// splitManPath splits a colon-separated path list, skipping empty entries.
+func splitManPath(raw string) []string {
+	fields := strings.Split(raw, ":")
+	dirs := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f != "" {
+			dirs = append(dirs, f)
+		}
+	}
+	return dirs
+}
+
+// dedupDirs returns dirs with duplicates removed, preserving order.
+func dedupDirs(dirs []string) []string {
+	seen := make(map[string]struct{}, len(dirs))
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
 }
 
 // filterManPages filters and ranks names against query using fuzzy matching.

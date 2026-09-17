@@ -2,15 +2,20 @@ package editor
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
+	"github.com/skybert/gomacs/internal/dap"
+	"github.com/skybert/gomacs/internal/elisp"
 	"github.com/skybert/gomacs/internal/keymap"
 	"github.com/skybert/gomacs/internal/syntax"
 	"github.com/skybert/gomacs/internal/terminal"
@@ -88,18 +93,6 @@ func TestDapToggleBreakpoint_Remove(t *testing.T) {
 	e.cmdDebugToggleBreakpoint()
 	if _, ok := e.dapBreakpoints[abs][line]; ok {
 		t.Errorf("breakpoint should have been removed at line %d", line)
-	}
-}
-
-func TestDapHasBreakpoint(t *testing.T) {
-	e := newDAPTestEditor("")
-	abs := "/tmp/foo.go"
-	e.dapBreakpoints[abs] = map[int]struct{}{5: {}}
-	if !e.dapHasBreakpoint(abs, 5) {
-		t.Error("dapHasBreakpoint(abs, 5) should be true")
-	}
-	if e.dapHasBreakpoint(abs, 99) {
-		t.Error("dapHasBreakpoint(abs, 99) should be false")
 	}
 }
 
@@ -201,53 +194,8 @@ func TestDapLaunchArgs_NoFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// dapRelayoutWindows (avoids e.term.Size())
+// window geometry helper shared with dap_layout_test.go
 // ---------------------------------------------------------------------------
-
-func TestDapRelayoutWindows_4Windows(t *testing.T) {
-	e := newDAPTestEditor("hello")
-	e.dap = &dapState{localsAutoExpandDepth: 1}
-
-	// Manually create 4 placeholder windows.
-	buf0 := e.buffers[0]
-	buf1 := buffer.New("*Debug Locals*")
-	buf2 := buffer.New("*Debug Stack*")
-	buf3 := buffer.New("*Debug REPL*")
-	e.buffers = append(e.buffers, buf1, buf2, buf3)
-	e.windows = []*window.Window{
-		window.New(buf0, 0, 0, 1, 1),
-		window.New(buf1, 0, 0, 1, 1),
-		window.New(buf2, 0, 0, 1, 1),
-		window.New(buf3, 0, 0, 1, 1),
-	}
-
-	const totalW, totalH = 120, 40
-	e.dapRelayoutWindows(totalW, totalH)
-
-	if got := len(e.windows); got != 4 {
-		t.Fatalf("want 4 windows, got %d", got)
-	}
-
-	// Source window should span left portion.
-	src := e.windows[0]
-	rightW := max(totalW/3, 10)
-	wantSrcW := totalW - rightW - 1
-	if src.Width() != wantSrcW {
-		t.Errorf("source width = %d, want %d", src.Width(), wantSrcW)
-	}
-
-	// Locals + stack windows should be to the right.
-	locals := e.windows[1]
-	if locals.Left() != sourceLeft(src) {
-		t.Errorf("locals left = %d, want %d (source right+1)", locals.Left(), sourceLeft(src))
-	}
-
-	// REPL window should span full width.
-	repl := e.windows[3]
-	if repl.Width() != totalW {
-		t.Errorf("repl width = %d, want %d", repl.Width(), totalW)
-	}
-}
 
 // sourceLeft returns one past the right edge of the source window (where panels start).
 func sourceLeft(src *window.Window) int { return src.Left() + src.Width() + 1 }
@@ -686,35 +634,8 @@ func TestDebugSourceDispatch_EvalAndQuit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// debug layout
+// dapReplSubmit
 // ---------------------------------------------------------------------------
-
-func TestDebugSetupAndTeardownLayout(t *testing.T) {
-	e, _ := newDAPCapEditor("package main\n")
-	e.debugSetupLayout()
-	if len(e.windows) != 4 {
-		t.Fatalf("debugSetupLayout should create 4 windows, got %d", len(e.windows))
-	}
-	if e.dap.localsBuf == nil || e.dap.stackBuf == nil || e.dap.replBuf == nil {
-		t.Fatal("debugSetupLayout should create the three panel buffers")
-	}
-	e.debugTeardownLayout()
-	if len(e.windows) != 1 {
-		t.Fatalf("debugTeardownLayout should restore a single window, got %d", len(e.windows))
-	}
-}
-
-func TestEnsureDebugBuf_CreatesAndReuses(t *testing.T) {
-	e, _ := newDAPCapEditor("")
-	b1 := e.ensureDebugBuf("*Debug Locals*", "debug-locals")
-	if b1.Mode() != "debug-locals" {
-		t.Fatalf("expected mode debug-locals, got %q", b1.Mode())
-	}
-	b2 := e.ensureDebugBuf("*Debug Locals*", "debug-locals")
-	if b1 != b2 {
-		t.Fatal("ensureDebugBuf should reuse an existing buffer")
-	}
-}
 
 func TestDapReplSubmit_NoSession(t *testing.T) {
 	e, _ := newDAPCapEditor("")
@@ -791,6 +712,18 @@ func TestDelve_DebugSession(t *testing.T) {
 		t.Log("no locals fetched (delve returned none)")
 	}
 
+	// The stack panel groups frames per thread (goroutine, for delve).
+	e.dap.framesMu.RLock()
+	nThreads := len(e.dap.threads)
+	stopped := nThreads > 0 && e.dap.threads[0].stopped
+	e.dap.framesMu.RUnlock()
+	if nThreads == 0 || !stopped {
+		t.Errorf("expected at least the stopped thread in the stack panel, got %d threads", nThreads)
+	}
+	if e.dap.stackBuf != nil && !strings.Contains(e.dap.stackBuf.String(), "Thread ") {
+		t.Errorf("stack panel should be grouped per thread, got %q", e.dap.stackBuf.String())
+	}
+
 	// Exercise dapSyncBreakpoints against the live session.
 	e.dapSyncBreakpoints(path)
 	// Drain any resulting callback (error path posts one; success posts nil).
@@ -863,5 +796,577 @@ func TestCmdDebugStart_NoFile(t *testing.T) {
 	e.cmdDebugStart()
 	if e.dap != nil {
 		t.Error("debug-start should fail when the buffer has no file")
+	}
+}
+
+func TestCmdDebugStart_JavaWithoutJdtls(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Main.java")
+	src := "public class Main {\n  public static void main(String[] args) {}\n}\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := newDAPTestEditor(src)
+	e.term = &terminal.Terminal{}
+	e.ActiveBuffer().SetMode("java")
+	e.ActiveBuffer().SetFilename(path)
+
+	// java-mode has a debug adapter configured, so the start attempt proceeds …
+	e.cmdDebugStart()
+	if e.dap == nil {
+		t.Fatal("debug-start should attempt to start a java session")
+	}
+	// … but with no jdtls connection it fails with an actionable message.
+	select {
+	case fn := <-e.dapCbs:
+		fn()
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected a failure callback on dapCbs")
+	}
+	if e.dap != nil {
+		t.Error("a failed start should clear the session")
+	}
+	if !strings.Contains(e.message, "jdtls") {
+		t.Errorf("expected a message naming jdtls, got %q", e.message)
+	}
+	if !strings.Contains(e.message, "java-debug") {
+		t.Errorf("expected the message to say what to install, got %q", e.message)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapStartAdapter
+// ---------------------------------------------------------------------------
+
+func TestDapStartAdapter_ProcessFailure(t *testing.T) {
+	info := &langModeInfo{modeName: "go", dapCmd: []string{"gomacs-no-such-adapter"}}
+	_, _, err := dapStartAdapter(info, dapLaunchRequest{runDir: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error for a missing adapter binary")
+	}
+	if !strings.Contains(err.Error(), "cannot start") {
+		t.Errorf("error = %v, want it to mention it cannot start the adapter", err)
+	}
+}
+
+func TestDapStartAdapter_JdtlsWithoutConnection(t *testing.T) {
+	info := &langModeInfo{modeName: "java", dapKind: dapAdapterJdtls}
+	_, _, err := dapStartAdapter(info, dapLaunchRequest{runDir: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error when there is no jdtls connection")
+	}
+	if !strings.Contains(err.Error(), "jdtls") {
+		t.Errorf("error = %v, want it to mention jdtls", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapLocalsAutoExpandDepth
+// ---------------------------------------------------------------------------
+
+func TestDapLocalsAutoExpandDepth_DefaultsToOne(t *testing.T) {
+	e := newDAPTestEditor("") // e.lisp is nil
+	if got := e.dapLocalsAutoExpandDepth(); got != 1 {
+		t.Errorf("depth = %d, want 1 without an Elisp evaluator", got)
+	}
+	e.lisp = elisp.NewEvaluator()
+	if got := e.dapLocalsAutoExpandDepth(); got != 1 {
+		t.Errorf("depth = %d, want 1 when the variable is unset", got)
+	}
+}
+
+func TestDapLocalsAutoExpandDepth_FromElisp(t *testing.T) {
+	e := newDAPTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	if _, err := e.lisp.EvalString("(setq debug-locals-auto-expand-depth 3)"); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.dapLocalsAutoExpandDepth(); got != 3 {
+		t.Errorf("depth = %d, want 3", got)
+	}
+}
+
+func TestDapLocalsAutoExpandDepth_IgnoresBadValues(t *testing.T) {
+	e := newDAPTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	if _, err := e.lisp.EvalString(`(setq debug-locals-auto-expand-depth "deep")`); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.dapLocalsAutoExpandDepth(); got != 1 {
+		t.Errorf("depth = %d, want the default 1 for a non-integer value", got)
+	}
+	if _, err := e.lisp.EvalString("(setq debug-locals-auto-expand-depth 0)"); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.dapLocalsAutoExpandDepth(); got != 1 {
+		t.Errorf("depth = %d, want the default 1 for a non-positive value", got)
+	}
+}
+
+func TestCmdDebugStart_SeedsConfiguredExpandDepth(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Main.java")
+	if err := os.WriteFile(path, []byte("class Main {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := newDAPTestEditor("class Main {}\n")
+	e.term = &terminal.Terminal{}
+	e.lisp = elisp.NewEvaluator()
+	if _, err := e.lisp.EvalString("(setq debug-locals-auto-expand-depth 4)"); err != nil {
+		t.Fatal(err)
+	}
+	e.ActiveBuffer().SetMode("java")
+	e.ActiveBuffer().SetFilename(path)
+
+	e.cmdDebugStart()
+	if e.dap == nil {
+		t.Fatal("session state should exist right after debug-start")
+	}
+	if e.dap.localsAutoExpandDepth != 4 {
+		t.Errorf("localsAutoExpandDepth = %d, want the configured 4", e.dap.localsAutoExpandDepth)
+	}
+	// Drain the (failing) start callback so the goroutine does not outlive the test.
+	select {
+	case fn := <-e.dapCbs:
+		fn()
+	case <-time.After(5 * time.Second):
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bufContainsMainFunc — Go and Java entry points
+// ---------------------------------------------------------------------------
+
+func TestBufContainsMainFunc_Go(t *testing.T) {
+	yes := buffer.NewWithContent("main.go", "package main\n\nfunc main() {\n}\n")
+	if !bufContainsMainFunc(yes) {
+		t.Error("func main() should be detected")
+	}
+	no := buffer.NewWithContent("lib.go", "package lib\n\nfunc Helper() {}\n")
+	if bufContainsMainFunc(no) {
+		t.Error("a package without main should not be detected")
+	}
+}
+
+func TestBufContainsMainFunc_JavaVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"canonical", "public class A {\n  public static void main(String[] args) {}\n}\n"},
+		{"c-style array", "public class A {\n  public static void main(String args[]) {}\n}\n"},
+		{"varargs", "public class A {\n  public static void main(String... args) {}\n}\n"},
+		{"modifier order", "class A {\n  static public void main(String[] args) {}\n}\n"},
+		{"final parameter", "class A {\n  public static void main(final String[] args) {}\n}\n"},
+		{"final method", "class A {\n  public static final void main(String[] args) {}\n}\n"},
+		{"synchronized", "class A {\n  public static synchronized void main(String[] args) {}\n}\n"},
+		{"tight whitespace", "class A {\n\tpublic static void main(String[]args){}\n}\n"},
+		{"loose whitespace", "class A {\n  public  static  void  main ( String [ ] args ) {}\n}\n"},
+		{"bracket before name", "class A {\n  public static void main(String []args) {}\n}\n"},
+		{"qualified type", "class A {\n  public static void main(java.lang.String[] args) {}\n}\n"},
+		{"no parameter name", "interface A {\n  static void main(String[]);\n}\n"},
+		{"throws clause", "class A {\n  public static void main(String[] args) throws Exception {}\n}\n"},
+		{"instance main", "class A {\n  void main() {}\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := buffer.NewWithContent("A.java", tc.src)
+			buf.SetMode("java")
+			if !bufContainsMainFunc(buf) {
+				t.Errorf("main method not detected in:\n%s", tc.src)
+			}
+		})
+	}
+}
+
+func TestBufContainsMainFunc_JavaNegatives(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"other method", "class A {\n  public static void mainLoop(String[] args) {}\n}\n"},
+		{"non-void", "class A {\n  public static int main(String[] args) { return 0; }\n}\n"},
+		{"wrong parameter type", "class A {\n  public static void main(int[] args) {}\n}\n"},
+		{"field named main", "class A {\n  private String main;\n}\n"},
+		{"call site only", "class A {\n  void run() {\n    B.main(args);\n  }\n}\n"},
+		{"static far above", "class A {\n  static int n = 1;\n  int helper(String[] args) { return 0; }\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := buffer.NewWithContent("A.java", tc.src)
+			buf.SetMode("java")
+			if bufContainsMainFunc(buf) {
+				t.Errorf("should not be detected as a main class:\n%s", tc.src)
+			}
+		})
+	}
+}
+
+func TestDapLaunchArgs_JavaMainUsesJdtlsResolution(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pom.xml"), []byte("<project/>\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "Main.java")
+	src := "public class Main {\n  public static void main(String[] args) {}\n}\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buf := buffer.NewWithContent("Main.java", src)
+	buf.SetFilename(path)
+	buf.SetMode("java")
+
+	e := newDAPTestEditor("")
+	args, root, err := e.dapLaunchArgs(buf)
+	if err != nil {
+		t.Fatalf("dapLaunchArgs: %v", err)
+	}
+	if args != nil {
+		t.Errorf("java launch args = %v, want nil (resolved over LSP by jdtls)", args)
+	}
+	if root != canonPath(dir) {
+		t.Errorf("root = %q, want the project root %q", root, canonPath(dir))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapFetchFrames / dapFetchThreads
+// ---------------------------------------------------------------------------
+
+func TestDapFetchFrames(t *testing.T) {
+	c, cleanup := dapFakeServer(t, map[string]any{
+		"stackTrace": map[string]any{"stackFrames": []map[string]any{
+			{"id": 3, "name": "main.main", "line": 7},
+		}},
+	})
+	defer cleanup()
+	frames, err := dapFetchFrames(c, 1)
+	if err != nil {
+		t.Fatalf("dapFetchFrames: %v", err)
+	}
+	if len(frames) != 1 || frames[0].ID != 3 || frames[0].Line != 7 {
+		t.Errorf("frames = %+v, want one frame id 3 line 7", frames)
+	}
+}
+
+func TestDapFetchFrames_Error(t *testing.T) {
+	c, cleanup := dapFakeServer(t, nil)
+	cleanup() // close the client so the request fails
+	if _, err := dapFetchFrames(c, 1); err == nil {
+		t.Error("expected an error from a closed client")
+	}
+}
+
+func TestDapFetchThreads_AllThreads(t *testing.T) {
+	c, cleanup := dapFakeServer(t, map[string]any{
+		"threads": map[string]any{"threads": []map[string]any{
+			{"id": 1, "name": "main"},
+			{"id": 2, "name": "worker"},
+		}},
+		"stackTrace": map[string]any{"stackFrames": []map[string]any{
+			{"id": 9, "name": "runtime.gopark", "line": 1},
+		}},
+	})
+	defer cleanup()
+
+	stopped := []dap.StackFrame{{ID: 1, Name: "main.main", Line: 5}}
+	threads := dapFetchThreads(c, 1, stopped)
+
+	if len(threads) != 2 {
+		t.Fatalf("threads = %d, want 2", len(threads))
+	}
+	if !threads[0].stopped || threads[0].id != 1 {
+		t.Errorf("threads[0] = %+v, want the stopped thread first", threads[0])
+	}
+	if threads[0].name != "main" {
+		t.Errorf("stopped thread name = %q, want \"main\"", threads[0].name)
+	}
+	if len(threads[0].frames) != 1 || threads[0].frames[0].Name != "main.main" {
+		t.Errorf("the stopped thread should reuse the frames already fetched, got %+v", threads[0].frames)
+	}
+	if threads[1].id != 2 || threads[1].name != "worker" || threads[1].stopped {
+		t.Errorf("threads[1] = %+v, want the unstopped worker thread", threads[1])
+	}
+	if len(threads[1].frames) != 1 || threads[1].frames[0].Name != "runtime.gopark" {
+		t.Errorf("worker frames = %+v, want the fetched frame", threads[1].frames)
+	}
+}
+
+func TestDapFetchThreads_NoThreadsSupport(t *testing.T) {
+	c, cleanup := dapFakeServer(t, nil)
+	cleanup() // closed client → the threads request fails
+	stopped := []dap.StackFrame{{ID: 1, Name: "main.main", Line: 5}}
+	threads := dapFetchThreads(c, 7, stopped)
+	if len(threads) != 1 {
+		t.Fatalf("threads = %d, want just the stopped thread", len(threads))
+	}
+	if threads[0].id != 7 || !threads[0].stopped || len(threads[0].frames) != 1 {
+		t.Errorf("threads[0] = %+v, want the stopped thread with its frames", threads[0])
+	}
+}
+
+func TestDapFetchThreads_CapsThreadCount(t *testing.T) {
+	all := make([]map[string]any, 0, 40)
+	for i := range 40 {
+		all = append(all, map[string]any{"id": i + 1, "name": fmt.Sprintf("t%d", i+1)})
+	}
+	c, cleanup := dapFakeServer(t, map[string]any{
+		"threads":    map[string]any{"threads": all},
+		"stackTrace": map[string]any{"stackFrames": []map[string]any{{"id": 1, "name": "f", "line": 1}}},
+	})
+	defer cleanup()
+
+	threads := dapFetchThreads(c, 1, nil)
+	if len(threads) != dapMaxThreads {
+		t.Errorf("threads = %d, want them capped at %d", len(threads), dapMaxThreads)
+	}
+	if !threads[0].stopped || threads[0].id != 1 {
+		t.Error("the stopped thread must stay first even when capping")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapFetchStoppedInfo
+// ---------------------------------------------------------------------------
+
+func TestDapFetchStoppedInfo_FetchesThreadsAndLocals(t *testing.T) {
+	e, _ := newDAPCapEditor("line1\nline2\nline3\n")
+	c, cleanup := dapFakeServer(t, map[string]any{
+		"threads": map[string]any{"threads": []map[string]any{
+			{"id": 1, "name": "main"},
+			{"id": 2, "name": "worker"},
+		}},
+		"stackTrace": map[string]any{"stackFrames": []map[string]any{
+			{"id": 11, "name": "main.main", "line": 2},
+		}},
+		"scopes": map[string]any{"scopes": []map[string]any{
+			{"name": "Locals", "variablesReference": 100},
+		}},
+		"variables": map[string]any{"variables": []map[string]any{
+			{"name": "x", "value": "42", "type": "int"},
+		}},
+	})
+	defer cleanup()
+	e.dap.client = c
+	e.dap.localsBuf = e.ensureDebugBuf("*Debug Locals*", "debug-locals")
+	e.dap.stackBuf = e.ensureDebugBuf("*Debug Stack*", "debug-stack")
+
+	e.dapFetchStoppedInfo(dap.StoppedEvent{ThreadID: 1, Reason: "breakpoint"})
+	select {
+	case fn := <-e.dapCbs:
+		fn()
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the stopped-info callback")
+	}
+
+	e.dap.framesMu.RLock()
+	nThreads, nFrames := len(e.dap.threads), len(e.dap.frames)
+	e.dap.framesMu.RUnlock()
+	if nFrames != 1 {
+		t.Errorf("frames = %d, want 1", nFrames)
+	}
+	if nThreads != 2 {
+		t.Errorf("threads = %d, want both threads in the stack panel", nThreads)
+	}
+	if e.dap.stoppedLine != 2 {
+		t.Errorf("stoppedLine = %d, want 2", e.dap.stoppedLine)
+	}
+	if !strings.Contains(e.dap.stackBuf.String(), "Thread 2: worker") {
+		t.Errorf("stack panel should list every thread, got %q", e.dap.stackBuf.String())
+	}
+	e.dap.localsMu.RLock()
+	locals := e.dap.locals
+	e.dap.localsMu.RUnlock()
+	if len(locals) != 1 || locals[0].name != "x" {
+		t.Errorf("locals = %+v, want the single local x", locals)
+	}
+}
+
+func TestDapFetchStoppedInfo_UsesConfiguredExpandDepth(t *testing.T) {
+	e, _ := newDAPCapEditor("a\n")
+	// Every "variables" reply reports a nested struct, so the recursion depth is
+	// bounded only by localsAutoExpandDepth.
+	c, cleanup := dapFakeServer(t, map[string]any{
+		"stackTrace": map[string]any{"stackFrames": []map[string]any{{"id": 1, "name": "f", "line": 1}}},
+		"scopes":     map[string]any{"scopes": []map[string]any{{"variablesReference": 5}}},
+		"variables": map[string]any{"variables": []map[string]any{
+			{"name": "nested", "value": "{...}", "variablesReference": 5},
+		}},
+	})
+	defer cleanup()
+	e.dap.client = c
+	e.dap.localsBuf = e.ensureDebugBuf("*Debug Locals*", "debug-locals")
+	e.dap.stackBuf = e.ensureDebugBuf("*Debug Stack*", "debug-stack")
+	e.dap.localsAutoExpandDepth = 3
+
+	e.dapFetchStoppedInfo(dap.StoppedEvent{ThreadID: 1, Reason: "step"})
+	select {
+	case fn := <-e.dapCbs:
+		fn()
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the stopped-info callback")
+	}
+
+	e.dap.localsMu.RLock()
+	defer e.dap.localsMu.RUnlock()
+	depth := 0
+	for v := e.dap.locals; len(v) > 0; v = v[0].children {
+		depth++
+	}
+	// Depth 3 auto-expands three levels of children below the root level.
+	if depth != 4 {
+		t.Errorf("auto-expanded tree depth = %d, want 4 for debug-locals-auto-expand-depth 3", depth)
+	}
+}
+
+func TestDapFetchStoppedInfo_MakesSteppedIntoFileReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(dir, "other.go")
+	if err := os.WriteFile(other, []byte("package other\n\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e, _ := newDAPCapEditor("package main\n")
+	e.autoRevertMtimes = make(map[*buffer.Buffer]time.Time)
+	e.lspConns = make(map[string]*lspConn)
+	c, cleanup := dapFakeServer(t, map[string]any{
+		"stackTrace": map[string]any{"stackFrames": []map[string]any{
+			{"id": 1, "name": "other.F", "line": 3,
+				"source": map[string]any{"path": other, "name": "other.go"}},
+		}},
+	})
+	defer cleanup()
+	e.dap.client = c
+	e.dap.localsBuf = e.ensureDebugBuf("*Debug Locals*", "debug-locals")
+	e.dap.stackBuf = e.ensureDebugBuf("*Debug Stack*", "debug-stack")
+	e.dap.prevActiveWin = e.windows[0]
+
+	e.dapFetchStoppedInfo(dap.StoppedEvent{ThreadID: 1, Reason: "step"})
+	select {
+	case fn := <-e.dapCbs:
+		fn()
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the stopped-info callback")
+	}
+
+	steppedBuf := e.windows[0].Buf()
+	if steppedBuf.Filename() != other {
+		t.Fatalf("source window shows %q, want the stepped-into file %q", steppedBuf.Filename(), other)
+	}
+	if !steppedBuf.ReadOnly() {
+		t.Error("a source buffer opened while stepping must be read-only")
+	}
+	if _, tracked := e.dap.prevReadOnly[steppedBuf]; !tracked {
+		t.Error("the stepped-into buffer must be tracked so teardown can restore it")
+	}
+
+	e.debugTeardownLayout()
+	if steppedBuf.ReadOnly() {
+		t.Error("teardown should restore the stepped-into buffer to writable")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// debugSourceDispatch routes a language-suffixed REPL mode to the REPL
+// ---------------------------------------------------------------------------
+
+func TestDebugSourceDispatch_RoutesSuffixedReplMode(t *testing.T) {
+	e, _ := newDAPCapEditor("")
+	replBuf := e.ensureDebugBuf("*Debug REPL*", "debug-repl+java")
+	e.dap.replBuf = replBuf
+	dapReplReset(replBuf)
+	e.windows[0].SetBuf(replBuf)
+
+	// 'n' must type into the REPL, not step to the next line.
+	if !e.debugSourceDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'n'}) {
+		t.Fatal("'n' should be consumed by the REPL")
+	}
+	if got := dapReplGetInput(replBuf); got != "n" {
+		t.Errorf("REPL input = %q, want \"n\" (the key must not step)", got)
+	}
+}
+
+func TestDapStartAdapter_JdtlsSuccess(t *testing.T) {
+	// Stand in for the java-debug adapter jdtls would have created.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close() //nolint:errcheck
+	_, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		if c, aerr := ln.Accept(); aerr == nil {
+			defer c.Close() //nolint:errcheck
+			<-time.After(time.Second)
+		}
+	}()
+
+	conn, cleanup := fakeJdtlsServer(t, map[string]any{
+		jdtlsStartDebugSession: port,
+		jdtlsResolveMainClass: []any{
+			map[string]any{"mainClass": "com.example.Main", "projectName": "demo", "filePath": "/src/Main.java"},
+		},
+		jdtlsResolveClasspath: []any{[]string{}, []string{"/target/classes"}},
+	})
+	defer cleanup()
+
+	info := langModeByName("java")
+	client, launch, err := dapStartAdapter(info, dapLaunchRequest{
+		file:    "/src/Main.java",
+		runDir:  "/src",
+		lspConn: conn,
+	})
+	if err != nil {
+		t.Fatalf("dapStartAdapter: %v", err)
+	}
+	defer client.Close()
+	if launch["mainClass"] != "com.example.Main" {
+		t.Errorf("launch args = %v, want the resolved main class", launch)
+	}
+}
+
+func TestDapStartAdapter_JdtlsClasspathFailureDoesNotStartAdapter(t *testing.T) {
+	// resolveMainClass works but resolveClasspath is missing: the adapter must
+	// never be asked for, so no session is leaked.
+	conn, cleanup := fakeJdtlsServer(t, map[string]any{
+		jdtlsResolveMainClass: []any{
+			map[string]any{"mainClass": "com.example.Main", "projectName": "demo"},
+		},
+	})
+	defer cleanup()
+
+	info := langModeByName("java")
+	_, _, err := dapStartAdapter(info, dapLaunchRequest{file: "/src/Main.java", runDir: "/src", lspConn: conn})
+	if err == nil {
+		t.Fatal("expected the classpath failure to abort the start")
+	}
+	if !strings.Contains(err.Error(), jdtlsResolveClasspath) {
+		t.Errorf("error = %v, want it to name the failing command", err)
+	}
+}
+
+func TestDispatchParsedKey_SuffixedReplModeTypesInsteadOfStepping(t *testing.T) {
+	e, m := newDAPCapEditor("")
+	replBuf := e.ensureDebugBuf("*Debug REPL*", "debug-repl+java")
+	e.dap.replBuf = replBuf
+	dapReplReset(replBuf)
+	e.windows[0].SetBuf(replBuf)
+
+	e.dispatchParsedKey(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'n'})
+
+	if got := dapReplGetInput(replBuf); got != "n" {
+		t.Errorf("REPL input = %q, want \"n\"", got)
+	}
+	select {
+	case call := <-m.called:
+		t.Errorf("'n' must not reach the debugger, got a %q call", call)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

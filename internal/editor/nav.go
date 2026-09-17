@@ -192,6 +192,165 @@ func (e *Editor) cmdMessages() {
 	e.activeWin.SetBuf(b)
 }
 
+// helpGroup names a logical grouping of commands shown in the *Help* buffer.
+type helpGroup struct {
+	title    string
+	commands []string
+}
+
+// helpCommandGroups defines the logical groupings for M-x help / C-h h's
+// command listing. Every command registered via registerCommand (see the
+// init() calls in commands.go) must appear in exactly one group here. When
+// you add a new command, add it to the group that fits best (or add a new
+// group) — TestHelpCommandGroupsCoverAllCommands in nav_test.go fails the
+// build if a command is left ungrouped or placed in more than one group, so
+// this cannot silently rot.
+var helpCommandGroups = []helpGroup{
+	{"Navigation", []string{
+		"backward-char", "forward-char", "previous-line", "next-line",
+		"beginning-of-line", "end-of-line",
+		"beginning-of-buffer", "end-of-buffer",
+		"forward-word", "backward-word",
+		"beginning-of-sentence", "end-of-sentence",
+		"scroll-up", "scroll-down", "recenter",
+		"goto-line", "what-line", "what-cursor-position", "count-buffer-lines",
+		"back-to-indentation",
+		"forward-list", "backward-list",
+	}},
+	{"Editing", []string{
+		"newline", "self-insert-command", "open-line",
+		"delete-char", "backward-delete-char",
+		"kill-line", "kill-word", "backward-kill-word", "kill-sentence", "kill-region",
+		"copy-region-as-kill", "yank", "yank-pop",
+		"transpose-chars", "transpose-words", "join-line",
+		"undo", "redo",
+		"delete-blank-lines", "delete-duplicate-lines", "delete-trailing-whitespace", "sort-lines",
+		"upcase-word", "downcase-word", "capitalize-word", "upcase-region", "downcase-region",
+		"fill-paragraph", "set-fill-column",
+	}},
+	{"Search & Replace", []string{
+		"isearch-forward", "isearch-backward",
+		"query-replace", "replace-string",
+	}},
+	{"Marks & Registers", []string{
+		"set-mark-command", "mark-word", "mark-whole-buffer", "exchange-point-and-mark",
+		"point-to-register", "jump-to-register", "copy-to-register", "insert-register",
+		"copy-rectangle-to-register",
+	}},
+	{"Narrowing", []string{
+		"narrow-to-region", "widen",
+	}},
+	{"Indentation & Comments", []string{
+		"indent-or-complete", "indent-region", "indent-rigidly",
+		"comment-dwim",
+	}},
+	{"Files & Buffers", []string{
+		"find-file", "save-buffer", "save-buffers-kill-terminal", "save-some-buffers",
+		"kill-buffer", "switch-to-buffer", "list-buffers", "toggle-read-only",
+		"dired", "messages",
+	}},
+	{"Windows", []string{
+		"split-window-below", "split-window-right", "delete-other-windows", "other-window",
+		"window-jump",
+	}},
+	{"Shell & Build", []string{
+		"shell-command", "shell-command-on-region", "shell", "man",
+		"project-build", "project-find-file", "project-grep", "next-error", "previous-error",
+	}},
+	{"Version Control", []string{
+		"vc-print-log", "vc-diff", "vc-status", "vc-grep",
+		"vc-annotate", "vc-next-action", "vc-revert",
+	}},
+	{"Spell Checking", []string{
+		"spell", "ispell-word", "ispell-buffer",
+	}},
+	{"LSP", []string{
+		"lsp-find-definition", "lsp-pop-definition", "lsp-find-references", "lsp-show-doc",
+	}},
+	{"Debugger", []string{
+		"debug-start", "debug-toggle-breakpoint",
+		"debug-step-next", "debug-step-in", "debug-step-out", "debug-continue",
+		"debug-eval", "debug-exit",
+	}},
+	{"Keyboard Macros", []string{
+		"start-kbd-macro", "end-kbd-macro", "call-last-kbd-macro",
+	}},
+	{"Major Modes", []string{
+		"go-mode", "python-mode", "java-mode", "bash-mode", "perl-mode", "gherkin-mode", "markdown-mode",
+		"elisp-mode", "text-mode", "fundamental-mode", "json-mode", "yaml-mode",
+		"makefile-mode", "conf-mode", "load-theme",
+	}},
+	{"Help & Info", []string{
+		"help", "describe-key", "describe-function", "describe-variable", "what-key",
+		"gomacs-version", "count-words", "imenu",
+	}},
+	{"Completion", []string{
+		"dabbrev-expand",
+	}},
+	{"Misc", []string{
+		"eval-last-sexp", "execute-extended-command", "keyboard-quit", "universal-argument",
+	}},
+}
+
+// configVar documents a single Elisp configuration variable shown by
+// cmdHelp under "Configuration Variables".
+type configVar struct{ name, doc string }
+
+// configVarGroup names a logical grouping of configVar entries, mirroring
+// helpCommandGroups above.
+type configVarGroup struct {
+	title string
+	vars  []configVar
+}
+
+// helpConfigVarGroups documents every Elisp configuration variable exposed
+// via (setq ...) and surfaced by cmdHelp / C-h h.
+//
+// Invariant: every variable read with e.lisp.GetGlobalVar(...) inside
+// applyElispConfig() in editor.go must have a matching entry somewhere in
+// this slice. TestHelpConfigVarsCoverApplyElispConfig in nav_test.go parses
+// applyElispConfig's source and fails if one is missing, so this cannot
+// silently rot. When you add a new GetGlobalVar call there, add a matching
+// entry here (plus a row in doc/gomacs.1.in and, if the variable is global
+// rather than mode-specific, a bullet in CLAUDE.md).
+var helpConfigVarGroups = []configVarGroup{
+	{"Editing & Files", []configVar{
+		{"fill-column", "Column target for fill-paragraph (M-q). Default: 70."},
+		{"delete-trailing-whitespace", "When t, save-buffer strips trailing whitespace. Default: t."},
+		{"save-buffer-delete-trailing-whitespace", "When t, save-buffer strips trailing whitespace (alias of delete-trailing-whitespace). Default: t."},
+		{"subword-mode", "When t, word motion treats CamelCase sub-words. Default: t."},
+		{"visual-lines", "When t, long lines wrap visually. Default: t."},
+		{"auto-revert", "When t, reload unmodified buffers if their file changes on disk. Default: t."},
+	}},
+	{"Search", []configVar{
+		{"isearch-case-insensitive", "When t, isearch ignores case. Default: t."},
+	}},
+	{"Indentation", []configVar{
+		{"go-indent", "Indent string for Go mode. Default: \"\\t\"."},
+		{"java-indent", "Indent string or width for Java mode. Default: 4."},
+		{"json-indent", "Indent string or width for JSON mode. Default: 2."},
+		{"markdown-indent", "Indent string or width for Markdown mode. Default: 2."},
+		{"perl-indent", "Indent string or width for Perl mode. Default: 2."},
+		{"python-indent", "Indent string or width for Python mode. Default: 4."},
+		{"sh-indent", "Indent string or width for Bash mode. Default: 2."},
+		{"yaml-indent", "Indent string or width for YAML mode. Default: 2."},
+	}},
+	{"Spell Checking", []configVar{
+		{"spell-command", "Path to spell-checker executable. Default: \"aspell\"."},
+		{"spell-language", "Language code for spell checker. Default: \"en\"."},
+	}},
+	{"LSP & Completion", []configVar{
+		{"completion-menu-trigger-chars", "Minimum chars typed before completion menu appears. Default: 3."},
+		{"lsp-completion-min-chars", "Alias for completion-menu-trigger-chars (deprecated name)."},
+	}},
+	{"Debugger", []configVar{
+		{"debug-locals-auto-expand-depth", "Depth to auto-expand struct variables in the Debug Locals panel. Default: 1."},
+	}},
+	{"Appearance", []configVar{
+		{"theme", "Color theme name. Default: \"sweet\". Set with (setq theme 'sweet)."},
+	}},
+}
+
 // cmdHelp shows a *Help* buffer listing all registered commands (with key
 // bindings and documentation) and the known configuration variables (C-h h).
 func (e *Editor) cmdHelp() {
@@ -199,92 +358,6 @@ func (e *Editor) cmdHelp() {
 	var sb strings.Builder
 	sb.WriteString("gomacs help\n")
 	sb.WriteString(strings.Repeat("=", 60) + "\n\n")
-
-	type group struct {
-		title    string
-		commands []string
-	}
-	groups := []group{
-		{"Navigation", []string{
-			"backward-char", "forward-char", "previous-line", "next-line",
-			"beginning-of-line", "end-of-line",
-			"beginning-of-buffer", "end-of-buffer",
-			"forward-word", "backward-word",
-			"beginning-of-sentence", "end-of-sentence",
-			"scroll-up", "scroll-down", "recenter",
-			"goto-line", "what-line", "what-cursor-position", "count-buffer-lines",
-			"back-to-indentation",
-			"forward-list", "backward-list",
-		}},
-		{"Editing", []string{
-			"newline", "self-insert-command", "open-line",
-			"delete-char", "backward-delete-char",
-			"kill-line", "kill-word", "backward-kill-word", "kill-sentence", "kill-region",
-			"copy-region-as-kill", "yank", "yank-pop",
-			"transpose-chars", "transpose-words", "join-line",
-			"undo", "redo",
-			"delete-blank-lines", "delete-duplicate-lines", "delete-trailing-whitespace", "sort-lines",
-			"upcase-word", "downcase-word", "capitalize-word", "upcase-region", "downcase-region",
-			"fill-paragraph", "set-fill-column",
-		}},
-		{"Search & Replace", []string{
-			"isearch-forward", "isearch-backward",
-			"query-replace", "replace-string",
-		}},
-		{"Marks & Registers", []string{
-			"set-mark-command", "mark-word", "mark-whole-buffer", "exchange-point-and-mark",
-			"point-to-register", "jump-to-register", "copy-to-register", "insert-register",
-			"copy-rectangle-to-register",
-		}},
-		{"Narrowing", []string{
-			"narrow-to-region", "widen",
-		}},
-		{"Indentation & Comments", []string{
-			"indent-or-complete", "indent-region", "indent-rigidly",
-			"comment-dwim",
-		}},
-		{"Files & Buffers", []string{
-			"find-file", "save-buffer", "save-buffers-kill-terminal", "save-some-buffers",
-			"kill-buffer", "switch-to-buffer", "list-buffers", "toggle-read-only",
-			"dired", "messages",
-		}},
-		{"Windows", []string{
-			"split-window-below", "split-window-right", "delete-other-windows", "other-window",
-			"window-jump",
-		}},
-		{"Shell & Build", []string{
-			"shell-command", "shell-command-on-region", "man",
-			"project-build", "project-find-file", "project-grep", "next-error", "previous-error",
-		}},
-		{"Version Control", []string{
-			"vc-print-log", "vc-diff", "vc-status", "vc-grep",
-			"vc-annotate", "vc-next-action", "vc-revert",
-		}},
-		{"Spell Checking", []string{
-			"spell", "ispell-word",
-		}},
-		{"LSP", []string{
-			"lsp-find-definition", "lsp-pop-definition", "lsp-find-references", "lsp-show-doc",
-		}},
-		{"Keyboard Macros", []string{
-			"start-kbd-macro", "end-kbd-macro", "call-last-kbd-macro",
-		}},
-		{"Major Modes", []string{
-			"go-mode", "python-mode", "java-mode", "bash-mode", "perl-mode", "gherkin-mode", "markdown-mode",
-			"elisp-mode", "text-mode", "fundamental-mode", "json-mode", "yaml-mode",
-			"makefile-mode", "load-theme",
-		}},
-		{"Help & Info", []string{
-			"help", "describe-key", "describe-function", "describe-variable",
-			"gomacs-version", "count-words", "imenu",
-		}},
-		{"Completion", []string{
-			"dabbrev-expand",
-		}},
-		{"Misc", []string{
-			"eval-last-sexp", "execute-extended-command", "keyboard-quit", "universal-argument",
-		}},
-	}
 
 	printCmd := func(name string) {
 		keys := e.keysForCommand(name)
@@ -301,13 +374,15 @@ func (e *Editor) cmdHelp() {
 
 	// Collect all commands already assigned to a group.
 	assigned := make(map[string]bool)
-	for _, g := range groups {
+	for _, g := range helpCommandGroups {
 		for _, name := range g.commands {
 			assigned[name] = true
 		}
 	}
 
-	// Collect any registered commands not yet assigned.
+	// Collect any registered commands not yet assigned. In a correctly
+	// maintained tree this is always empty; see
+	// TestHelpCommandGroupsCoverAllCommands.
 	var other []string
 	for name := range commands {
 		if !assigned[name] {
@@ -319,7 +394,7 @@ func (e *Editor) cmdHelp() {
 	sb.WriteString("Commands\n")
 	sb.WriteString(strings.Repeat("-", 40) + "\n\n")
 
-	for _, g := range groups {
+	for _, g := range helpCommandGroups {
 		sb.WriteString(g.title + "\n")
 		for _, name := range g.commands {
 			if _, ok := commands[name]; ok {
@@ -337,35 +412,15 @@ func (e *Editor) cmdHelp() {
 	sb.WriteString("\nConfiguration Variables\n")
 	sb.WriteString(strings.Repeat("-", 40) + "\n\n")
 
-	type configVar struct{ name, doc string }
-	configVars := []configVar{
-		{"auto-revert", "When t, reload unmodified buffers if their file changes on disk. Default: t."},
-		{"debug-locals-auto-expand-depth", "Depth to auto-expand struct variables in the Debug Locals panel. Default: 1."},
-		{"delete-trailing-whitespace", "When t, save-buffer strips trailing whitespace. Default: t."},
-		{"fill-column", "Column target for fill-paragraph (M-q). Default: 70."},
-		{"go-indent", "Indent string for Go mode. Default: \"\\t\"."},
-		{"isearch-case-insensitive", "When t, isearch ignores case. Default: t."},
-		{"java-indent", "Indent string or width for Java mode. Default: 4."},
-		{"json-indent", "Indent string or width for JSON mode. Default: 2."},
-		{"completion-menu-trigger-chars", "Minimum chars typed before completion menu appears. Default: 3."},
-		{"lsp-completion-min-chars", "Alias for completion-menu-trigger-chars (deprecated name)."},
-		{"markdown-indent", "Indent string or width for Markdown mode. Default: 2."},
-		{"perl-indent", "Indent string or width for Perl mode. Default: 2."},
-		{"python-indent", "Indent string or width for Python mode. Default: 4."},
-		{"sh-indent", "Indent string or width for Bash mode. Default: 2."},
-		{"spell-command", "Path to spell-checker executable. Default: \"aspell\"."},
-		{"spell-language", "Language code for spell checker. Default: \"en\"."},
-		{"subword-mode", "When t, word motion treats CamelCase sub-words. Default: t."},
-		{"theme", "Color theme name. Default: \"sweet\". Set with (setq theme 'sweet)."},
-		{"visual-lines", "When t, long lines wrap visually. Default: t."},
-		{"yaml-indent", "Indent string or width for YAML mode. Default: 2."},
-	}
-	for _, cv := range configVars {
-		val := "(not set)"
-		if v, ok := e.lisp.GetGlobalVar(cv.name); ok {
-			val = v.String()
+	for _, g := range helpConfigVarGroups {
+		sb.WriteString(g.title + "\n")
+		for _, cv := range g.vars {
+			val := "(not set)"
+			if v, ok := e.lisp.GetGlobalVar(cv.name); ok {
+				val = v.String()
+			}
+			fmt.Fprintf(&sb, "  %-42s  %s\n    Current value: %s\n\n", cv.name, cv.doc, val)
 		}
-		fmt.Fprintf(&sb, "  %-42s  %s\n    Current value: %s\n\n", cv.name, cv.doc, val)
 	}
 
 	helpBuf := e.FindBuffer("*Help*")

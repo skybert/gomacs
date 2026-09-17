@@ -29,9 +29,11 @@ type dapState struct {
 	localsMu sync.RWMutex
 	locals   []dapVariable
 
-	// Call-stack panel: frames for the stopped thread.
+	// Call-stack panel: frames for the stopped thread, plus the per-thread
+	// breakdown rendered in the panel (stopped thread first).
 	framesMu sync.RWMutex
 	frames   []dap.StackFrame
+	threads  []dapThread
 
 	// Buffers backing the three debug panels.
 	localsBuf *buffer.Buffer
@@ -41,8 +43,12 @@ type dapState struct {
 	// prevActiveWin is restored as the active window when the session ends.
 	prevActiveWin *window.Window
 
+	// prevReadOnly remembers the read-only flag every source buffer had before
+	// the session forced it read-only, so teardown can restore each of them.
+	prevReadOnly map[*buffer.Buffer]bool
+
 	// localsAutoExpandDepth is the maximum depth to auto-expand variable trees.
-	// Default 1. Configurable via (setq dap-locals-auto-expand-depth 2).
+	// Default 1. Configurable via (setq debug-locals-auto-expand-depth 2).
 	localsAutoExpandDepth int
 
 	// localsLineMap maps rendered line index (0-based) to the *dapVariable it
@@ -50,9 +56,24 @@ type dapState struct {
 	// Only accessed from the main goroutine so no lock is needed.
 	localsLineMap []*dapVariable
 
+	// stackLineMap maps rendered line index (0-based) of the stack panel to the
+	// frame on that line; nil for thread header lines.  Rebuilt on every call to
+	// dapRenderStack and only accessed from the main goroutine.
+	stackLineMap []*dap.StackFrame
+
 	// replHistory stores previously evaluated REPL expressions.
 	replHistory    []string
 	replHistoryIdx int
+}
+
+// dapThread is one thread of the debuggee together with the stack frames fetched
+// for it.  The call-stack panel shows every thread, grouped, with the thread
+// that reported the stopped event first and flagged.
+type dapThread struct {
+	id      int
+	name    string
+	stopped bool
+	frames  []dap.StackFrame
 }
 
 // dapHasBreakpoint reports whether there is a breakpoint on the given 1-based

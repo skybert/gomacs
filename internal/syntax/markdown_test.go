@@ -212,7 +212,7 @@ func TestMarkdownItalicUnterminated(t *testing.T) {
 }
 
 func TestMarkdownNoTrailingNewline(t *testing.T) {
-	// splitLines path where the final line has no trailing '\n'.
+	// Line-splitting path where the final line has no trailing '\n'.
 	text := "# Header"
 	spans := mdHighlight(text)
 	requireSpan(t, spans, FaceHeader1, "expected FaceHeader1 span without trailing newline")

@@ -14,9 +14,7 @@ type HelpHighlighter struct{}
 func (HelpHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
 	n := len(runes)
-	if end > n {
-		end = n
-	}
+	end = min(end, n)
 
 	var spans []Span
 	emit := func(s, e int, f Face) {
@@ -25,14 +23,26 @@ func (HelpHighlighter) Highlight(text string, start, end int) []Span {
 		}
 	}
 
-	// Collect all line boundaries so we can look ahead.
+	// Collect line boundaries so we can look ahead.  Only lines that start
+	// before end are highlighted, but collection continues past end until one
+	// more non-empty line has been seen so that nextNonEmpty() gives the same
+	// answer it would for the whole buffer.
 	type line struct{ start, end int }
 	var lines []line
+	sawTail := false
 	i := 0
 	for i <= n {
 		ls := i
 		for i < n && runes[i] != '\n' {
 			i++
+		}
+		if ls >= end {
+			if sawTail {
+				break
+			}
+			if ls < i {
+				sawTail = true
+			}
 		}
 		lines = append(lines, line{ls, i})
 		i++ // skip '\n' (or move past end)
@@ -63,31 +73,22 @@ func (HelpHighlighter) Highlight(text string, start, end int) []Span {
 
 	for idx, l := range lines {
 		ls, le := l.start, l.end
-		// Skip lines outside the requested range.
-		if le < start || ls >= end {
-			continue
-		}
-		// Clamp to requested range.
-		cls, cle := ls, le
-		if cls < start {
-			cls = start
-		}
-		if cle > end {
-			cle = end
-		}
-		if cls >= cle {
+		// Skip lines outside the requested range.  Lines that overlap it are
+		// emitted at their true bounds — clamping would truncate the span of a
+		// line that starts inside the range and reaches past it.
+		if le < start || ls >= end || ls >= le {
 			continue
 		}
 
 		// Title: very first line.
 		if idx == 0 {
-			emit(cls, cle, FaceHeader1)
+			emit(ls, le, FaceHeader1)
 			continue
 		}
 
 		// Separator lines: all '=' or all '-'.
 		if isAllRune(ls, le, '=') || isAllRune(ls, le, '-') {
-			emit(cls, cle, FaceComment)
+			emit(ls, le, FaceComment)
 			continue
 		}
 
@@ -97,9 +98,9 @@ func (HelpHighlighter) Highlight(text string, start, end int) []Span {
 			// top-level section heading; otherwise a group heading.
 			ni := nextNonEmpty(idx)
 			if ni >= 0 && isAllRune(lines[ni].start, lines[ni].end, '-') {
-				emit(cls, cle, FaceHeader1)
+				emit(ls, le, FaceHeader1)
 			} else {
-				emit(cls, cle, FaceFunction)
+				emit(ls, le, FaceFunction)
 			}
 			continue
 		}

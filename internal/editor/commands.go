@@ -189,7 +189,9 @@ func init() {
 	registerCommand("help", (*Editor).cmdHelp,
 		"Show a help buffer listing all commands and configuration variables.")
 	registerCommand("project-build", (*Editor).cmdBuild,
-		"Run make in the project root and show output in *compilation* buffer.")
+		"Prompt for a build command (default: make, or mvn clean install for a "+
+			"Maven project) and run it in the project root, showing output in "+
+			"the *compilation* buffer.")
 	registerCommand("project-find-file", (*Editor).cmdProjectFindFile,
 		"Fuzzy-search all files in the current project (VC root) and open the selected one.")
 	registerCommand("project-grep", (*Editor).cmdProjectGrep,

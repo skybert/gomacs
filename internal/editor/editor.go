@@ -326,6 +326,10 @@ type spanCache struct {
 	text  string
 	runes []rune
 	spans []syntax.Span
+	// hiEnd is the rune offset up to which spans is complete.  Highlighters
+	// always scan from offset 0, so a cache built for [0, hiEnd) answers any
+	// later request whose needed end is <= hiEnd without rescanning.
+	hiEnd int
 }
 
 // ---------------------------------------------------------------------------
@@ -2266,6 +2270,10 @@ func (e *Editor) isearchHandleKey(ke terminal.KeyEvent) {
 			e.isearchFindNext()
 		}
 
+	case tcell.KeyCtrlW:
+		// C-w during search: pull the next word of buffer text into the query.
+		e.isearchYankWord()
+
 	default:
 		if ke.Key == tcell.KeyRune && ke.Mod&(tcell.ModCtrl|tcell.ModAlt) == 0 && unicode.IsPrint(ke.Rune) {
 			e.isearchStr += string(ke.Rune)
@@ -2311,6 +2319,16 @@ func (e *Editor) isearchClearCaches() {
 	e.isearchNeedleStr = ""
 }
 
+// isearch minibuffer messages.  Reaching either end of the buffer is reported
+// explicitly so the user can tell a wrap-around from a genuine miss.
+const (
+	isearchFailMsg    = "Failing isearch: %s"
+	isearchWrapBotMsg = "Wrapped isearch (hit bottom of buffer): %s"
+	isearchWrapTopMsg = "Wrapped isearch (hit top of buffer): %s"
+	isearchPromptMsg  = "I-search: %s"
+	isearchBufEndMsg  = "isearch: end of buffer"
+)
+
 // isearchFind searches for e.isearchStr from e.isearchStart.
 func (e *Editor) isearchFind() {
 	buf := e.ActiveBuffer()
@@ -2343,10 +2361,61 @@ func (e *Editor) isearchFind() {
 			}
 		}
 	}
-	e.Message("Failing isearch: %s", e.isearchStr)
+	e.Message(isearchFailMsg, e.isearchStr)
 }
 
-// isearchFindNext finds the next occurrence after the current point.
+// isearchYankWord extends the search string with the next word of buffer text
+// following the current match.  This lets a search for "Camel" that landed
+// inside "CamelCase" be grown to "CamelCase" with a single C-w, and repeated
+// C-w presses pull in successive words.
+func (e *Editor) isearchYankWord() {
+	buf := e.ActiveBuffer()
+	runes := e.isearchGetRunes(buf)
+	needle := e.isearchGetNeedle()
+
+	if len(needle) == 0 {
+		return
+	}
+
+	// The current match ends at point when searching forward and starts at
+	// point when searching backward.
+	end := buf.Point()
+	if !e.isearchFwd {
+		end += len(needle)
+	}
+	if end < 0 || end >= len(runes) {
+		e.Message(isearchBufEndMsg)
+		return
+	}
+
+	// Sitting inside a word: take the rest of that word.  Otherwise take the
+	// run of separators plus the word that follows, so each C-w adds a word.
+	i := end
+	if !isWordRune(runes[i]) {
+		for i < len(runes) && !isWordRune(runes[i]) {
+			i++
+		}
+	}
+	for i < len(runes) && isWordRune(runes[i]) {
+		i++
+	}
+	if i == end {
+		e.Message(isearchBufEndMsg)
+		return
+	}
+
+	// The yanked text comes straight from after the match, so the longer
+	// needle still matches at the same place; only the forward point moves.
+	e.isearchStr += string(runes[end:i])
+	if e.isearchFwd {
+		buf.SetPoint(i)
+	}
+	e.Message(isearchPromptMsg, e.isearchStr)
+}
+
+// isearchFindNext finds the next occurrence after the current point.  When the
+// scan runs off the end of the buffer it wraps around to the other end and
+// says so in the minibuffer.
 func (e *Editor) isearchFindNext() {
 	buf := e.ActiveBuffer()
 	runes := e.isearchGetRunes(buf)
@@ -2361,27 +2430,53 @@ func (e *Editor) isearchFindNext() {
 		match = runesMatchFold
 	}
 
+	// scanFwd returns the first match starting at or after lo and before hi,
+	// or -1.  scanBack returns the last match starting at or before hi and at
+	// or after lo, or -1.
+	scanFwd := func(lo, hi int) int {
+		hi = min(hi, len(runes)-len(needle)+1)
+		for i := max(lo, 0); i < hi; i++ {
+			if match(runes[i:], needle) {
+				return i
+			}
+		}
+		return -1
+	}
+	scanBack := func(hi, lo int) int {
+		hi = min(hi, len(runes)-len(needle))
+		for i := hi; i >= max(lo, 0); i-- {
+			if match(runes[i:], needle) {
+				return i
+			}
+		}
+		return -1
+	}
+
 	cur := buf.Point()
 	if e.isearchFwd {
-		start := cur
-		for i := start; i <= len(runes)-len(needle); i++ {
-			if match(runes[i:], needle) {
-				buf.SetPoint(i + len(needle))
-				return
-			}
+		if i := scanFwd(cur, len(runes)); i >= 0 {
+			buf.SetPoint(i + len(needle))
+			return
 		}
-		e.Message("Failing isearch: %s", e.isearchStr)
-	} else {
-		// Search backward from one before current.
-		start := max(cur-len(needle)-1, 0)
-		for i := start; i >= 0; i-- {
-			if i+len(needle) <= len(runes) && match(runes[i:], needle) {
-				buf.SetPoint(i)
-				return
-			}
+		if i := scanFwd(0, cur); i >= 0 {
+			buf.SetPoint(i + len(needle))
+			e.Message(isearchWrapBotMsg, e.isearchStr)
+			return
 		}
-		e.Message("Failing isearch: %s", e.isearchStr)
+		e.Message(isearchFailMsg, e.isearchStr)
+		return
 	}
+
+	if i := scanBack(cur-len(needle)-1, 0); i >= 0 {
+		buf.SetPoint(i)
+		return
+	}
+	if i := scanBack(len(runes), cur); i >= 0 {
+		buf.SetPoint(i)
+		e.Message(isearchWrapTopMsg, e.isearchStr)
+		return
+	}
+	e.Message(isearchFailMsg, e.isearchStr)
 }
 
 // runesMatch reports whether haystack starts with needle.
@@ -2477,26 +2572,61 @@ func (e *Editor) Redraw() {
 	e.term.Show()
 }
 
-// getSpanCache returns the cached syntax spans for buf, recomputing them if
-// the buffer has changed since the last render.
+// spanCacheMargin is how far past the requested end syntax highlighting is
+// computed, in runes.  It buys several screens of headroom so that ordinary
+// scrolling is served from the cache and costs no rehighlighting at all.
+const spanCacheMargin = 8192
+
+// getSpanCache returns the cached syntax spans for the whole of buf.  Prefer
+// getSpanCacheUpTo when only the visible region is needed: highlighting is
+// O(text scanned), so asking for the whole buffer on every keystroke is what
+// makes editing large files slow.
 func (e *Editor) getSpanCache(buf *buffer.Buffer) *spanCache {
+	return e.getSpanCacheUpTo(buf, buf.Len())
+}
+
+// getSpanCacheUpTo returns cached syntax spans that are complete for at least
+// [0, wantEnd).  Highlighters always scan from offset 0 — that is what keeps
+// multi-line state (block comments, raw strings, fenced code blocks) correct —
+// so a cache built for a wider range satisfies any narrower request and is
+// reused as-is.
+//
+// On a miss the covered range is grown to wantEnd + spanCacheMargin, and to at
+// least twice the previously covered range, so scrolling through a large file
+// costs a logarithmic number of rehighlights rather than one per screenful.
+func (e *Editor) getSpanCacheUpTo(buf *buffer.Buffer, wantEnd int) *spanCache {
 	if e.spanCaches == nil {
 		e.spanCaches = make(map[*buffer.Buffer]*spanCache)
 	}
 	c := e.spanCaches[buf]
 	gen := buf.ChangeGen()
 	mode := buf.Mode()
-	if c != nil && c.gen == gen && c.mode == mode {
+	bufLen := buf.Len()
+	wantEnd = min(max(wantEnd, 0), bufLen)
+	if c != nil && c.gen == gen && c.mode == mode && wantEnd <= c.hiEnd {
 		return c
 	}
 	hl := e.customHighlighters[buf]
 	if hl == nil {
 		hl = highlighterFor(buf)
 	}
+	hiEnd := wantEnd + spanCacheMargin
+	if c != nil && c.gen == gen && c.mode == mode {
+		// Extending the cache for unchanged content — this is the scrolling
+		// case.  At least double the covered range so paging to the end of a
+		// large file costs a logarithmic number of rescans rather than one per
+		// screenful.  After an edit the range starts over from the visible
+		// region, which is the whole point of the partial cache.
+		hiEnd = max(hiEnd, 2*c.hiEnd)
+	}
+	hiEnd = min(hiEnd, bufLen)
 	text := buf.String()
 	runes := []rune(text)
-	spans := hl.Highlight(text, 0, len(runes))
-	c = &spanCache{gen: gen, mode: mode, text: text, runes: runes, spans: spans}
+	// buf.Len() counts runes, but guard anyway so a stale length cannot make the
+	// highlighter scan past the text it was handed.
+	hiEnd = min(hiEnd, len(runes))
+	spans := hl.Highlight(text, 0, hiEnd)
+	c = &spanCache{gen: gen, mode: mode, text: text, runes: runes, spans: spans, hiEnd: hiEnd}
 	e.spanCaches[buf] = c
 	return c
 }
@@ -2592,7 +2722,16 @@ func highlighterFor(buf *buffer.Buffer) syntax.Highlighter {
 		return syntax.DapLocalsHighlighter{}
 	case mode == "debug-stack":
 		return syntax.DapStackHighlighter{}
-	case mode == "debug-repl":
+	case mode == "debug-repl" || strings.HasPrefix(mode, "debug-repl+"):
+		// The REPL is highlighted with the debugged language's highlighter.
+		// The mode may carry a language suffix (e.g. "debug-repl+java"), the
+		// same convention vc-annotate uses.  Plain "debug-repl" — and any
+		// language we have no highlighter for — falls back to Go.
+		if _, lang, ok := strings.Cut(mode, "+"); ok {
+			if hl := syntax.LangToHighlighter(lang); hl != nil {
+				return hl
+			}
+		}
 		return syntax.GoHighlighter{}
 	default:
 		return syntax.NilHighlighter{}
@@ -2664,9 +2803,28 @@ const tabWidth = 2
 // renderWindow draws the text content of w.
 func (e *Editor) renderWindow(w *window.Window) {
 	buf := w.Buf()
-	cache := e.getSpanCache(buf)
+
+	// Work out which rows are on screen before asking for syntax spans: only
+	// the visible region has to be highlighted, and highlighting costs
+	// O(text scanned).  Asking for the whole buffer here would make every
+	// keystroke in a large file pay for text nobody can see.
+	viewLines := w.ViewLines()
+	textH := max(w.Height()-1, 1)
+	visibleEnd := 0
+	for rowIdx := 0; rowIdx < textH && rowIdx < len(viewLines); rowIdx++ {
+		visibleEnd = max(visibleEnd, viewLines[rowIdx].EndPos)
+	}
+
+	cache := e.getSpanCacheUpTo(buf, visibleEnd)
 	runes := cache.runes
 	spans := cache.spans
+
+	// While the M-o window-jump overlay is up the buffer is drawn without
+	// syntax highlighting so the green letter badges stand out.  Only this
+	// frame's rendering is affected; the span cache itself is left intact.
+	if e.windowJumpActive {
+		spans = nil
+	}
 
 	// Narrow region: restrict displayed area.
 	narrowMin := buf.NarrowMin()
@@ -2720,8 +2878,7 @@ func (e *Editor) renderWindow(w *window.Window) {
 		}
 	}
 
-	_, winY, winW, winH := w.Left(), w.Top(), w.Width(), w.Height()
-	textH := max(winH-1, 1)
+	_, winY, winW, _ := w.Left(), w.Top(), w.Width(), w.Height()
 
 	// Gutter: columns reserved at the left for breakpoint/exec-pos indicators.
 	// Always show a 2-column gutter when the file has any breakpoints set OR a
@@ -2749,7 +2906,6 @@ func (e *Editor) renderWindow(w *window.Window) {
 		curWordEnd++
 	}
 
-	viewLines := w.ViewLines()
 	// spanIdx is a monotonic cursor into spans used to look up the syntax face
 	// for each character.  Since we iterate pos in strictly increasing order,
 	// we advance spanIdx forward rather than binary-searching from the start.

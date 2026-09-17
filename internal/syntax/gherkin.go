@@ -24,9 +24,14 @@ func (GherkinHighlighter) Highlight(text string, start, end int) []Span {
 		}
 	}
 
+	// lineLimit bounds where a *new* line may start.  Scanning within a line
+	// still uses n so a line beginning just before end is highlighted in full.
+	// The docstring state is still tracked from the first line onwards.
+	lineLimit := min(n, end)
+
 	inDocstring := false
 	i := 0
-	for i < n {
+	for i < lineLimit {
 		lineStart := i
 		for i < n && runes[i] != '\n' {
 			i++

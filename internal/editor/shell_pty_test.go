@@ -361,17 +361,58 @@ func TestShellState_Close(t *testing.T) {
 	st.close() // should close the master without panic
 }
 
+// ---------------------------------------------------------------------------
+// shellBufferName
+// ---------------------------------------------------------------------------
+
+func TestShellBufferName_FirstShellIsPlain(t *testing.T) {
+	name, exists := shellBufferName(nil, "", "/home/me/project")
+	if name != "*shell*" || exists {
+		t.Fatalf("first shell: got (%q, %v), want (\"*shell*\", false)", name, exists)
+	}
+}
+
+func TestShellBufferName_SecondShellInRepo(t *testing.T) {
+	existing := []string{"*shell*"}
+	name, exists := shellBufferName(existing, "/repos/gomacs", "/repos/gomacs/internal")
+	if name != "*shell/gomacs*" || exists {
+		t.Fatalf("second shell in repo: got (%q, %v), want (\"*shell/gomacs*\", false)", name, exists)
+	}
+}
+
+func TestShellBufferName_SecondShellOutsideRepoUsesCwdBasename(t *testing.T) {
+	existing := []string{"*shell*"}
+	name, exists := shellBufferName(existing, "", "/home/me/scratch")
+	if name != "*shell/scratch*" || exists {
+		t.Fatalf("second shell outside repo: got (%q, %v), want (\"*shell/scratch*\", false)", name, exists)
+	}
+}
+
+func TestShellBufferName_JumpsToExistingRepoShell(t *testing.T) {
+	existing := []string{"*shell*", "*shell/gomacs*"}
+	name, exists := shellBufferName(existing, "/repos/gomacs", "/repos/gomacs")
+	if name != "*shell/gomacs*" || !exists {
+		t.Fatalf("existing repo shell: got (%q, %v), want (\"*shell/gomacs*\", true)", name, exists)
+	}
+}
+
 func TestCmdShell_SwitchesToExisting(t *testing.T) {
 	e := newCapTestEditor("")
-	// Pre-create a shell buffer so cmdShell switches to it instead of spawning.
+	// With *shell* already open, a second invocation should target
+	// *shell/<repo>* (or *shell/<cwd-basename>*) and jump to it if present,
+	// per the spec's jump-to-existing rule.
 	_, vcRoot := vcFind(e.bufferDir(e.ActiveBuffer()))
-	name := "*shell*"
-	if vcRoot != "" {
-		name = "*shell/" + filepath.Base(vcRoot) + "*"
+	repo := filepath.Base(vcRoot)
+	if vcRoot == "" {
+		repo = filepath.Base(e.bufferDir(e.ActiveBuffer()))
 	}
-	sb := buffer.New(name)
-	sb.SetMode("shell")
-	e.buffers = append(e.buffers, sb)
+	name := "*shell/" + repo + "*"
+
+	plain := buffer.New("*shell*")
+	plain.SetMode("shell")
+	repoBuf := buffer.New(name)
+	repoBuf.SetMode("shell")
+	e.buffers = append(e.buffers, plain, repoBuf)
 	e.shellStates = map[*buffer.Buffer]*shellState{}
 	e.cmdShell()
 	if e.ActiveBuffer().Name() != name {

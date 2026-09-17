@@ -12,18 +12,23 @@ var (
 	FaceDiffFile    = Face{Bold: true}
 )
 
+// Highlight colours one diff line at a time.  Lines are independent, so the
+// scan stops as soon as a line begins at or past end; the line it is already on
+// is still measured to its real end so its span is not truncated.
 func (DiffHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
+	n := len(runes)
+	end = min(end, n)
 	var spans []Span
 	i := start
 	for i < end {
 		// Find the end of the current line.
 		lineStart := i
-		for i < end && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < end {
+		if i < n {
 			i++ // skip '\n'
 		}
 		if lineStart >= lineEnd {

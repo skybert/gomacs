@@ -403,3 +403,170 @@ func TestOpenFileIntoBufferAlreadyOpen(t *testing.T) {
 		t.Error("expected existing buffer")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// dapFrameFile
+// ---------------------------------------------------------------------------
+
+func TestDapFrameFile(t *testing.T) {
+	withPath := dap.StackFrame{Source: dap.Source{Path: "/a/b.go", Name: "b.go"}}
+	if got := dapFrameFile(withPath); got != "/a/b.go" {
+		t.Errorf("dapFrameFile = %q, want the full path", got)
+	}
+	nameOnly := dap.StackFrame{Source: dap.Source{Name: "b.go"}}
+	if got := dapFrameFile(nameOnly); got != "b.go" {
+		t.Errorf("dapFrameFile = %q, want the fallback name", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapRenderStack: all threads
+// ---------------------------------------------------------------------------
+
+func TestDapRenderStackGroupsThreads(t *testing.T) {
+	e := newDAPPanelsTestEditor(t)
+	e.dap.threads = []dapThread{
+		{id: 1, name: "main", stopped: true, frames: []dap.StackFrame{
+			{ID: 1, Name: "main.foo", Source: dap.Source{Path: "/a.go"}, Line: 10},
+			{ID: 2, Name: "main.main", Source: dap.Source{Path: "/a.go"}, Line: 20},
+		}},
+		{id: 2, name: "worker", frames: []dap.StackFrame{
+			{ID: 3, Name: "runtime.gopark", Source: dap.Source{Path: "/x.go"}, Line: 1},
+		}},
+	}
+	dapRenderStack(e)
+	got := e.dap.stackBuf.String()
+
+	if !strings.Contains(got, "→ Thread 1: main") {
+		t.Errorf("stopped thread should be marked, got %q", got)
+	}
+	if !strings.Contains(got, "  Thread 2: worker") {
+		t.Errorf("other threads should be listed unmarked, got %q", got)
+	}
+	if !strings.Contains(got, "#0  main.foo (/a.go:10)") ||
+		!strings.Contains(got, "#1  main.main (/a.go:20)") {
+		t.Errorf("stopped thread frames missing: %q", got)
+	}
+	if !strings.Contains(got, "#0  runtime.gopark (/x.go:1)") {
+		t.Errorf("worker thread frames missing: %q", got)
+	}
+	// Header + 2 frames + header + 1 frame = 5 mapped lines.
+	if len(e.dap.stackLineMap) != 5 {
+		t.Fatalf("stackLineMap len = %d, want 5", len(e.dap.stackLineMap))
+	}
+	if e.dap.stackLineMap[0] != nil || e.dap.stackLineMap[3] != nil {
+		t.Error("thread header lines should map to no frame")
+	}
+	if e.dap.stackLineMap[1] == nil || e.dap.stackLineMap[1].Name != "main.foo" {
+		t.Errorf("line 1 should map to the top frame, got %+v", e.dap.stackLineMap[1])
+	}
+	if e.dap.stackLineMap[4] == nil || e.dap.stackLineMap[4].Name != "runtime.gopark" {
+		t.Errorf("line 4 should map to the worker frame, got %+v", e.dap.stackLineMap[4])
+	}
+}
+
+func TestDapRenderStackThreadWithoutFrames(t *testing.T) {
+	e := newDAPPanelsTestEditor(t)
+	e.dap.threads = []dapThread{
+		{id: 1, name: "main", stopped: true},
+		{id: 2}, // no name, no frames
+	}
+	dapRenderStack(e)
+	got := e.dap.stackBuf.String()
+	if !strings.Contains(got, "(no frames)") {
+		t.Errorf("a thread without frames should say so, got %q", got)
+	}
+	if !strings.Contains(got, "Thread 2: (unnamed)") {
+		t.Errorf("an unnamed thread should still be identified, got %q", got)
+	}
+	if len(e.dap.stackLineMap) != 4 {
+		t.Errorf("stackLineMap len = %d, want 4 (2 headers + 2 placeholders)", len(e.dap.stackLineMap))
+	}
+}
+
+func TestDapRenderStackFlatWithoutThreadList(t *testing.T) {
+	// Adapters with no threads request (or state set up directly) keep the
+	// original flat listing.
+	e := newDAPPanelsTestEditor(t)
+	e.dap.frames = []dap.StackFrame{{ID: 1, Name: "f", Source: dap.Source{Path: "/a.go"}, Line: 3}}
+	dapRenderStack(e)
+	got := e.dap.stackBuf.String()
+	if strings.Contains(got, "Thread") {
+		t.Errorf("no thread list → no thread headers, got %q", got)
+	}
+	if !strings.Contains(got, "#0  f (/a.go:3)") {
+		t.Errorf("frame line missing: %q", got)
+	}
+	if len(e.dap.stackLineMap) != 1 || e.dap.stackLineMap[0] == nil {
+		t.Errorf("stackLineMap = %+v, want one frame entry", e.dap.stackLineMap)
+	}
+}
+
+func TestDapRenderStackEmptyMapsNoFrame(t *testing.T) {
+	e := newDAPPanelsTestEditor(t)
+	dapRenderStack(e)
+	if len(e.dap.stackLineMap) != 1 || e.dap.stackLineMap[0] != nil {
+		t.Errorf("the \"(no stack)\" line should map to no frame, got %+v", e.dap.stackLineMap)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapStackJumpToFrame with grouped threads
+// ---------------------------------------------------------------------------
+
+func TestDapStackJumpToFrameIgnoresThreadHeader(t *testing.T) {
+	e := newDAPPanelsTestEditor(t)
+	e.dap.prevActiveWin = e.windows[0]
+	before := e.windows[0].Buf()
+	e.dap.threads = []dapThread{
+		{id: 1, name: "main", stopped: true, frames: []dap.StackFrame{
+			{Name: "f", Source: dap.Source{Path: "/nonexistent.go"}, Line: 1},
+		}},
+	}
+	dapRenderStack(e)
+	e.dap.stackBuf.SetPoint(0) // the thread header line
+	e.dapStackJumpToFrame()
+	if e.windows[0].Buf() != before {
+		t.Error("Enter on a thread header should not change the source window")
+	}
+}
+
+func TestDapStackJumpToFrameSecondThread(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "worker.txt")
+	if err := os.WriteFile(path, []byte("l1\nl2\nl3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newDAPPanelsTestEditor(t)
+	e.autoRevertMtimes = make(map[*buffer.Buffer]time.Time)
+	e.lspConns = make(map[string]*lspConn)
+	e.dap.prevActiveWin = e.windows[0]
+	e.dap.threads = []dapThread{
+		{id: 1, name: "main", stopped: true, frames: []dap.StackFrame{
+			{Name: "main.f", Source: dap.Source{Path: "/other.go"}, Line: 1},
+		}},
+		{id: 2, name: "worker", frames: []dap.StackFrame{
+			{Name: "worker.g", Source: dap.Source{Path: path}, Line: 3},
+		}},
+	}
+	dapRenderStack(e)
+	// Line 4 (index 3) is the worker thread's only frame.
+	e.dap.stackBuf.SetPoint(e.dap.stackBuf.LineStart(4))
+
+	e.dapStackJumpToFrame()
+
+	if e.activeWin.Buf().Filename() != path {
+		t.Fatalf("source window shows %q, want %q", e.activeWin.Buf().Filename(), path)
+	}
+	line, _ := e.activeWin.Buf().LineCol(e.activeWin.Buf().Point())
+	if line != 3 {
+		t.Errorf("point at line %d, want 3", line)
+	}
+	if !e.activeWin.Buf().ReadOnly() {
+		t.Error("a source buffer opened from the stack panel must be read-only")
+	}
+	if _, tracked := e.dap.prevReadOnly[e.activeWin.Buf()]; !tracked {
+		t.Error("the opened buffer must be tracked so teardown can restore it")
+	}
+}

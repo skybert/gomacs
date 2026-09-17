@@ -31,18 +31,23 @@ var makefileDirectives = map[string]bool{
 	"unexport": true, "override": true, "private": true, "vpath": true,
 }
 
+// Highlight colours one Makefile line at a time.  Lines are independent, so the
+// scan stops as soon as a line begins at or past end; the line it is already on
+// is still measured to its real end so its spans are not truncated.
 func (MakefileHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
+	n := len(runes)
+	end = min(end, n)
 	var spans []Span
 	i := start
 
 	for i < end {
 		lineStart := i
-		for i < end && runes[i] != '\n' {
+		for i < n && runes[i] != '\n' {
 			i++
 		}
 		lineEnd := i
-		if i < end {
+		if i < n {
 			i++ // skip '\n'
 		}
 		if lineStart >= lineEnd {

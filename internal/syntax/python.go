@@ -33,6 +33,10 @@ var pythonBuiltins = map[string]bool{
 }
 
 // Highlight implements Highlighter for Python.
+//
+// Scanning always begins at offset 0 so multi-line constructs are tracked from
+// the top of the file, but it stops as soon as the next token starts at or
+// past end.
 func (h PythonHighlighter) Highlight(text string, start, end int) []Span {
 	runes := []rune(text)
 	n := len(runes)
@@ -44,8 +48,12 @@ func (h PythonHighlighter) Highlight(text string, start, end int) []Span {
 		}
 	}
 
+	// scanLimit bounds where a *new* token may start.  Inner scans still use n
+	// so a token beginning just before end is emitted in full.
+	scanLimit := min(n, end)
+
 	i := 0
-	for i < n {
+	for i < scanLimit {
 		r := runes[i]
 
 		// Comment: # to end of line.

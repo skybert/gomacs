@@ -10,7 +10,7 @@ DATE     := $(shell date +%Y-%m-%d)
 
 COVERAGE_THRESHOLD := 90
 
-.PHONY: all build test lint vulncheck fmt clean install man doc dist coverage upgrade
+.PHONY: all build test lint vuln vulncheck fmt clean install man doc dist coverage upgrade
 
 all: fmt lint test vulncheck build man
 
@@ -39,8 +39,11 @@ coverage:
 lint:
 	golangci-lint run ./...
 
-vuln:
+vulncheck:
 	govulncheck ./...
+
+# Alias kept for the CI pipeline, which invokes "make vuln".
+vuln: vulncheck
 
 fmt:
 	gofmt -w -s .

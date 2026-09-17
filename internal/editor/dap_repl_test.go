@@ -7,6 +7,7 @@ import (
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
+	"github.com/skybert/gomacs/internal/lsp"
 	"github.com/skybert/gomacs/internal/terminal"
 	"github.com/skybert/gomacs/internal/window"
 )
@@ -381,5 +382,190 @@ func TestDebugReplDispatchEnterSubmits(t *testing.T) {
 	// No client → submit notes there is no active session.
 	if !strings.Contains(e.dap.replBuf.String(), "no active session") {
 		t.Errorf("Enter with no client should note no active session, got %q", e.dap.replBuf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapReplComplete: shared completion popup
+// ---------------------------------------------------------------------------
+
+// focusRepl makes the REPL window the active one, as it is when the user types
+// at the prompt.
+func focusRepl(e *Editor) {
+	for _, w := range e.windows {
+		if w.Buf() == e.dap.replBuf {
+			e.activeWin = w
+			return
+		}
+	}
+}
+
+func TestDapReplCompleteShowsPopup(t *testing.T) {
+	e := newDAPReplTestEditor(t)
+	focusRepl(e)
+	e.dap.locals = []dapVariable{
+		{name: "count", typeStr: "int"},
+		{name: "counter", typeStr: "*Counter"},
+	}
+	e.dapReplSetInput("cou")
+	e.dapReplComplete()
+
+	if !e.lspCompActive {
+		t.Fatal("several candidates should open the completion popup")
+	}
+	if len(e.lspCompItems) != 2 {
+		t.Fatalf("popup items = %d, want 2", len(e.lspCompItems))
+	}
+	if e.lspCompItems[0].Label != "count" || e.lspCompItems[0].Detail != "int" {
+		t.Errorf("first candidate = %+v, want count annotated with its type", e.lspCompItems[0])
+	}
+	if e.lspCompSelectedIdx != 0 || e.lspCompOffset != 0 {
+		t.Error("the popup should open with the first candidate selected")
+	}
+	// The token was extended to the common prefix "count".
+	if got := dapReplGetInput(e.dap.replBuf); got != "count" {
+		t.Errorf("input = %q, want the common prefix \"count\"", got)
+	}
+	// lspCompWordStart must point at the start of the token so that inserting
+	// replaces it rather than appending.
+	if want := dapReplPromptPos(e.dap.replBuf); e.lspCompWordStart != want {
+		t.Errorf("lspCompWordStart = %d, want %d", e.lspCompWordStart, want)
+	}
+}
+
+func TestDapReplCompletePopupInsertsSelection(t *testing.T) {
+	e := newDAPReplTestEditor(t)
+	focusRepl(e)
+	e.dap.locals = []dapVariable{{name: "count"}, {name: "counter"}}
+	e.dapReplSetInput("cou")
+	e.dapReplComplete()
+
+	// Navigate to the second candidate and insert it, as Tab/Enter would.
+	e.lspCompNext()
+	e.lspCompletionInsert()
+	if got := dapReplGetInput(e.dap.replBuf); got != "counter" {
+		t.Errorf("input after inserting the selection = %q, want \"counter\"", got)
+	}
+	e.lspCompDismiss()
+	if e.lspCompActive {
+		t.Error("popup should be dismissed")
+	}
+}
+
+func TestDapReplCompleteSingleMatchInsertsDirectly(t *testing.T) {
+	e := newDAPReplTestEditor(t)
+	focusRepl(e)
+	e.dap.locals = []dapVariable{{name: "counter"}, {name: "other"}}
+	e.dapReplSetInput("cou")
+	e.dapReplComplete()
+	if e.lspCompActive {
+		t.Error("a single candidate should be inserted without a popup")
+	}
+	if got := dapReplGetInput(e.dap.replBuf); got != "counter" {
+		t.Errorf("input = %q, want \"counter\"", got)
+	}
+}
+
+func TestDapReplCompleteNoMatches(t *testing.T) {
+	e := newDAPReplTestEditor(t)
+	focusRepl(e)
+	e.dap.locals = []dapVariable{{name: "alpha"}}
+	e.dapReplSetInput("zzz")
+	e.dapReplComplete()
+	if e.lspCompActive {
+		t.Error("no candidates → no popup")
+	}
+	if !strings.Contains(e.message, "No completions") {
+		t.Errorf("message = %q, want a 'No completions' note", e.message)
+	}
+}
+
+func TestDapReplCompleteFallsBackToMinibufferWhenUnfocused(t *testing.T) {
+	e := newDAPReplTestEditor(t)
+	e.activeWin = e.windows[0] // not the REPL window
+	e.dap.locals = []dapVariable{{name: "count"}, {name: "counter"}}
+	e.dapReplSetInput("cou")
+	e.dapReplComplete()
+	if e.lspCompActive {
+		t.Error("the popup inserts into the active buffer, so it must not open here")
+	}
+	if !strings.Contains(e.message, "count") {
+		t.Errorf("message = %q, want the candidates listed", e.message)
+	}
+}
+
+func TestDapReplCompleteIncludesHistory(t *testing.T) {
+	e := newDAPReplTestEditor(t)
+	focusRepl(e)
+	e.dap.replHistory = []string{"myVar.Field", "other"}
+	e.dap.locals = []dapVariable{{name: "myVarLocal"}}
+	e.dapReplSetInput("my")
+	e.dapReplComplete()
+	if !e.lspCompActive {
+		t.Fatal("locals plus history should give several candidates")
+	}
+	var sawHistory bool
+	for _, it := range e.lspCompItems {
+		if it.Label == "myVar.Field" && it.Detail == "history" {
+			sawHistory = true
+		}
+	}
+	if !sawHistory {
+		t.Errorf("items = %+v, want the history entry offered", e.lspCompItems)
+	}
+}
+
+func TestDapReplCompleteNoSession(t *testing.T) {
+	e := newDAPTestEditor("")
+	e.dapReplComplete() // nil dap → no panic
+}
+
+func TestDapReplCandidatesDedupes(t *testing.T) {
+	e := newDAPReplTestEditor(t)
+	e.dap.locals = []dapVariable{
+		{name: "dup", typeStr: "int"},
+		{name: "dup", typeStr: "string"},
+	}
+	e.dap.replHistory = []string{"dup"}
+	items := e.dapReplCandidates("d")
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want a single deduplicated candidate", items)
+	}
+	if items[0].Detail != "int" {
+		t.Errorf("detail = %q, want the first type seen", items[0].Detail)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapCollectVarTypes
+// ---------------------------------------------------------------------------
+
+func TestDapCollectVarTypes(t *testing.T) {
+	vars := []dapVariable{
+		{name: "n", typeStr: "int"},
+		{name: "obj", typeStr: "*T", expanded: true, children: []dapVariable{
+			{name: "field", typeStr: "string"},
+		}},
+		{name: "hidden", typeStr: "bool", children: []dapVariable{
+			{name: "skipped", typeStr: "float64"},
+		}},
+	}
+	types := dapCollectVarTypes(vars)
+	if types["n"] != "int" || types["obj"] != "*T" || types["field"] != "string" {
+		t.Errorf("types = %v, want expanded children included", types)
+	}
+	if _, ok := types["skipped"]; ok {
+		t.Error("children of a collapsed variable should be skipped")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dapReplJoinLabels
+// ---------------------------------------------------------------------------
+
+func TestDapReplJoinLabels(t *testing.T) {
+	got := dapReplJoinLabels([]lsp.CompletionItem{{Label: "a"}, {Label: "b"}})
+	if got != "a  b" {
+		t.Errorf("joined = %q, want \"a  b\"", got)
 	}
 }

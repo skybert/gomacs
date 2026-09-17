@@ -769,3 +769,35 @@ func TestCov_TriggerBufferWordCompletion_ProseSchedules(t *testing.T) {
 		t.Fatal("prose context should not activate popup synchronously")
 	}
 }
+
+func TestLspMaybeTriggerCompletion_PopsUp(t *testing.T) {
+	e, _ := newLSPConnEditor(t, func(method string) any {
+		if method == "textDocument/completion" {
+			return map[string]any{"items": []map[string]any{
+				{"label": "foobar"}, {"label": "foobaz"},
+			}}
+		}
+		return nil
+	})
+	b := e.ActiveBuffer()
+	b.SetReadOnly(false)
+	b.InsertString(b.Len(), "foob")
+	b.SetPoint(b.Len())
+	e.lspMaybeTriggerCompletion()
+	drainOneLSPCb(t, e)
+	if !e.lspCompActive {
+		t.Errorf("expected completion popup active, items=%d", len(e.lspCompItems))
+	}
+}
+
+func TestLspMaybeTriggerCompletion_FallbackBufferWords(t *testing.T) {
+	// No ready conn → falls back to buffer-word completion.
+	e, conn := newLSPConnEditor(t, func(string) any { return nil })
+	conn.isReady = false
+	b := e.ActiveBuffer()
+	b.SetReadOnly(false)
+	b.InsertString(b.Len(), "mainx main") // "main" appears as a completable word
+	b.SetPoint(b.Len())
+	e.lspMaybeTriggerCompletion()
+	// Either pops up buffer-word completion or no-ops; must not panic.
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/dap"
+	"github.com/skybert/gomacs/internal/elisp"
 	"github.com/skybert/gomacs/internal/terminal"
 	"github.com/skybert/gomacs/internal/window"
 )
@@ -90,7 +91,7 @@ func (e *Editor) cmdDebugStart() {
 	}
 	buf := e.ActiveBuffer()
 	info := langModeByName(buf.Mode())
-	if info == nil || len(info.dapCmd) == 0 {
+	if info == nil || !info.hasDebugAdapter() {
 		e.Message("No debug adapter configured for mode %q", buf.Mode())
 		return
 	}
@@ -101,23 +102,29 @@ func (e *Editor) cmdDebugStart() {
 		return
 	}
 
-	cmd := info.dapCmd[0]
-	args := info.dapCmd[1:]
+	// Snapshot everything the worker goroutine needs while still on the main
+	// goroutine; the editor's maps must not be read from a worker.
+	req := dapLaunchRequest{
+		file:    canonPath(buf.Filename()),
+		runDir:  runDir,
+		launch:  launchArgs,
+		lspConn: e.lspConns[buf.Mode()],
+	}
 
-	e.Message("Debugger: starting %s…", cmd)
+	e.Message("Debugger: starting %s…", info.dapAdapterName())
 
 	// Initialise dapState early so event handlers can reference it.
 	e.dap = &dapState{
 		mode:                  buf.Mode(),
-		localsAutoExpandDepth: 1,
+		localsAutoExpandDepth: e.dapLocalsAutoExpandDepth(),
 	}
 
 	e.dapAsync(func() func() {
-		c, startErr := dap.Start(runDir, cmd, args...)
+		c, launch, startErr := dapStartAdapter(info, req)
 		if startErr != nil {
 			return func() {
 				e.dap = nil
-				e.Message("debug-start: cannot start %s: %v", cmd, startErr)
+				e.Message("debug-start: %v", startErr)
 			}
 		}
 
@@ -141,7 +148,7 @@ func (e *Editor) cmdDebugStart() {
 			}
 		}
 
-		_, launchErr := c.Request("launch", launchArgs)
+		_, launchErr := c.Request("launch", launch)
 		if launchErr != nil {
 			c.Close()
 			return func() {
@@ -189,6 +196,55 @@ func (e *Editor) cmdDebugStart() {
 	})
 }
 
+// dapLaunchRequest is the main-goroutine snapshot dapStartAdapter needs.  It is
+// read from a worker goroutine, so it holds only immutable values.
+type dapLaunchRequest struct {
+	file    string         // absolute path of the buffer being debugged
+	runDir  string         // adapter working directory (project root)
+	launch  dap.LaunchArgs // pre-resolved launch args (process adapters)
+	lspConn *lspConn       // language-server connection (jdtls adapters)
+}
+
+// dapStartAdapter starts the debug adapter for info and returns it together with
+// the launch arguments to send.  It blocks on I/O (spawning a process, or LSP
+// round-trips for jdtls) and so must run on a worker goroutine.
+func dapStartAdapter(info *langModeInfo, req dapLaunchRequest) (*dap.Client, dap.LaunchArgs, error) {
+	if info.dapKind == dapAdapterJdtls {
+		// Resolve the launch arguments first: doing so before the adapter exists
+		// means a classpath failure does not leak a debug session.
+		launch, err := dapJdtlsLaunchArgs(req.lspConn, req.file, req.runDir)
+		if err != nil {
+			return nil, nil, err
+		}
+		c, err := dapStartJdtls(req.lspConn)
+		if err != nil {
+			return nil, nil, err
+		}
+		return c, launch, nil
+	}
+	c, err := dap.Start(req.runDir, info.dapCmd[0], info.dapCmd[1:]...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot start %s: %w", info.dapCmd[0], err)
+	}
+	return c, req.launch, nil
+}
+
+// dapLocalsAutoExpandDepth returns the locals auto-expand depth configured with
+// (setq debug-locals-auto-expand-depth N), defaulting to 1.  It is read when a
+// session starts because applyElispConfig can only refresh the value of a
+// session that is already running.
+func (e *Editor) dapLocalsAutoExpandDepth() int {
+	if e.lisp == nil {
+		return 1
+	}
+	if v, ok := e.lisp.GetGlobalVar("debug-locals-auto-expand-depth"); ok {
+		if i, isInt := v.(elisp.Int); isInt && i.V > 0 {
+			return int(i.V)
+		}
+	}
+	return 1
+}
+
 // canonPath returns a canonical absolute path for p, resolving symlinks.  This
 // matters because debug adapters (delve) canonicalize their module and DWARF
 // source paths — on macOS the temp/working dirs reached via /var resolve to
@@ -222,6 +278,12 @@ func (e *Editor) dapLaunchArgs(buf *buffer.Buffer) (dap.LaunchArgs, string, erro
 	}
 	if root == "" {
 		root = filepath.Dir(abs)
+	}
+
+	if info != nil && info.dapKind == dapAdapterJdtls {
+		// jdtls resolves the main class and classpath itself, over LSP, once the
+		// adapter is about to start; see dapJdtlsLaunchArgs.
+		return nil, root, nil
 	}
 
 	switch {
@@ -264,11 +326,25 @@ func dapTestFuncAtPoint(buf *buffer.Buffer) string {
 	return matches[len(matches)-1][1]
 }
 
-// bufContainsMainFunc reports whether the buffer content contains a
-// "func main()" declaration.
+// javaMainRe matches a Java entry point declaration.  It deliberately covers the
+// forms that occur in the wild: any order of the modifiers (and "final"), the
+// array brackets on either the type or the parameter name, varargs, a qualified
+// java.lang.String, a missing parameter name, and — since JEP 512 — an instance
+// main method with no parameters at all.  The modifier list may not span lines,
+// which keeps unrelated "static" tokens elsewhere in the file from matching.
+var javaMainRe = regexp.MustCompile(
+	`(?m)^[ \t]*(?:(?:public|protected|private|static|final|synchronized|strictfp)[ \t]+)*` +
+		`void[ \t]+main[ \t]*\(` +
+		`[ \t]*(?:(?:final[ \t]+)?(?:java\.lang\.)?String[ \t]*(?:\[[ \t]*\]|\.\.\.)?[ \t]*` +
+		`(?:\w+[ \t]*(?:\[[ \t]*\])?)?[ \t]*)?\)`)
+
+// bufContainsMainFunc reports whether the buffer declares a program entry point:
+// a Go "func main()" or a Java main method.  Both patterns are checked
+// regardless of the buffer's mode — they cannot match the other language — so
+// detection still works when the mode was set by hand.
 func bufContainsMainFunc(buf *buffer.Buffer) bool {
 	content := buf.Substring(0, buf.Len())
-	return strings.Contains(content, "func main()")
+	return strings.Contains(content, "func main()") || javaMainRe.MatchString(content)
 }
 
 // ---- Stepping / execution control ------------------------------------------
@@ -500,8 +576,64 @@ func (e *Editor) scrollWindowToLine(w *window.Window, line int) {
 	w.SetScrollLine(line - w.Height()/2)
 }
 
-// dapFetchStoppedInfo fetches the stack trace and locals for a stopped event.
-// It is a no-op if the client is not yet available (race with setup callback).
+// dapMaxThreads caps how many threads the call-stack panel fetches frames for,
+// and dapStackLevels caps the frames per thread, so that a debuggee with
+// hundreds of goroutines does not flood the adapter with requests on every stop.
+const (
+	dapMaxThreads  = 8
+	dapStackLevels = 20
+)
+
+// dapFetchFrames requests up to dapStackLevels stack frames for one thread.
+func dapFetchFrames(client *dap.Client, threadID int) ([]dap.StackFrame, error) {
+	raw, err := client.Request("stackTrace", dap.StackTraceArgs{
+		ThreadID: threadID,
+		Levels:   dapStackLevels,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp dap.StackTraceResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, err
+	}
+	return resp.StackFrames, nil
+}
+
+// dapFetchThreads returns one dapThread per thread the adapter knows about, the
+// stopped thread (whose frames the caller already has) first.  At most
+// dapMaxThreads threads are queried.  Adapters that do not implement the threads
+// request still yield the stopped thread on its own.
+func dapFetchThreads(client *dap.Client, stoppedID int, stoppedFrames []dap.StackFrame) []dapThread {
+	threads := []dapThread{{id: stoppedID, stopped: true, frames: stoppedFrames}}
+	raw, err := client.Request("threads", nil)
+	if err != nil {
+		return threads
+	}
+	var resp dap.ThreadsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return threads
+	}
+	for _, t := range resp.Threads {
+		if t.ID == stoppedID {
+			threads[0].name = t.Name
+			continue
+		}
+		if len(threads) >= dapMaxThreads {
+			break
+		}
+		frames, ferr := dapFetchFrames(client, t.ID)
+		if ferr != nil {
+			continue
+		}
+		threads = append(threads, dapThread{id: t.ID, name: t.Name, frames: frames})
+	}
+	return threads
+}
+
+// dapFetchStoppedInfo fetches the stack traces of all threads and the locals of
+// the stopped thread's top frame after a stopped event.  It is a no-op if the
+// client is not yet available (race with setup callback).
 func (e *Editor) dapFetchStoppedInfo(ev dap.StoppedEvent) {
 	client := e.dap.client
 	if client == nil {
@@ -509,23 +641,17 @@ func (e *Editor) dapFetchStoppedInfo(ev dap.StoppedEvent) {
 		return
 	}
 	threadID := ev.ThreadID
+	maxDepth := max(e.dap.localsAutoExpandDepth, 1)
 	e.dapAsync(func() func() {
-		raw, err := client.Request("stackTrace", dap.StackTraceArgs{
-			ThreadID: threadID,
-			Levels:   20,
-		})
+		frames, err := dapFetchFrames(client, threadID)
 		if err != nil {
 			return nil
 		}
-		var resp dap.StackTraceResponse
-		if err := json.Unmarshal(raw, &resp); err != nil {
-			return nil
-		}
-		frames := resp.StackFrames
+		threads := dapFetchThreads(client, threadID, frames)
 
 		var localVars []dapVariable
 		if len(frames) > 0 {
-			localVars = dapFetchLocals(client, frames[0].ID, 1)
+			localVars = dapFetchLocals(client, frames[0].ID, maxDepth)
 		}
 
 		return func() {
@@ -534,6 +660,7 @@ func (e *Editor) dapFetchStoppedInfo(ev dap.StoppedEvent) {
 			}
 			e.dap.framesMu.Lock()
 			e.dap.frames = frames
+			e.dap.threads = threads
 			e.dap.framesMu.Unlock()
 
 			e.dap.localsMu.Lock()
@@ -552,6 +679,7 @@ func (e *Editor) dapFetchStoppedInfo(ev dap.StoppedEvent) {
 					if top.Source.Path != "" && canonPath(win.Buf().Filename()) != canonPath(top.Source.Path) {
 						if fileBuf, err := e.openFileIntoBuffer(top.Source.Path); err == nil {
 							win.SetBuf(fileBuf)
+							e.debugMarkSourceReadOnly(fileBuf)
 						}
 					}
 					win.Buf().SetPoint(win.Buf().LineStart(top.Line))
@@ -570,6 +698,13 @@ func (e *Editor) dapFetchStoppedInfo(ev dap.StoppedEvent) {
 // debugSourceDispatch intercepts single-letter debug shortcuts when a debug
 // session is active and the active buffer is a source file (not a debug panel).
 func (e *Editor) debugSourceDispatch(ke terminal.KeyEvent) bool {
+	// The mode-specific dispatch in dispatchParsedKey matches "debug-repl"
+	// exactly, so a language-suffixed REPL mode ("debug-repl+java") arrives here
+	// instead.  Hand those keys to the REPL rather than treating them as
+	// single-letter source shortcuts.
+	if strings.HasPrefix(e.ActiveBuffer().Mode(), debugReplMode) {
+		return e.debugReplDispatch(ke)
+	}
 	if ke.Key != tcell.KeyRune || ke.Mod != 0 {
 		return false
 	}

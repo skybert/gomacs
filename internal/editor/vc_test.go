@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -828,7 +829,7 @@ func makeVcGrepEditor(t *testing.T) *Editor {
 	t.Helper()
 	e, dir := newTestEditorWithVC(t)
 	grepContent := "main.go:1:package main\nmain.go:3:func main() {}\n"
-	grepBuf := buffer.NewWithContent("*vc grep*", grepContent)
+	grepBuf := buffer.NewWithContent("*grep*", grepContent)
 	grepBuf.SetMode("vc-grep")
 	e.buffers = append(e.buffers, grepBuf)
 	e.bufferMRU = append(e.bufferMRU, buf(e))
@@ -1136,9 +1137,9 @@ func TestCmdVcGrep_FindsMatches(t *testing.T) {
 		t.Fatal("cmdVcGrep should activate the minibuffer")
 	}
 	e.minibufDoneFunc("package")
-	b := e.FindBuffer("*vc grep*")
+	b := e.FindBuffer("*grep*")
 	if b == nil {
-		t.Fatal("cmdVcGrep should create *vc grep* buffer")
+		t.Fatal("cmdVcGrep should create *grep* buffer")
 	}
 	if !strings.Contains(b.String(), "main.go") {
 		t.Fatalf("grep buffer should mention main.go, got %q", b.String())
@@ -1149,7 +1150,7 @@ func TestCmdVcGrep_EmptyPatternNoop(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	e.cmdVcGrep()
 	e.minibufDoneFunc("")
-	if b := e.FindBuffer("*vc grep*"); b != nil {
+	if b := e.FindBuffer("*grep*"); b != nil {
 		t.Fatal("empty pattern should not create grep buffer")
 	}
 }
@@ -1161,9 +1162,9 @@ func TestCmdProjectGrep_WithRepo(t *testing.T) {
 		t.Fatal("cmdProjectGrep should activate the minibuffer")
 	}
 	e.minibufDoneFunc("package")
-	b := e.FindBuffer("*vc grep*")
+	b := e.FindBuffer("*grep*")
 	if b == nil {
-		t.Fatal("cmdProjectGrep should create *vc grep* buffer")
+		t.Fatal("cmdProjectGrep should create *grep* buffer")
 	}
 }
 
@@ -1790,7 +1791,7 @@ func TestVcDiffDispatch_Quit(t *testing.T) {
 
 func TestVcGrepDispatch_EnterOpensFile(t *testing.T) {
 	e, dir := newVCFullEditor(t)
-	grep := buffer.NewWithContent("*vc grep*", "main.go:1:package main\n")
+	grep := buffer.NewWithContent("*grep*", "main.go:1:package main\n")
 	grep.SetMode("vc-grep")
 	e.buffers = append(e.buffers, grep)
 	e.activeWin.SetBuf(grep)
@@ -1806,7 +1807,7 @@ func TestVcGrepDispatch_EnterOpensFile(t *testing.T) {
 
 func TestVcGrepDispatch_Quit(t *testing.T) {
 	e, _ := newVCFullEditor(t)
-	grep := buffer.NewWithContent("*vc grep*", "main.go:1:x\n")
+	grep := buffer.NewWithContent("*grep*", "main.go:1:x\n")
 	grep.SetMode("vc-grep")
 	e.buffers = append(e.buffers, grep)
 	e.activeWin.SetBuf(grep)
@@ -2088,9 +2089,9 @@ func TestCov_CmdProjectGrep_NoVcFallsBackToGrep(t *testing.T) {
 		t.Fatal("cmdProjectGrep should activate the minibuffer")
 	}
 	e.minibufDoneFunc("needle")
-	b := e.FindBuffer("*vc grep*")
+	b := e.FindBuffer("*grep*")
 	if b == nil {
-		t.Fatal("project grep should create *vc grep* buffer")
+		t.Fatal("project grep should create *grep* buffer")
 	}
 	if !strings.Contains(b.String(), "needle") {
 		t.Fatalf("grep output should contain match, got %q", b.String())
@@ -2101,7 +2102,7 @@ func TestCov_CmdProjectGrep_EmptyPatternNoop(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	e.cmdProjectGrep()
 	e.minibufDoneFunc("")
-	if e.FindBuffer("*vc grep*") != nil {
+	if e.FindBuffer("*grep*") != nil {
 		t.Fatal("empty pattern should not create grep buffer")
 	}
 }
@@ -2110,11 +2111,445 @@ func TestCov_CmdVcGrep_NoMatches(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	e.cmdVcGrep()
 	e.minibufDoneFunc("zzz_no_such_token_zzz")
-	b := e.FindBuffer("*vc grep*")
+	b := e.FindBuffer("*grep*")
 	if b == nil {
 		t.Fatal("grep with no matches should still create buffer")
 	}
 	if !strings.Contains(b.String(), "No matches") {
 		t.Fatalf("expected 'No matches found.', got %q", b.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parseGrepHits
+// ---------------------------------------------------------------------------
+
+func TestParseGrepHits_RelativePathsResolvedAgainstRoot(t *testing.T) {
+	hits := parseGrepHits("main.go:3:func main() {}\n./sub/x.go:12:var x int\n", "/repo")
+	if len(hits) != 2 {
+		t.Fatalf("expected 2 hits, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].File != filepath.Join("/repo", "main.go") || hits[0].Line != 3 {
+		t.Errorf("hit 0 = %+v", hits[0])
+	}
+	if hits[1].File != filepath.Join("/repo", "sub/x.go") || hits[1].Line != 12 {
+		t.Errorf("hit 1 = %+v", hits[1])
+	}
+}
+
+// A hit whose content itself contains colons must keep the whole content and
+// still yield the right file and line.
+func TestParseGrepHits_ContentWithColons(t *testing.T) {
+	hits := parseGrepHits("a.go:7:\tm := map[string]int{\"a:b\": 1} // note: here\n", "/repo")
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].File != filepath.Join("/repo", "a.go") || hits[0].Line != 7 {
+		t.Errorf("hit = %+v", hits[0])
+	}
+}
+
+func TestParseGrepHits_SkipsMalformedLines(t *testing.T) {
+	in := "No matches found.\n" +
+		"binary file matches\n" +
+		"a.go:notanumber:x\n" +
+		"b.go:0:zero line number\n" +
+		":4:empty filename\n" +
+		"\n" +
+		"good.go:5:real hit\n"
+	hits := parseGrepHits(in, "/repo")
+	if len(hits) != 1 {
+		t.Fatalf("expected only the well-formed hit, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].File != filepath.Join("/repo", "good.go") || hits[0].Line != 5 {
+		t.Errorf("hit = %+v", hits[0])
+	}
+}
+
+func TestParseGrepHits_AbsolutePathsKeptAsIs(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "a.txt")
+	hits := parseGrepHits(abs+":2:needle\n", "/repo")
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+	if hits[0].File != abs {
+		t.Errorf("absolute path rewritten: got %q want %q", hits[0].File, abs)
+	}
+}
+
+func TestParseGrepHits_EmptyOutput(t *testing.T) {
+	if hits := parseGrepHits("", "/repo"); len(hits) != 0 {
+		t.Fatalf("expected no hits, got %+v", hits)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// grep results buffer name + next-error integration
+// ---------------------------------------------------------------------------
+
+func TestCmdVcGrep_UsesGrepBufferName(t *testing.T) {
+	e, _ := newTestEditorWithVC(t)
+	e.cmdVcGrep()
+	e.minibufDoneFunc("package")
+	if e.FindBuffer(grepBufferName) == nil {
+		t.Fatalf("expected %s buffer", grepBufferName)
+	}
+	if e.FindBuffer("*vc grep*") != nil {
+		t.Error("the old *vc grep* buffer name should no longer be used")
+	}
+}
+
+func TestCmdVcGrep_PopulatesNextErrorList(t *testing.T) {
+	e, dir := newTestEditorWithVC(t)
+	e.cmdVcGrep()
+	e.minibufDoneFunc("package")
+	if len(e.compilationErrors) == 0 {
+		t.Fatal("vc-grep should populate the next-error list")
+	}
+	want := filepath.Join(dir, "main.go")
+	if e.compilationErrors[0].File != want || e.compilationErrors[0].Line != 1 {
+		t.Errorf("first hit = %+v, want %s:1", e.compilationErrors[0], want)
+	}
+	if e.compilationErrorIdx != -1 {
+		t.Errorf("next-error index should be reset to -1, got %d", e.compilationErrorIdx)
+	}
+}
+
+func TestCmdProjectGrep_PopulatesNextErrorList(t *testing.T) {
+	e, dir := newTestEditorWithVC(t)
+	e.cmdProjectGrep()
+	e.minibufDoneFunc("func main")
+	if len(e.compilationErrors) != 1 {
+		t.Fatalf("expected 1 hit, got %d: %+v", len(e.compilationErrors), e.compilationErrors)
+	}
+	if e.compilationErrors[0].File != filepath.Join(dir, "main.go") {
+		t.Errorf("hit = %+v", e.compilationErrors[0])
+	}
+}
+
+func TestCmdVcGrep_NoMatchesLeavesNextErrorListEmpty(t *testing.T) {
+	e, _ := newTestEditorWithVC(t)
+	e.cmdVcGrep()
+	e.minibufDoneFunc("zzz_no_such_token_zzz")
+	if len(e.compilationErrors) != 0 {
+		t.Fatalf("expected no next-error entries, got %+v", e.compilationErrors)
+	}
+}
+
+// C-x ` (next-error) must walk the grep hits, not report "No errors".
+func TestNextErrorAfterVcGrep_JumpsToHit(t *testing.T) {
+	e, dir := newTestEditorWithVC(t)
+	e.cmdVcGrep()
+	e.minibufDoneFunc("func main")
+	e.cmdNextError()
+	if strings.Contains(e.message, "No errors") {
+		t.Fatalf("next-error reported %q after a grep", e.message)
+	}
+	if got := e.ActiveBuffer().Filename(); got != filepath.Join(dir, "main.go") {
+		t.Errorf("next-error should open the hit's file, active buffer is %q", got)
+	}
+	// The message reports the hit that was navigated to (file:line).
+	if !strings.Contains(e.message, "main.go:3") {
+		t.Errorf("expected next-error to report main.go:3, got %q", e.message)
+	}
+	if e.compilationErrorIdx != 0 {
+		t.Errorf("next-error index = %d, want 0", e.compilationErrorIdx)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// vc-status: `c` on a section header stages that section
+// ---------------------------------------------------------------------------
+
+// gitStagedFiles returns the newline-separated list of paths staged in root.
+func gitStagedFiles(t *testing.T, root string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", root, "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		t.Fatalf("git diff --cached --name-only: %v", err)
+	}
+	return string(out)
+}
+
+// setPointAtLineContaining moves point to the start of the first line of b that
+// contains substr.
+func setPointAtLineContaining(t *testing.T, b *buffer.Buffer, substr string) {
+	t.Helper()
+	s := b.String()
+	idx := strings.Index(s, substr)
+	if idx < 0 {
+		t.Fatalf("buffer has no line containing %q; buffer:\n%s", substr, s)
+	}
+	b.SetPoint(b.BeginningOfLine(len([]rune(s[:idx]))))
+}
+
+// openVcStatus runs vc-status in a repo and returns the editor, the repo root
+// and the *vc-status* buffer.
+func openVcStatus(t *testing.T) (*Editor, string, *buffer.Buffer) {
+	t.Helper()
+	e, dir := newTestEditorWithVC(t)
+	e.cmdVcStatus()
+	b := e.FindBuffer("*vc-status*")
+	if b == nil {
+		t.Fatal("cmdVcStatus should create *vc-status* buffer")
+	}
+	return e, dir, b
+}
+
+func TestVcStatusDispatch_C_OnUntrackedHeader_StagesUntrackedFiles(t *testing.T) {
+	e, dir, _ := openVcStatus(t)
+	if err := os.WriteFile(filepath.Join(dir, "extra.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Refresh so the untracked section is present.
+	e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'g'})
+	setPointAtLineContaining(t, e.FindBuffer("*vc-status*"), "Untracked files")
+
+	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'c'}) {
+		t.Fatal("'c' should be consumed on a section header")
+	}
+	if !e.readCharPending {
+		t.Fatal("'c' on the untracked header should prompt for confirmation")
+	}
+	if !strings.Contains(strings.ToLower(e.message), "untracked") {
+		t.Errorf("prompt should mention untracked files, got %q", e.message)
+	}
+	e.readCharCallback('y')
+
+	if staged := gitStagedFiles(t, dir); !strings.Contains(staged, "extra.go") {
+		t.Errorf("untracked file was not staged; staged = %q", staged)
+	}
+	if e.FindBuffer("*vc-commit*") == nil {
+		t.Error("confirming should open the *vc-commit* buffer")
+	}
+}
+
+func TestVcStatusDispatch_C_OnNotStagedHeader_StagesOnlyTrackedChanges(t *testing.T) {
+	e, dir, _ := openVcStatus(t)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() { _ = 1 }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "extra.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'g'})
+	statusBuf := e.FindBuffer("*vc-status*")
+	setPointAtLineContaining(t, statusBuf, "not staged for commit")
+
+	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'c'}) {
+		t.Fatal("'c' should be consumed on a section header")
+	}
+	if !e.readCharPending {
+		t.Fatal("'c' on the not-staged header should prompt for confirmation")
+	}
+	e.readCharCallback('y')
+
+	staged := gitStagedFiles(t, dir)
+	if !strings.Contains(staged, "main.go") {
+		t.Errorf("tracked modification was not staged; staged = %q", staged)
+	}
+	if strings.Contains(staged, "extra.go") {
+		t.Errorf("untracked file should not be staged from the not-staged section; staged = %q", staged)
+	}
+}
+
+func TestVcStatusDispatch_C_OnHeader_CancelStagesNothing(t *testing.T) {
+	e, dir, _ := openVcStatus(t)
+	if err := os.WriteFile(filepath.Join(dir, "extra.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'g'})
+	setPointAtLineContaining(t, e.FindBuffer("*vc-status*"), "Untracked files")
+	e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'c'})
+	e.readCharCallback('n')
+
+	if staged := gitStagedFiles(t, dir); strings.TrimSpace(staged) != "" {
+		t.Errorf("answering 'n' should stage nothing; staged = %q", staged)
+	}
+	if !strings.Contains(e.message, "cancelled") {
+		t.Errorf("expected a cancellation message, got %q", e.message)
+	}
+}
+
+// A non-header line without a file (e.g. a git hint line) falls through to
+// opening the commit buffer directly.
+func TestVcStatusStageSection_NonHeaderReturnsFalse(t *testing.T) {
+	e, dir, statusBuf := openVcStatus(t)
+	setPointAtLineContaining(t, statusBuf, "nothing to commit")
+	if e.vcStatusStageSection(statusBuf, dir) {
+		t.Error("vcStatusStageSection should not handle a non-header line")
+	}
+	if e.readCharPending {
+		t.Error("no confirmation should be pending for a non-header line")
+	}
+}
+
+func TestVcGitAddUntracked_NoUntrackedFiles(t *testing.T) {
+	dir := makeGitRepo(t)
+	if err := vcGitAddUntracked(dir); !errors.Is(err, errNoUntrackedFiles) {
+		t.Fatalf("expected errNoUntrackedFiles, got %v", err)
+	}
+}
+
+func TestVcGitAddUntracked_StagesAllUntracked(t *testing.T) {
+	dir := makeGitRepo(t)
+	for _, name := range []string{"a.go", "b.go"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("package main\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := vcGitAddUntracked(dir); err != nil {
+		t.Fatalf("vcGitAddUntracked: %v", err)
+	}
+	staged := gitStagedFiles(t, dir)
+	for _, name := range []string{"a.go", "b.go"} {
+		if !strings.Contains(staged, name) {
+			t.Errorf("%s not staged; staged = %q", name, staged)
+		}
+	}
+}
+
+func TestVcGitAddModified_IgnoresUntracked(t *testing.T) {
+	dir := makeGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := vcGitAddModified(dir); err != nil {
+		t.Fatalf("vcGitAddModified: %v", err)
+	}
+	staged := gitStagedFiles(t, dir)
+	if !strings.Contains(staged, "main.go") {
+		t.Errorf("modified tracked file not staged; staged = %q", staged)
+	}
+	if strings.Contains(staged, "new.go") {
+		t.Errorf("git add -u must not stage untracked files; staged = %q", staged)
+	}
+}
+
+func TestLangForExtGo2(t *testing.T) {
+	if got := langForExt(".go"); got != "go" {
+		t.Errorf(".go: want \"go\", got %q", got)
+	}
+}
+
+func TestLangForExtPython2(t *testing.T) {
+	if got := langForExt(".py"); got != "python" {
+		t.Errorf(".py: want \"python\", got %q", got)
+	}
+}
+
+func TestLangForExtJava2(t *testing.T) {
+	if got := langForExt(".java"); got != "java" {
+		t.Errorf(".java: want \"java\", got %q", got)
+	}
+}
+
+func TestLangForExtBash2(t *testing.T) {
+	if got := langForExt(".sh"); got != "bash" {
+		t.Errorf(".sh: want \"bash\", got %q", got)
+	}
+}
+
+func TestLangForExt_BashAlt(t *testing.T) {
+	if got := langForExt(".bash"); got != "bash" {
+		t.Errorf(".bash: want \"bash\", got %q", got)
+	}
+}
+
+func TestLangForExtMarkdown2(t *testing.T) {
+	if got := langForExt(".md"); got != "markdown" {
+		t.Errorf(".md: want \"markdown\", got %q", got)
+	}
+}
+
+func TestLangForExt_MarkdownAlt(t *testing.T) {
+	if got := langForExt(".markdown"); got != "markdown" {
+		t.Errorf(".markdown: want \"markdown\", got %q", got)
+	}
+}
+
+func TestLangForExtJSON2(t *testing.T) {
+	if got := langForExt(".json"); got != "json" {
+		t.Errorf(".json: want \"json\", got %q", got)
+	}
+}
+
+func TestLangForExtYAML2(t *testing.T) {
+	if got := langForExt(".yaml"); got != "yaml" {
+		t.Errorf(".yaml: want \"yaml\", got %q", got)
+	}
+}
+
+func TestLangForExt_YAMLAlt(t *testing.T) {
+	if got := langForExt(".yml"); got != "yaml" {
+		t.Errorf(".yml: want \"yaml\", got %q", got)
+	}
+}
+
+func TestLangForExtElisp2(t *testing.T) {
+	if got := langForExt(".el"); got != "elisp" {
+		t.Errorf(".el: want \"elisp\", got %q", got)
+	}
+}
+
+func TestLangForExt_Perl(t *testing.T) {
+	if got := langForExt(".pl"); got != "perl" {
+		t.Errorf(".pl: want \"perl\", got %q", got)
+	}
+}
+
+func TestLangForExt_PerlModule(t *testing.T) {
+	if got := langForExt(".pm"); got != "perl" {
+		t.Errorf(".pm: want \"perl\", got %q", got)
+	}
+}
+
+func TestLangForExt_PerlTest(t *testing.T) {
+	if got := langForExt(".t"); got != "perl" {
+		t.Errorf(".t: want \"perl\", got %q", got)
+	}
+}
+
+func TestLangForExt_Gherkin(t *testing.T) {
+	if got := langForExt(".feature"); got != "gherkin" {
+		t.Errorf(".feature: want \"gherkin\", got %q", got)
+	}
+}
+
+func TestLangForExt_Makefile(t *testing.T) {
+	if got := langForExt(".mk"); got != "makefile" {
+		t.Errorf(".mk: want \"makefile\", got %q", got)
+	}
+}
+
+func TestLangForExt_Conf(t *testing.T) {
+	if got := langForExt(".conf"); got != "conf" {
+		t.Errorf(".conf: want \"conf\", got %q", got)
+	}
+}
+
+func TestLangForExt_TOML(t *testing.T) {
+	if got := langForExt(".toml"); got != "conf" {
+		t.Errorf(".toml: want \"conf\", got %q", got)
+	}
+}
+
+func TestLangForExtUnknown2(t *testing.T) {
+	for _, ext := range []string{".txt", ".rs", ".cpp", ".ts", ".rb", ""} {
+		if got := langForExt(ext); got != "" {
+			t.Errorf("langForExt(%q): want \"\", got %q", ext, got)
+		}
+	}
+}
+
+func TestLangForExtCaseInsensitive2(t *testing.T) {
+	if got := langForExt(".GO"); got != "go" {
+		t.Errorf(".GO: want \"go\", got %q", got)
+	}
+	if got := langForExt(".PY"); got != "python" {
+		t.Errorf(".PY: want \"python\", got %q", got)
 	}
 }
