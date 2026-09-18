@@ -25,19 +25,41 @@ func clipboardWrite(text string) {
 // clipboardCmd returns an exec.Cmd for writing to the clipboard, or nil if no
 // suitable tool is available for the current platform/environment.
 func clipboardCmd() *exec.Cmd {
-	switch {
-	case runtime.GOOS == "darwin":
-		return exec.Command("pbcopy") //nolint:gosec
-	case os.Getenv("WAYLAND_DISPLAY") != "":
-		if _, err := exec.LookPath("wl-copy"); err == nil {
-			return exec.Command("wl-copy") //nolint:gosec
+	argv := clipboardCmdFor(runtime.GOOS,
+		os.Getenv("WAYLAND_DISPLAY"), os.Getenv("DISPLAY"), exec.LookPath)
+	if argv == nil {
+		return nil
+	}
+	return exec.Command(argv[0], argv[1:]...) //nolint:gosec
+}
+
+// clipboardCmdFor returns the argv of the clipboard tool to use for the given
+// platform (goos) and display environment, or nil when none is available.
+// Tool availability is probed through look (exec.LookPath in production) so the
+// selection logic is testable on any platform.
+//
+// Candidates are tried in order until one is actually installed: Wayland
+// (wl-copy), then X11 (xclip, then xsel).  Trying rather than switching matters
+// on GNOME/Wayland without wl-copy, where an X11 tool still works via XWayland.
+func clipboardCmdFor(goos, waylandDisplay, x11Display string, look func(string) (string, error)) []string {
+	if goos == "darwin" {
+		return []string{"pbcopy"}
+	}
+
+	installed := func(name string) bool {
+		_, err := look(name)
+		return err == nil
+	}
+
+	if waylandDisplay != "" && installed("wl-copy") {
+		return []string{"wl-copy"}
+	}
+	if x11Display != "" {
+		if installed("xclip") {
+			return []string{"xclip", "-selection", "clipboard"}
 		}
-	case os.Getenv("DISPLAY") != "":
-		if _, err := exec.LookPath("xclip"); err == nil {
-			return exec.Command("xclip", "-selection", "clipboard") //nolint:gosec
-		}
-		if _, err := exec.LookPath("xsel"); err == nil {
-			return exec.Command("xsel", "--clipboard", "--input") //nolint:gosec
+		if installed("xsel") {
+			return []string{"xsel", "--clipboard", "--input"}
 		}
 	}
 	return nil

@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/skybert/gomacs/internal/dap"
@@ -82,5 +84,35 @@ func TestDapVariableChildrenArePointerStable(t *testing.T) {
 	child.expanded = true
 	if !v.children[0].expanded {
 		t.Error("mutating a child through its pointer should be visible in the tree")
+	}
+}
+
+// TestDapHasBreakpointCanonicalisesPath is a regression test: the breakpoint map
+// is keyed by canonical path, so a caller passing a relative or symlinked path
+// used to get false even though the breakpoint was set.
+func TestDapHasBreakpointCanonicalisesPath(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "prog.txt")
+	if err := os.WriteFile(real, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	noisy := filepath.Join(dir, ".", "prog.txt")
+
+	e := newTestEditor("")
+	e.dapBreakpoints = map[string]map[int]struct{}{
+		canonPath(real): {7: {}},
+	}
+
+	if !e.dapHasBreakpoint(canonPath(real), 7) {
+		t.Error("canonical path should find the breakpoint")
+	}
+	if !e.dapHasBreakpoint(noisy, 7) {
+		t.Error("non-canonical path should also find the breakpoint")
+	}
+	if e.dapHasBreakpoint(noisy, 8) {
+		t.Error("a line without a breakpoint must report false")
+	}
+	if e.dapHasBreakpoint("", 7) {
+		t.Error("an empty filename must report false")
 	}
 }

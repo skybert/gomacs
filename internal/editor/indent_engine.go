@@ -19,8 +19,30 @@ import (
 // pressing Enter deep inside a large file neither copies the whole buffer nor
 // rescans it from line 1.
 func indentCurrentLine(buf *buffer.Buffer, unit string) {
+	if indentNoOpMode(buf.Mode()) {
+		// The mode has no indentation logic at all: leave both the line and
+		// point exactly as they are.
+		return
+	}
 	bol := buf.BeginningOfLine(buf.Point())
 	applyIndentAt(buf, bol, calcIndentAt(buf, buf.Mode(), bol, unit))
+}
+
+// modeConf is the major-mode name of conf-mode.
+const modeConf = "conf"
+
+// indentNoOpMode reports whether the major mode deliberately has no
+// indentation logic.  conf-mode is syntax highlighting only: configuration
+// files carry no block structure to derive an indentation from, and the
+// copy-the-previous-line fallback is actively harmful there — it both invents
+// indentation the user never typed and strips indentation they did.
+func indentNoOpMode(mode string) bool {
+	switch mode {
+	case modeConf:
+		return true
+	default:
+		return false
+	}
 }
 
 // calcIndentAt returns the desired indentation string for the line starting at
@@ -45,6 +67,10 @@ func calcIndentAt(buf *buffer.Buffer, mode string, bol int, unit string) string 
 		return jsonIndentFor(depth, lineTextAt(buf, bol), unit)
 	case "python":
 		return calcIndentPythonAt(buf, bol, unit)
+	case modeConf:
+		// No indentation logic (see indentNoOpMode): the line keeps whatever
+		// indentation it already has, so applyIndentAt is a no-op.
+		return leadingWSStr(lineTextAt(buf, bol))
 	default:
 		// markdown, fundamental, unknown: copy previous line's indentation
 		return calcIndentCopyAt(buf, bol)
@@ -70,6 +96,9 @@ func calcIndent(mode string, lines []string, lineIdx int, unit string) string {
 		return calcIndentBash(lines, lineIdx, unit)
 	case "json":
 		return calcIndentJSON(lines, lineIdx, unit)
+	case modeConf:
+		// No indentation logic (see indentNoOpMode): keep the line as typed.
+		return leadingWSStr(lines[lineIdx])
 	default:
 		// markdown, fundamental, unknown: copy previous line's indentation
 		return calcIndentCopy(lines, lineIdx)

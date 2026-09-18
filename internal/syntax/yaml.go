@@ -19,7 +19,23 @@ var yamlBoolNullValues = map[string]bool{
 // Scanning always begins at the first line so multi-line state is tracked from
 // the top of the file, but it stops as soon as a line begins at or past end.
 func (h YAMLHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h YAMLHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.scan(runes, ScanState{}, start, end, nil)
+}
+
+// HighlightResume implements Resumable.  Every YAML line is coloured on its own
+// — block scalars are not tracked across lines — so a line start is a safe
+// restart point and ScanState.Pos alone describes where the scan is.
+func (h YAMLHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return h.scan(runes, st, st.Pos, end, cp)
+}
+
+func (h YAMLHighlighter) scan(runes []rune, st ScanState, start, end int, cp *Checkpoints) []Span {
 	n := len(runes)
 	var spans []Span
 
@@ -33,8 +49,9 @@ func (h YAMLHighlighter) Highlight(text string, start, end int) []Span {
 	// still uses n so a line beginning just before end is highlighted in full.
 	lineLimit := min(n, end)
 
-	i := 0
+	i := st.Pos
 	for i < lineLimit {
+		cp.mark(ScanState{Pos: i}, len(spans))
 		lineStart := i
 		// Find end of line.
 		for i < n && runes[i] != '\n' {

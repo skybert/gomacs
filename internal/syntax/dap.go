@@ -22,8 +22,14 @@ var (
 	reLocalsLine = regexp.MustCompile(`^(\s*)(▶|▼| )\s+(\S+)(?:\s+(\S+))?\s*=\s*(.*)$`)
 )
 
-func (DapLocalsHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h DapLocalsHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.  The DAP panels are read-only, so
+// they do not implement Resumable: a rescan from the top is never on the
+// keystroke path.
+func (h DapLocalsHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
 	var spans []Span
 	// Each line is independent, so stop as soon as a line starts at or past end.
 	lineLimit := min(len(runes), end)
@@ -116,8 +122,12 @@ var reStackLine = regexp.MustCompile(`^(#\d+)\s+(\S+)\s+\(([^:)]+):(\d+)\)`)
 
 type DapStackHighlighter struct{}
 
-func (DapStackHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h DapStackHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h DapStackHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
 	var spans []Span
 	// Each line is independent, so stop as soon as a line starts at or past end.
 	lineLimit := min(len(runes), end)

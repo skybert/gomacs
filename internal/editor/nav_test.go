@@ -110,6 +110,30 @@ func TestCmdHelp(t *testing.T) {
 	}
 }
 
+// TestCmdHelpRendersEveryConfigVar checks that the grouped listing actually
+// reaches the *Help* buffer: helpConfigVarGroups is only useful if every group
+// title and variable name is rendered with its current value.
+func TestCmdHelpRendersEveryConfigVar(t *testing.T) {
+	e := newTestEditor("")
+	e.lisp = elisp.NewEvaluator()
+	e.cmdHelp()
+	helpBuf := e.FindBuffer("*Help*")
+	if helpBuf == nil {
+		t.Fatal("cmdHelp: no *Help* buffer")
+	}
+	text := helpBuf.String()
+	for _, g := range helpConfigVarGroups {
+		if !strings.Contains(text, g.title) {
+			t.Errorf("*Help* is missing the %q group heading", g.title)
+		}
+		for _, cv := range g.vars {
+			if !strings.Contains(text, cv.name) {
+				t.Errorf("*Help* is missing config variable %q", cv.name)
+			}
+		}
+	}
+}
+
 // TestHelpCommandGroupsCoverAllCommands is the durable guarantee behind the
 // gomacs-spec.md requirement that "all functions and variables are listed
 // and logically grouped in M-x help": every command registered via
@@ -267,6 +291,179 @@ func TestHelpConfigVarsIncludeSaveBufferDeleteTrailingWhitespace(t *testing.T) {
 		}
 	}
 	t.Error("helpConfigVarGroups is missing \"save-buffer-delete-trailing-whitespace\"")
+}
+
+// helpConfigVarNames returns every variable listed in helpConfigVarGroups.
+func helpConfigVarNames() map[string]bool {
+	names := make(map[string]bool)
+	for _, g := range helpConfigVarGroups {
+		for _, cv := range g.vars {
+			names[cv.name] = true
+		}
+	}
+	return names
+}
+
+// TestHelpConfigVarsCoverIndentFamily covers the half of the M-x help listing
+// that TestHelpConfigVarsCoverApplyElispConfig cannot see: modeIndentStr builds
+// its variable name at run time from the buffer's major mode, so no literal
+// GetGlobalVar("…-indent") call exists to scan for. The expected set is derived
+// from the mode table instead, which means a mode added to langModes without a
+// documented indent variable fails here.
+//
+// The check runs in both directions on purpose. A missing entry hides a working
+// knob; a surplus entry advertises one that does nothing, which is how
+// markdown-indent and yaml-indent came to be documented for modes that discard
+// the indent unit entirely. Which modes honour it is not asserted here but
+// measured against the real indentation engine by
+// TestModeIndentUnitAwarenessMatchesIndentEngine in langmode_test.go.
+func TestHelpConfigVarsCoverIndentFamily(t *testing.T) {
+	documented := helpConfigVarNames()
+	for i := range langModes {
+		mode := langModes[i].modeName
+		name := indentVarName(mode)
+		switch {
+		case langModes[i].indentUnitAware && !documented[name]:
+			t.Errorf("%s-mode honours the indent unit but %q is missing from "+
+				"helpConfigVarGroups (M-x help never documents it)", mode, name)
+		case !langModes[i].indentUnitAware && documented[name]:
+			t.Errorf("%q is listed in helpConfigVarGroups but %s-mode ignores the "+
+				"indent unit, so the variable has no effect: remove it or give the "+
+				"mode an indentation engine", name, mode)
+		}
+	}
+}
+
+// TestHelpConfigVarsCoverLspCommandFamily is the same guard for the other
+// dynamically named family, "<mode>-lsp-command" (see applyElispLspCommands).
+// Every mode that ships with a default language server must document how to
+// change it — for java-mode that variable is the only route to a debug adapter,
+// since jdtls is what provides it.
+func TestHelpConfigVarsCoverLspCommandFamily(t *testing.T) {
+	documented := helpConfigVarNames()
+	for i := range langModes {
+		if len(langModes[i].lspCmd) == 0 {
+			continue
+		}
+		name := lspCommandVarName(langModes[i].modeName)
+		if !documented[name] {
+			t.Errorf("%s-mode ships with language server %q but %q is missing from "+
+				"helpConfigVarGroups", langModes[i].modeName, langModes[i].lspCmd[0], name)
+		}
+	}
+}
+
+// TestHelpConfigVarsCoverLspCommandFamilyNamesKnownModes catches a typo'd or
+// stale "<mode>-lsp-command" entry naming a mode that does not exist.
+func TestHelpConfigVarsCoverLspCommandFamilyNamesKnownModes(t *testing.T) {
+	for name := range helpConfigVarNames() {
+		mode, ok := strings.CutSuffix(name, "-lsp-command")
+		if !ok {
+			continue
+		}
+		if langModeByName(mode) == nil {
+			t.Errorf("helpConfigVarGroups lists %q, but %q is not a known major mode", name, mode)
+		}
+	}
+}
+
+// manPagePath is the man page source that "make doc" also renders into
+// doc/gomacs-user-guide.md.
+const manPagePath = "../../doc/gomacs.1.in"
+
+// manVarName spells a configuration variable the way the man page source does:
+// roff needs a literal hyphen escaped as "\-".
+func manVarName(name string) string {
+	return strings.ReplaceAll(name, "-", `\-`)
+}
+
+// TestHelpConfigVarsAreDocumentedInManPage enforces the second of the three
+// places CLAUDE.md requires a configuration variable to appear in: M-x help
+// (helpConfigVarGroups), the man page, and CLAUDE.md.
+func TestHelpConfigVarsAreDocumentedInManPage(t *testing.T) {
+	data, err := os.ReadFile(manPagePath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", manPagePath, err)
+	}
+	man := string(data)
+	var missing []string
+	for name := range helpConfigVarNames() {
+		if !strings.Contains(man, manVarName(name)) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("variables listed by M-x help but absent from %s: %v", manPagePath, missing)
+	}
+}
+
+// TestManPageDocumentsNoUnknownConfigVars is the reverse guard, and the one that
+// catches documentation for features that no longer exist: every variable given
+// its own entry under the man page's "Configurable variables" heading must be a
+// variable gomacs actually reads. screenshot-dir was documented here (and in the
+// generated user guide) with no Go code reading it at all.
+func TestManPageDocumentsNoUnknownConfigVars(t *testing.T) {
+	data, err := os.ReadFile(manPagePath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", manPagePath, err)
+	}
+	src := string(data)
+
+	const heading = ".SS Configurable variables"
+	start := strings.Index(src, heading)
+	if start == -1 {
+		t.Fatalf("%s has no %q section; has it been renamed?", manPagePath, heading)
+	}
+	section := src[start+len(heading):]
+	if end := strings.Index(section, "\n.SS "); end != -1 {
+		section = section[:end]
+	}
+
+	// Each variable is a ".TP" followed by a ".B <name>" line.
+	entryRe := regexp.MustCompile(`(?m)^\.TP\n\.B (\S+)$`)
+	entries := entryRe.FindAllStringSubmatch(section, -1)
+	if len(entries) == 0 {
+		t.Fatalf("found no .TP/.B entries under %q; parsing is likely broken", heading)
+	}
+
+	documented := helpConfigVarNames()
+	var unknown []string
+	for _, m := range entries {
+		name := strings.ReplaceAll(m[1], `\-`, "-")
+		if !documented[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		t.Errorf("%s documents these variables, but nothing in helpConfigVarGroups "+
+			"claims gomacs reads them — either wire them up or delete the "+
+			"documentation: %v", manPagePath, unknown)
+	}
+}
+
+// TestNoScreenshotDirDocumentation nails down the specific stale entry removed
+// here: no user-facing document may mention screenshot-dir while no Go code reads
+// it and no screenshot command is registered.  The generated user guide is
+// checked too, so forgetting "make doc" after editing the man page fails here.
+// CLAUDE.md is deliberately not checked: developer notes may name a variable in
+// order to explain that it does not exist.
+func TestNoScreenshotDirDocumentation(t *testing.T) {
+	if _, registered := commands["screenshot"]; registered {
+		t.Skip("a screenshot command exists again; screenshot-dir may be documented")
+	}
+	for _, path := range []string{manPagePath, "../../doc/gomacs-user-guide.md"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		text := strings.ReplaceAll(string(data), `\-`, "-")
+		if strings.Contains(text, "screenshot-dir") {
+			t.Errorf("%s documents screenshot-dir, but no code reads it and there is "+
+				"no screenshot command", path)
+		}
+	}
 }
 
 // containsStr is a helper used by nav tests.

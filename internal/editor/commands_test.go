@@ -834,11 +834,40 @@ func TestLastSexp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFilePathCompletionsReturnsEntries(t *testing.T) {
-	// Use /tmp which should always exist and have entries.
-	results := filePathCompletions("/tmp/")
-	// We can't assert exact entries, but there should be some results or at
-	// least no panic.
-	_ = results
+	// Completing a directory must list the files it contains.  Use a temporary
+	// directory with known contents rather than /tmp, whose contents are
+	// unknowable.
+	dir := t.TempDir()
+	for _, name := range []string{"alpha.txt", "beta.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	results := filePathCompletions(dir + "/")
+	if len(results) != 3 {
+		t.Fatalf("filePathCompletions(%q) = %v, want 3 entries", dir+"/", results)
+	}
+	want := map[string]bool{
+		filepath.Join(dir, "alpha.txt"): false,
+		filepath.Join(dir, "beta.txt"):  false,
+		filepath.Join(dir, "sub") + "/": false, // directories get a trailing /
+	}
+	for _, r := range results {
+		if _, ok := want[r]; !ok {
+			t.Errorf("unexpected completion %q; want one of %v", r, want)
+			continue
+		}
+		want[r] = true
+	}
+	for entry, seen := range want {
+		if !seen {
+			t.Errorf("completion %q missing from %v", entry, results)
+		}
+	}
 }
 
 func TestFilePathCompletionsFiltersByPrefix(t *testing.T) {
@@ -2700,24 +2729,70 @@ func TestCmdSelfInsertClearsArg(t *testing.T) {
 // cmdIndentOrComplete
 // ---------------------------------------------------------------------------
 
-func TestCmdIndentOrCompleteGoModeDoesNotPanic(t *testing.T) {
+// cmdIndentOrComplete is the Tab entry point and the only end-to-end path
+// through <mode>-indent, so these tests assert the resulting line text, not
+// merely the absence of a panic.
+
+func TestCmdIndentOrCompleteGoModeDedentsTopLevel(t *testing.T) {
 	e := newTestEditor("\tfoo()\n")
 	e.lisp = elisp.NewEvaluator()
 	buf(e).SetMode("go")
 	buf(e).SetPoint(0)
-	// Must not panic; just verify the call completes cleanly.
 	e.cmdIndentOrComplete()
-	_ = buf(e).String()
+	// A top-level Go statement wants no indentation, so the stray tab goes.
+	if got := buf(e).String(); got != "foo()\n" {
+		t.Errorf("Tab on a wrongly indented top-level Go line: got %q, want %q", got, "foo()\n")
+	}
+}
+
+func TestCmdIndentOrCompleteGoModeIndentsInsideBlock(t *testing.T) {
+	e := newTestEditor("func foo() {\nx := 1\n}\n")
+	e.lisp = elisp.NewEvaluator()
+	buf(e).SetMode("go")
+	buf(e).SetPoint(len("func foo() {\n"))
+	e.cmdIndentOrComplete()
+	if got := buf(e).String(); got != "func foo() {\n\tx := 1\n}\n" {
+		t.Errorf("Tab inside a Go block: got %q, want a leading tab on line 2", got)
+	}
+}
+
+// TestCmdIndentOrCompleteGoIndentConfig exercises the go-indent Elisp variable
+// end to end: Tab must use the configured unit instead of the default tab.
+func TestCmdIndentOrCompleteGoIndentConfig(t *testing.T) {
+	e := newTestEditor("func foo() {\nx := 1\n}\n")
+	e.lisp = elisp.NewEvaluator()
+	if _, err := e.lisp.EvalString(`(setq go-indent 2)`); err != nil {
+		t.Fatalf("EvalString: %v", err)
+	}
+	buf(e).SetMode("go")
+	buf(e).SetPoint(len("func foo() {\n"))
+	e.cmdIndentOrComplete()
+	if got := buf(e).String(); got != "func foo() {\n  x := 1\n}\n" {
+		t.Errorf("Tab with (setq go-indent 2): got %q, want two spaces of indent", got)
+	}
 }
 
 func TestCmdIndentOrCompleteElispMode(t *testing.T) {
-	e := newTestEditor("(+ 1 2)\n")
+	e := newTestEditor("(defun f ()\n(+ 1 2))\n")
+	e.lisp = elisp.NewEvaluator()
+	buf(e).SetMode("elisp")
+	buf(e).SetPoint(len("(defun f ()\n"))
+	e.cmdIndentOrComplete()
+	// The body of a defun is indented two columns.
+	if got := buf(e).String(); got != "(defun f ()\n  (+ 1 2))\n" {
+		t.Errorf("Tab inside a defun: got %q, want the body indented by 2", got)
+	}
+}
+
+func TestCmdIndentOrCompleteElispModeTopLevel(t *testing.T) {
+	e := newTestEditor("  (+ 1 2)\n")
 	e.lisp = elisp.NewEvaluator()
 	buf(e).SetMode("elisp")
 	buf(e).SetPoint(0)
-	// Must not panic.
 	e.cmdIndentOrComplete()
-	_ = buf(e).String()
+	if got := buf(e).String(); got != "(+ 1 2)\n" {
+		t.Errorf("Tab on a top-level Elisp form: got %q, want %q", got, "(+ 1 2)\n")
+	}
 }
 
 func TestCmdIndentOrCompleteFundamentalMode(t *testing.T) {
@@ -2725,7 +2800,21 @@ func TestCmdIndentOrCompleteFundamentalMode(t *testing.T) {
 	e.lisp = elisp.NewEvaluator()
 	buf(e).SetPoint(0)
 	e.cmdIndentOrComplete()
-	_ = buf(e).String()
+	// Fundamental mode copies the previous line's indentation; there is no
+	// previous line, so the text is left exactly as it was.
+	if got := buf(e).String(); got != "hello\n" {
+		t.Errorf("Tab in fundamental mode on the first line: got %q, want %q", got, "hello\n")
+	}
+}
+
+func TestCmdIndentOrCompleteFundamentalModeCopiesPreviousIndent(t *testing.T) {
+	e := newTestEditor("    first\nsecond\n")
+	e.lisp = elisp.NewEvaluator()
+	buf(e).SetPoint(len("    first\n"))
+	e.cmdIndentOrComplete()
+	if got := buf(e).String(); got != "    first\n    second\n" {
+		t.Errorf("Tab in fundamental mode: got %q, want the previous line's indent copied", got)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2924,10 +3013,20 @@ func TestCmdRedo_NoHistory(t *testing.T) {
 func TestCmdRedo_AfterUndo(t *testing.T) {
 	e := newElispTestEditor("")
 	e.selfInsert('A')
+	if got := e.ActiveBuffer().String(); got != "A" {
+		t.Fatalf("after self-insert: buffer = %q, want %q", got, "A")
+	}
 	e.cmdUndo()
+	if got := e.ActiveBuffer().String(); got != "" {
+		t.Fatalf("after undo: buffer = %q, want empty", got)
+	}
 	e.cmdRedo()
-	// Redo should not panic and the buffer is in a defined state.
-	_ = e.ActiveBuffer().String()
+	if got := e.ActiveBuffer().String(); got != "A" {
+		t.Errorf("after redo: buffer = %q, want %q (the undone insert restored)", got, "A")
+	}
+	if got := e.ActiveBuffer().Point(); got != 1 {
+		t.Errorf("after redo: point = %d, want 1 (past the restored rune)", got)
+	}
 }
 
 // ---------------------------------------------------------------------------

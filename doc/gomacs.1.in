@@ -290,7 +290,10 @@ C\-c d q	Exit the debug session (debug\-exit)
 While a debug session is active, \fBn\fR, \fBi\fR, \fBo\fR, \fBc\fR, \fBe\fR
 and \fBq\fR also work as single\-letter shortcuts (without the
 .B C\-c d
-prefix) when the active buffer is a source file.
+prefix) when the active buffer is a source file.  To make that unambiguous,
+every source buffer is read\-only for the duration of the session, including
+files opened after it started; each buffer's original state is restored by
+.BR debug\-exit .
 .B debug\-start
 inspects the current context (test file, main program, or server) to
 decide how to launch the program.  Breakpoints are shown in a gutter
@@ -298,6 +301,17 @@ in the left margin of the source buffer; while stopped, the
 \fB*Debug Locals*\fR, \fB*Debug Stack*\fR and \fB*Debug REPL*\fR
 buffers show local variables, the call stack, and an evaluation
 prompt.
+.PP
+Go buffers are debugged with
+.BR dlv ,
+which must be on
+.BR PATH .
+Java buffers are debugged through the running jdtls language server, which
+must have been started with the java\-debug plugin; see
+.B java\-lsp\-command
+under
+.B CONFIGURATION
+below.
 .SS Spell Checking
 .TS
 l l.
@@ -383,6 +397,18 @@ to restore case\-sensitive search.
 Default: t.
 Example: \fB(setq isearch\-case\-insensitive nil)\fR
 .TP
+.B auto\-revert
+When non\-nil (the default), an unmodified buffer is reloaded when its file
+changes on disk.
+Default: t.
+Example: \fB(setq auto\-revert nil)\fR
+.TP
+.B subword\-mode
+When non\-nil (the default), word motion stops at the sub\-words of a
+CamelCase identifier.
+Default: t.
+Example: \fB(setq subword\-mode nil)\fR
+.TP
 .B go\-indent
 Per\-level indentation string for Go buffers.
 An integer is expanded to that many spaces; a string is used verbatim.
@@ -409,20 +435,38 @@ Per\-level indentation string for JSON buffers.
 Default: two spaces.
 Example: \fB(setq json\-indent 4)\fR
 .TP
-.B yaml\-indent
-Per\-level indentation string for YAML buffers.
-Default: two spaces.
-Example: \fB(setq yaml\-indent 2)\fR
-.TP
-.B markdown\-indent
-Per\-level indentation string for Markdown buffers.
-Default: two spaces.
-Example: \fB(setq markdown\-indent 4)\fR
-.TP
 .B perl\-indent
 Per\-level indentation string for Perl buffers.
 Default: two spaces.
 Example: \fB(setq perl\-indent 4)\fR
+.PP
+Go, Python, Bash, Java, JSON and Perl are the modes with an indentation engine
+of their own, and so the only ones with a per\-level indent unit to configure.
+Every other mode (Markdown, YAML, Makefile, Gherkin, Text, Fundamental) indents
+a new line to match the previous one, and Emacs Lisp indents relative to the
+enclosing form; none of them takes an indent unit.
+.TP
+.B go\-lsp\-command
+Command, with optional arguments, that starts the language server for Go
+buffers.  Set to the empty string to disable the server.
+Default: "gopls".
+Example: \fB(setq go\-lsp\-command "gopls \-remote=auto")\fR
+.TP
+.B java\-lsp\-command
+Command, with optional arguments, that starts the language server for Java
+buffers.  This is also how
+.B debug\-start
+reaches the Java debug adapter, which jdtls provides through the java\-debug
+plugin, so point this at a jdtls launcher started with that plugin in its
+initializationOptions.bundles.
+Set to the empty string to disable the server.
+Default: "jdtls".
+Example: \fB(setq java\-lsp\-command "jdtls \-data /tmp/jdtls\-ws")\fR
+.PP
+The same
+.B <mode>\-lsp\-command
+pattern works for every major mode, so a mode that ships without a language
+server can be given one, for example \fB(setq python\-lsp\-command "pylsp")\fR.
 .TP
 .B save\-buffer\-delete\-trailing\-whitespace
 When non\-nil (the default), trailing whitespace is deleted automatically
@@ -431,6 +475,12 @@ when a buffer is saved.  Set to
 to disable.
 Default: t.
 Example: \fB(setq save\-buffer\-delete\-trailing\-whitespace nil)\fR
+.TP
+.B delete\-trailing\-whitespace
+Shorter alias of
+.BR save\-buffer\-delete\-trailing\-whitespace .
+Default: t.
+Example: \fB(setq delete\-trailing\-whitespace nil)\fR
 .TP
 .B visual\-lines
 When non\-nil (the default), lines longer than 80 characters wrap visually;
@@ -451,18 +501,16 @@ Language code passed to aspell (e.g. "en", "de", "fr").
 Default: "en".
 Example: \fB(setq spell\-language "de")\fR
 .TP
-.B lsp\-completion\-min\-chars
-Minimum number of characters typed before LSP auto\-completion is triggered.
-Default: 1.
-Example: \fB(setq lsp\-completion\-min\-chars 3)\fR
+.B completion\-menu\-trigger\-chars
+Minimum number of characters typed before the auto\-completion menu appears.
+Default: 3.
+Example: \fB(setq completion\-menu\-trigger\-chars 1)\fR
 .TP
-.B screenshot\-dir
-Directory where
-.B M\-x screenshot
-saves PNG files.
-If not set, files are saved to the working directory from which gomacs was started.
-The directory is created if it does not exist.
-Example: \fB(setq screenshot\-dir "~/pictures/screenshots")\fR
+.B lsp\-completion\-min\-chars
+Deprecated alias of
+.BR completion\-menu\-trigger\-chars .
+Default: 3.
+Example: \fB(setq lsp\-completion\-min\-chars 1)\fR
 .TP
 .B debug\-locals\-auto\-expand\-depth
 Number of struct levels to auto\-expand in the
@@ -470,6 +518,13 @@ Number of struct levels to auto\-expand in the
 panel when the debugger stops.
 Default: 1.
 Example: \fB(setq debug\-locals\-auto\-expand\-depth 2)\fR
+.TP
+.B theme
+Name of the colour theme.  See
+.B Themes
+below for the available names and for face overrides.
+Default: "sweet".
+Example: \fB(setq theme 'default)\fR
 .SS Key bindings
 Custom key bindings can be set in the init file using
 .BR global\-set\-key :

@@ -42,7 +42,23 @@ var javaTypes = map[string]bool{
 // the top of the file, but it stops as soon as the next token starts at or
 // past end.
 func (h JavaHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h JavaHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.scan(runes, ScanState{}, start, end, nil)
+}
+
+// HighlightResume implements Resumable.  A /* … */ comment is consumed whole by
+// the token that opens it, so nothing is carried between tokens and the top of
+// the token loop is always a safe restart point.
+func (h JavaHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return h.scan(runes, st, st.Pos, end, cp)
+}
+
+func (h JavaHighlighter) scan(runes []rune, st ScanState, start, end int, cp *Checkpoints) []Span {
 	n := len(runes)
 	var spans []Span
 
@@ -56,8 +72,9 @@ func (h JavaHighlighter) Highlight(text string, start, end int) []Span {
 	// so a token beginning just before end is emitted in full.
 	scanLimit := min(n, end)
 
-	i := 0
+	i := st.Pos
 	for i < scanLimit {
+		cp.mark(ScanState{Pos: i}, len(spans))
 		r := runes[i]
 
 		// Line comment // ...
@@ -74,12 +91,20 @@ func (h JavaHighlighter) Highlight(text string, start, end int) []Span {
 		// Block comment /* ... */
 		if r == '/' && i+1 < n && runes[i+1] == '*' {
 			j := i + 2
+			closed := false
 			for j+1 < n {
 				if runes[j] == '*' && runes[j+1] == '/' {
 					j += 2
+					closed = true
 					break
 				}
 				j++
+			}
+			if !closed {
+				// Unterminated: the comment runs to the end of the text.  The
+				// loop above stops at n-1, which would leave the final rune
+				// unhighlighted.
+				j = n
 			}
 			emit(i, j, FaceComment)
 			i = j

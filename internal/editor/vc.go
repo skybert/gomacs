@@ -57,6 +57,17 @@ func vcDir(buf *buffer.Buffer) string {
 	return dir
 }
 
+// vcDirFor returns the directory a VC command run from buf should look for a
+// backend in. VC output buffers (*vc-status*, *VC Log*, …) have no filename of
+// their own, so the repository root recorded for them is preferred over the
+// process working directory, which is some unrelated repository as often as not.
+func (e *Editor) vcDirFor(buf *buffer.Buffer) string {
+	if root := e.vcLogRoots[buf]; root != "" {
+		return root
+	}
+	return vcDir(buf)
+}
+
 // ---------------------------------------------------------------------------
 // gitBackend
 // ---------------------------------------------------------------------------
@@ -148,7 +159,9 @@ func (gitBackend) Unstage(root, filePath string) error {
 	if filePath != "" {
 		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "restore", "--staged", "--", filePath) //nolint:gosec
 	} else {
-		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "restore", "--staged") //nolint:gosec
+		// "git restore --staged" refuses to run without a pathspec, so name the
+		// whole repository explicitly — ":/" is the top level regardless of cwd.
+		cmd = exec.CommandContext(context.Background(), "git", "-C", root, "restore", "--staged", "--", ":/") //nolint:gosec
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -220,7 +233,7 @@ const (
 func (e *Editor) cmdVcPrintLog() {
 	e.clearArg()
 	buf := e.ActiveBuffer()
-	be, root := vcFind(vcDir(buf))
+	be, root := vcFind(e.vcDirFor(buf))
 	if be == nil {
 		e.Message("vc-print-log: not in a version control repository")
 		return
@@ -259,7 +272,7 @@ func (e *Editor) cmdVcDiff() {
 // cmdVcStatus runs the VCS status command (C-x v s).
 func (e *Editor) cmdVcStatus() {
 	e.clearArg()
-	be, root := vcFind(vcDir(e.ActiveBuffer()))
+	be, root := vcFind(e.vcDirFor(e.ActiveBuffer()))
 	if be == nil {
 		e.Message("vc-status: not in a version control repository")
 		return
@@ -275,7 +288,7 @@ func (e *Editor) cmdVcStatus() {
 // cmdVcGrep prompts for a pattern and shows grep results (C-x v G).
 func (e *Editor) cmdVcGrep() {
 	e.clearArg()
-	be, root := vcFind(vcDir(e.ActiveBuffer()))
+	be, root := vcFind(e.vcDirFor(e.ActiveBuffer()))
 	if be == nil {
 		e.Message("vc-grep: not in a version control repository")
 		return
@@ -300,10 +313,17 @@ func (e *Editor) cmdVcGrep() {
 // (C-x p g).
 func (e *Editor) cmdProjectGrep() {
 	e.clearArg()
-	be, root := vcFind(vcDir(e.ActiveBuffer()))
+	// Search from the current buffer's own directory, not the process working
+	// directory; bufferDir also covers dired buffers, which have no filename.
+	dir := strings.TrimSuffix(e.bufferDir(e.ActiveBuffer()), "/")
+	be, root := vcFind(dir)
 	prompt := "Project grep: "
 	if be != nil {
 		prompt = be.Name() + " grep: "
+	} else {
+		// Without a backend the buffer's directory is the project root, so the
+		// hits resolve against the directory that was actually searched.
+		root = dir
 	}
 	e.ReadMinibuffer(prompt, func(pattern string) {
 		if pattern == "" {
@@ -317,11 +337,12 @@ func (e *Editor) cmdProjectGrep() {
 				text = grepNoMatches
 			}
 		} else {
-			// No VC backend — use plain grep.
-			if root == "" {
-				root = "."
-			}
-			out, err := exec.Command("grep", "-R", "-i", "-n", pattern, root).CombinedOutput()
+			// No VC backend — use plain grep. Run it inside root with "." as the
+			// search path so the hits come back root-relative, exactly like the
+			// backends' own grep output.
+			cmd := exec.CommandContext(context.Background(), "grep", "-R", "-i", "-n", pattern, ".")
+			cmd.Dir = root
+			out, err := cmd.CombinedOutput()
 			text = string(out)
 			if err != nil && text == "" {
 				text = grepNoMatches
@@ -423,13 +444,15 @@ func (e *Editor) cmdVcRevert() {
 	diffBuf.SetPoint(0)
 	e.showCompilationWindow(diffBuf)
 
-	// Prompt with the source buffer still active.
-	e.ReadMinibuffer(fmt.Sprintf("Revert %s (discard changes above)? (y/n) ", filepath.Base(filePath)), func(ans string) {
+	// Prompt with the source buffer still active. One keystroke answers it;
+	// anything other than y cancels.
+	e.Message("Revert %s (discard changes shown above)? (y/n)", filepath.Base(filePath))
+	e.readCharPending = true
+	e.readCharCallback = func(r rune) {
 		// Close the diff split we opened.
 		e.removeWindowShowingBuf(diffBuf)
 
-		ans = strings.TrimSpace(strings.ToLower(ans))
-		if ans != "yes" && ans != "y" {
+		if r != 'y' && r != 'Y' {
 			e.Message("Revert cancelled")
 			return
 		}
@@ -450,7 +473,7 @@ func (e *Editor) cmdVcRevert() {
 		buf.SetModified(false)
 		buf.SetPoint(min(pt, buf.Len()))
 		e.Message("Reverted %s", filepath.Base(filePath))
-	})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,7 +1310,11 @@ func (e *Editor) vcGrepDispatch(ke terminal.KeyEvent) bool {
 	if root == "" {
 		return true
 	}
-	abs := filepath.Join(root, relPath)
+	// grep may report absolute paths; only relative ones need the root prefix.
+	abs := relPath
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(root, relPath)
+	}
 	b, loadErr := e.loadFile(abs)
 	if loadErr != nil {
 		e.Message("Cannot open %s: %v", abs, loadErr)

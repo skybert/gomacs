@@ -80,27 +80,32 @@ func TestVcAnnotateHighlighterWithSourceHighlighting(t *testing.T) {
 func TestLangToHighlighter(t *testing.T) {
 	tests := []struct {
 		lang string
-		want bool // true if a non-nil highlighter is expected
+		want Highlighter // nil when no highlighter is expected
 	}{
-		{"go", true},
-		{"python", true},
-		{"java", true},
-		{"bash", true},
-		{"json", true},
-		{"markdown", true},
-		{"elisp", true},
-		{"makefile", true},
-		{"perl", true},
-		{"gherkin", true},
-		{"yaml", true},
-		{"GO", true}, // case-insensitive
-		{"unknown", false},
-		{"", false},
+		{"go", GoHighlighter{}},
+		{"python", PythonHighlighter{}},
+		{"java", JavaHighlighter{}},
+		{"bash", BashHighlighter{}},
+		{"json", JSONHighlighter{}},
+		{"markdown", MarkdownHighlighter{}},
+		{"elisp", ElispHighlighter{}},
+		{"makefile", MakefileHighlighter{}},
+		{"perl", PerlHighlighter{}},
+		{"gherkin", GherkinHighlighter{}},
+		{"yaml", YAMLHighlighter{}},
+		{"conf", ConfHighlighter{}},
+		{"GO", GoHighlighter{}},     // case-insensitive
+		{"Conf", ConfHighlighter{}}, // case-insensitive
+		{"unknown", nil},
+		{"", nil},
+		// text- and fundamental-mode have no highlighter by design.
+		{"text", nil},
+		{"fundamental", nil},
 	}
 	for _, tt := range tests {
 		got := LangToHighlighter(tt.lang)
-		if (got != nil) != tt.want {
-			t.Errorf("LangToHighlighter(%q): got %v, wantNonNil=%v", tt.lang, got, tt.want)
+		if got != tt.want {
+			t.Errorf("LangToHighlighter(%q) = %T(%v), want %T(%v)", tt.lang, got, got, tt.want, tt.want)
 		}
 	}
 }

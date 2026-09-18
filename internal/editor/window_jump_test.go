@@ -274,3 +274,34 @@ func TestRenderWindowJumpOverlays_BadgesEveryWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestCmdWindowJump_MoreWindowsThanLetters checks that when there are more
+// visible windows than home-row letters, the surplus windows are reported rather
+// than silently left unlabelled and unreachable.
+func TestCmdWindowJump_MoreWindowsThanLetters(t *testing.T) {
+	e := newTestEditor("hello")
+	// Build more windows than there are jump keys.  Splitting that many times
+	// is limited by terminal height, so attach them directly.
+	for range len(windowJumpKeys) + 4 {
+		w := window.New(e.ActiveBuffer(), 0, 0, 80, 2)
+		e.windows = append(e.windows, w)
+	}
+
+	e.cmdWindowJump()
+
+	if len(e.windowJumpMap) != len(windowJumpKeys) {
+		t.Errorf("labelled %d windows, want %d (one per key)",
+			len(e.windowJumpMap), len(windowJumpKeys))
+	}
+	if !strings.Contains(e.message, "of") {
+		t.Errorf("message should say how many windows were labelled, got %q", e.message)
+	}
+	// Every label must still map to a distinct real window.
+	seen := make(map[*window.Window]bool)
+	for _, w := range e.windowJumpMap {
+		if seen[w] {
+			t.Error("a window was labelled twice")
+		}
+		seen[w] = true
+	}
+}

@@ -96,6 +96,17 @@ func (e *Editor) cmdDebugStart() {
 		return
 	}
 
+	// A jdtls-style adapter is not a process gomacs spawns but a socket the
+	// language server opens on request, so without a ready connection there is
+	// nothing to ask.  Diagnose that here, where the mode's configured command is
+	// still at hand to name in the message.
+	if info.dapKind == dapAdapterJdtls {
+		if err := jdtlsConnError(e.lspConns[buf.Mode()], info); err != nil {
+			e.Message("debug-start: %v", err)
+			return
+		}
+	}
+
 	launchArgs, runDir, err := e.dapLaunchArgs(buf)
 	if err != nil {
 		e.Message("debug-start: %v", err)
@@ -708,6 +719,13 @@ func (e *Editor) debugSourceDispatch(ke terminal.KeyEvent) bool {
 	if ke.Key != tcell.KeyRune || ke.Mod != 0 {
 		return false
 	}
+	// A source file the user opened mid-session has not been through
+	// debugMarkSourceReadOnly.  Adopt it here, before the key can reach
+	// self-insert, so that even the first keystroke in it drives the debugger
+	// rather than editing a buffer the spec says is read-only while debugging.
+	// (loadFile adopts it at open time; this is the backstop for every other way
+	// a buffer can become the active one.)
+	e.debugAdoptSourceBuffer(e.ActiveBuffer())
 	switch ke.Rune {
 	case 'n':
 		if e.dap.stoppedThread == 0 {

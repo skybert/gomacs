@@ -49,7 +49,24 @@ var perlBuiltins = map[string]bool{
 // the top of the file, but it stops as soon as the next token starts at or
 // past end.
 func (h PerlHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h PerlHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.scan(runes, ScanState{}, start, end, nil)
+}
+
+// HighlightResume implements Resumable.  A POD block is consumed whole by the
+// token that opens it, so nothing is carried between tokens.  The POD rule looks
+// one rune back for a newline, which a resumed scan can still do because it is
+// handed the whole rune slice, not a suffix of it.
+func (h PerlHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return h.scan(runes, st, st.Pos, end, cp)
+}
+
+func (h PerlHighlighter) scan(runes []rune, st ScanState, start, end int, cp *Checkpoints) []Span {
 	n := len(runes)
 	var spans []Span
 
@@ -63,8 +80,9 @@ func (h PerlHighlighter) Highlight(text string, start, end int) []Span {
 	// so a token beginning just before end is emitted in full.
 	scanLimit := min(n, end)
 
-	i := 0
+	i := st.Pos
 	for i < scanLimit {
+		cp.mark(ScanState{Pos: i}, len(spans))
 		r := runes[i]
 
 		// Shebang: #! at position 0

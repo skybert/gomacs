@@ -2,6 +2,7 @@ package editor
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -273,6 +274,12 @@ func lineStartsOf(src string) []int {
 	return starts
 }
 
+// TestCalcIndentAtMatchesSliceEngine is a differential test: it only asserts
+// that the buffer-backed engine agrees with the []string engine.  Because both
+// engines share the underlying counters and *IndentFor helpers for most modes,
+// what it really guards is the line reading and the depth checkpoint cache —
+// not the indent rules, which are pinned by literal expectations in
+// TestCalcIndentAtLiteralPerMode.
 func TestCalcIndentAtMatchesSliceEngine(t *testing.T) {
 	for _, tc := range indentDiffCases {
 		e := newTestEditor(tc.src)
@@ -334,7 +341,10 @@ func TestCalcIndentAtColdCache(t *testing.T) {
 // TestCalcIndentAtAfterEditAbove is the invalidation test: an extra opening
 // brace inserted near the top of the buffer must deepen the indentation of a
 // line far below, i.e. the checkpoints taken before the edit must not be
-// reused.
+// reused.  Both the before and the after indentation are absolute
+// expectations, so a uniformly off-by-one engine cannot pass by keeping the
+// difference right (cf. TestElispIndentLevelAtAfterEditAbove in
+// indent_test.go).
 func TestCalcIndentAtAfterEditAbove(t *testing.T) {
 	src := benchGoSource(40)
 	e := newTestEditor(src)
@@ -342,16 +352,75 @@ func TestCalcIndentAtAfterEditAbove(t *testing.T) {
 	b.SetMode("go")
 
 	starts := lineStartsOf(src)
-	deep := starts[len(starts)-3]
+	deep := starts[len(starts)-3] // the final "}" of the last function
 	before := calcIndentAt(b, "go", deep, "\t")
+	if before != "" {
+		t.Fatalf("a top-level closing brace should want no indent, got %q", before)
+	}
 
 	// Insert an unclosed brace on the first line, far above `deep`.
 	b.InsertString(len("package main"), " {")
 	after := calcIndentAt(b, "go", deep+2, "\t")
 
-	if after != before+"\t" {
-		t.Errorf("after inserting an opening brace above: got %q, want %q",
-			after, before+"\t")
+	if after != "\t" {
+		t.Errorf("after inserting an opening brace above: got %q, want %q", after, "\t")
+	}
+}
+
+// TestCalcIndentAtLiteralPerMode gives the buffer-backed engine absolute
+// expectations for each mode's indent rules.
+//
+// It complements TestCalcIndentAtMatchesSliceEngine and friends, which only
+// assert that calcIndentAt agrees with calcIndent.  For most modes the two
+// share the underlying decision helpers (the counters and *IndentFor), so the
+// differential tests really exercise the line splitting and the depth
+// checkpoint cache rather than the indent rules themselves; a wrong rule is
+// wrong identically on both sides and the comparison still passes.  The cases
+// below pin the rules.
+func TestCalcIndentAtLiteralPerMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		unit string
+		src  string
+		line int // index into strings.Split(src, "\n")
+		want string
+	}{
+		{"go after open brace", "go", "\t", "func foo() {\n\n}\n", 1, "\t"},
+		{"go closing brace dedents", "go", "\t", "func foo() {\n\tx := 1\n}\n", 2, ""},
+		{"go brace in comment ignored", "go", "\t", "// func foo() {\n\n", 1, ""},
+		{"go brace in string ignored", "go", "\t", "s := \"{\"\n\n", 1, ""},
+		{"go nested two levels", "go", "\t", "func foo() {\n\tif true {\n\n", 2, "\t\t"},
+		{"java four-space unit", "java", "    ", "public class Foo {\n\n}\n", 1, "    "},
+		{"perl hash comment ignored", "perl", "  ", "sub f {\n\tmy $x = 1; # {\n\n", 2, "  "},
+		{"bash after then", "bash", "  ", "if true; then\n\n", 1, "  "},
+		{"bash fi dedents", "bash", "  ", "if true; then\n  echo hi\nfi\n", 2, ""},
+		{"bash comment line ignored", "bash", "  ", "# if true; then\n\n", 1, ""},
+		{"json after open brace", "json", "  ", "{\n\n}\n", 1, "  "},
+		{"json closing square dedents", "json", "  ", "{\n  \"a\": [\n    1\n  ]\n}\n", 3, "  "},
+		{"python after colon", "python", "    ", "def foo():\n\n", 1, "    "},
+		{"python else dedents", "python", "    ", "if x:\n    pass\nelse:\n", 2, ""},
+		{"markdown copies previous indent", "markdown", "  ", "  - item\n\n", 1, "  "},
+		{"fundamental copies previous indent", "fundamental", "  ", "    text\n\n", 1, "    "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEditor(tc.src)
+			b := buf(e)
+			b.SetMode(tc.mode)
+			starts := lineStartsOf(tc.src)
+			got := calcIndentAt(b, tc.mode, starts[tc.line], tc.unit)
+			if got != tc.want {
+				t.Errorf("calcIndentAt(%s, line %d of %q) = %q, want %q",
+					tc.mode, tc.line, tc.src, got, tc.want)
+			}
+			// The []string engine must agree with the literal too.
+			lines := strings.Split(tc.src, "\n")
+			if got := calcIndent(tc.mode, lines, tc.line, tc.unit); got != tc.want {
+				t.Errorf("calcIndent(%s, line %d of %q) = %q, want %q",
+					tc.mode, tc.line, tc.src, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -587,34 +656,91 @@ func TestTrimSpaceRunes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// rune-slice counters must agree with their string counterparts
+// the line counters, pinned to literal expectations
 // ---------------------------------------------------------------------------
 
-func TestRuneCountersMatchStringCounters(t *testing.T) {
-	lines := []string{
-		"", "{", "}", "func f() {", "s := \"{\"", "c := '}'", "raw := `{}`",
-		"x := 1 // {", "x = 1  # {", "if [ -f x ]; then", "  done", "esac",
-		"# then", "\tfi ", "} else {", `"key": [`, `"a": "} ]"`, "]}",
-		"nøn-ascii { øø }", "  \t  ", "don't { count '", "then",
-		`c := '\\' {`, `s := "\\" }`,
+// TestLineCountersLiteral pins every counter used by the indent engines against
+// hard-coded results for a set of awkward lines: braces inside strings, chars,
+// raw strings and comments, an apostrophe that opens a "char literal", non-ASCII
+// text, and closers with no opener.
+//
+// It replaces TestRuneCountersMatchStringCounters, which compared
+// netBraceCountRunes(runes, p) with netBraceCount(l, p).  That could not fail
+// for any implementation whatsoever, because netBraceCount is defined as
+// `return netBraceCountRunes([]rune(line), prefix)` (likewise bashNetIndent and
+// netBraceCountJSON) -- including an implementation returning a constant.  The
+// rune/string agreement it meant to check is still covered, since both entry
+// points are asserted against the same literal below.
+//
+// The TestNetBraceCount_* family covers netBraceCount alone, and only for the
+// "//" and "#" prefixes; the awkward lines here are additionally run through
+// the empty prefix, bashNetIndent and netBraceCountJSON.
+func TestLineCountersLiteral(t *testing.T) {
+	tests := []struct {
+		line  string
+		slash int // netBraceCount(line, "//")
+		hash  int // netBraceCount(line, "#")
+		none  int // netBraceCount(line, "")
+		bash  int // bashNetIndent(line)
+		json  int // netBraceCountJSON(line)
+	}{
+		{"", 0, 0, 0, 0, 0},
+		{"{", 1, 1, 1, 1, 1},
+		{"}", -1, -1, -1, -1, -1},
+		{"func f() {", 1, 1, 1, 1, 1},
+		{"s := \"{\"", 0, 0, 0, 0, 0},
+		// The JSON counter has no notion of single-quoted text (JSON has no
+		// char literals), so the '}' counts there but nowhere else.
+		{"c := '}'", 0, 0, 0, 0, -1},
+		{"raw := `{}`", 0, 0, 0, 0, 0},
+		{"x := 1 // {", 0, 1, 1, 1, 1},
+		// bashNetIndent only honours a whole-line '#' comment, so the brace
+		// after a trailing '#' still counts (a known limitation, pinned here).
+		{"x = 1  # {", 1, 0, 1, 1, 1},
+		{"if [ -f x ]; then", 0, 0, 0, 1, 0},
+		{"  done", 0, 0, 0, -1, 0},
+		{"esac", 0, 0, 0, -1, 0},
+		{"# then", 0, 0, 0, 0, 0},
+		{"\tfi ", 0, 0, 0, -1, 0},
+		{"} else {", 0, 0, 0, 0, 0},
+		{`"key": [`, 0, 0, 0, 0, 1},
+		{`"a": "} ]"`, 0, 0, 0, 0, 0},
+		// bashNetIndent only dedents on a closer that *starts* the line.
+		{"]}", -1, -1, -1, 0, -2},
+		{"nøn-ascii { øø }", 0, 0, 0, 0, 0},
+		{"  \t  ", 0, 0, 0, 0, 0},
+		// The apostrophe of "don't" opens a char literal for the Go/Perl
+		// scanner, hiding the brace; the JSON scanner still sees it.
+		{"don't { count '", 0, 0, 0, 0, 1},
+		{"then", 0, 0, 0, 1, 0},
+		{`c := '\\' {`, 1, 1, 1, 1, 1},
+		{`s := "\\" }`, -1, -1, -1, 0, -1},
 	}
-	for _, l := range lines {
-		runes := []rune(l)
-		if got, want := netBraceCountRunes(runes, "//"), netBraceCount(l, "//"); got != want {
-			t.Errorf("netBraceCountRunes(%q, //) = %d, want %d", l, got, want)
-		}
-		if got, want := netBraceCountRunes(runes, "#"), netBraceCount(l, "#"); got != want {
-			t.Errorf("netBraceCountRunes(%q, #) = %d, want %d", l, got, want)
-		}
-		if got, want := netBraceCountRunes(runes, ""), netBraceCount(l, ""); got != want {
-			t.Errorf("netBraceCountRunes(%q, empty) = %d, want %d", l, got, want)
-		}
-		if got, want := bashNetIndentRunes(runes), bashNetIndent(l); got != want {
-			t.Errorf("bashNetIndentRunes(%q) = %d, want %d", l, got, want)
-		}
-		if got, want := netBraceCountJSONRunes(runes), netBraceCountJSON(l); got != want {
-			t.Errorf("netBraceCountJSONRunes(%q) = %d, want %d", l, got, want)
-		}
+	for _, tc := range tests {
+		t.Run(strconv.Quote(tc.line), func(t *testing.T) {
+			runes := []rune(tc.line)
+			checks := []struct {
+				what string
+				got  int
+				want int
+			}{
+				{`netBraceCount(line, "//")`, netBraceCount(tc.line, "//"), tc.slash},
+				{`netBraceCountRunes(runes, "//")`, netBraceCountRunes(runes, "//"), tc.slash},
+				{`netBraceCount(line, "#")`, netBraceCount(tc.line, "#"), tc.hash},
+				{`netBraceCountRunes(runes, "#")`, netBraceCountRunes(runes, "#"), tc.hash},
+				{`netBraceCount(line, "")`, netBraceCount(tc.line, ""), tc.none},
+				{`netBraceCountRunes(runes, "")`, netBraceCountRunes(runes, ""), tc.none},
+				{"bashNetIndent(line)", bashNetIndent(tc.line), tc.bash},
+				{"bashNetIndentRunes(runes)", bashNetIndentRunes(runes), tc.bash},
+				{"netBraceCountJSON(line)", netBraceCountJSON(tc.line), tc.json},
+				{"netBraceCountJSONRunes(runes)", netBraceCountJSONRunes(runes), tc.json},
+			}
+			for _, c := range checks {
+				if c.got != c.want {
+					t.Errorf("%s on %q = %d, want %d", c.what, tc.line, c.got, c.want)
+				}
+			}
+		})
 	}
 }
 
@@ -824,11 +950,11 @@ func TestCalcIndentBraced_NestedTwoLevels(t *testing.T) {
 }
 
 func TestCalcIndentBraced_NegativeDepthClamped(t *testing.T) {
-	// A stray } at top level must not produce negative depth.
+	// A stray } at top level must not produce negative depth: the line below
+	// it is indented at column 0, not at some negative-repeat nonsense.
 	lines := []string{"}", ""}
-	got := calcIndentBraced(lines, 1, "\t", "//")
-	if strings.Contains(got, "-") {
-		t.Errorf("depth must not go negative, got %q", got)
+	if got := calcIndentBraced(lines, 1, "\t", "//"); got != "" {
+		t.Errorf("depth must clamp at 0: want \"\", got %q", got)
 	}
 }
 
@@ -1037,21 +1163,20 @@ func TestCalcIndentBash_ElseDedents(t *testing.T) {
 }
 
 func TestCalcIndentBash_NegativeDepthClamped(t *testing.T) {
+	// A stray fi at top level must not produce negative depth: the next line
+	// sits at column 0.
 	lines := []string{"fi", ""}
-	got := calcIndentBash(lines, 1, "  ")
-	if strings.Contains(got, "-") {
-		t.Errorf("depth must not go negative, got %q", got)
+	if got := calcIndentBash(lines, 1, "  "); got != "" {
+		t.Errorf("depth must clamp at 0: want \"\", got %q", got)
 	}
 }
 
 func TestCalcIndentBash_CaseEsac(t *testing.T) {
-	// case opens via "do" equivalent — but actually case doesn't use then/do.
-	// Verify esac at depth 0 stays at 0.
+	// esac is a closer, so an esac at depth 0 keeps the next line at column 0
+	// rather than dropping below it.
 	lines := []string{"esac", ""}
-	got := calcIndentBash(lines, 1, "  ")
-	// Should not panic and depth should be >= 0.
-	if strings.Contains(got, "-") {
-		t.Errorf("depth must not go negative after esac, got %q", got)
+	if got := calcIndentBash(lines, 1, "  "); got != "" {
+		t.Errorf("esac at depth 0: want \"\", got %q", got)
 	}
 }
 
@@ -1270,6 +1395,79 @@ func TestIndentCurrentLine_Idempotent(t *testing.T) {
 	gen2 := b.ChangeGen()
 	if gen1 != gen2 {
 		t.Errorf("indentCurrentLine should be idempotent: changeGen %d → %d", gen1, gen2)
+	}
+}
+
+// ============================================================================
+// conf-mode — no indentation logic (doc/gomacs-spec.md "conf-mode")
+// ============================================================================
+
+// TestIndentCurrentLine_ConfPreservesIndent checks that Tab in a conf buffer
+// neither invents indentation from the previous line nor strips indentation the
+// user typed, and that it leaves point where it was.
+func TestIndentCurrentLine_ConfPreservesIndent(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		// pt is the point placed before the Tab press.
+		pt int
+	}{
+		// The previous line is indented: Tab must not copy that indentation.
+		{name: "no indent added", src: "    indented = 1\nkey = 2\n", pt: 17},
+		// The previous line is flush left: Tab must not strip the indentation.
+		{name: "no indent removed", src: "key = 2\n    indented = 1\n", pt: 12},
+		// Nothing above at all.
+		{name: "first line", src: "    key = 1\n", pt: 4},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b := buffer.NewWithContent("*test*", tc.src)
+			b.SetMode(modeConf)
+			b.SetPoint(tc.pt)
+			gen := b.ChangeGen()
+			indentCurrentLine(b, "  ")
+			if got := b.String(); got != tc.src {
+				t.Errorf("conf-mode Tab changed the buffer: %q → %q", tc.src, got)
+			}
+			if b.ChangeGen() != gen {
+				t.Errorf("conf-mode Tab bumped ChangeGen %d → %d", gen, b.ChangeGen())
+			}
+			if b.Point() != tc.pt {
+				t.Errorf("conf-mode Tab moved point %d → %d", tc.pt, b.Point())
+			}
+		})
+	}
+}
+
+// TestCalcIndent_ConfMode checks both calc entry points return the line's own
+// indentation for conf-mode, so applying the result is always a no-op.
+func TestCalcIndent_ConfMode(t *testing.T) {
+	lines := []string{"    indented = 1", "key = 2"}
+	if got := calcIndent(modeConf, lines, 1, "  "); got != "" {
+		t.Errorf("calcIndent conf: want %q, got %q", "", got)
+	}
+	if got := calcIndent(modeConf, lines, 0, "  "); got != "    " {
+		t.Errorf("calcIndent conf: want %q, got %q", "    ", got)
+	}
+
+	src := strings.Join(lines, "\n") + "\n"
+	b := buffer.NewWithContent("*test*", src)
+	if got := calcIndentAt(b, modeConf, 0, "  "); got != "    " {
+		t.Errorf("calcIndentAt conf line 0: want %q, got %q", "    ", got)
+	}
+	if got := calcIndentAt(b, modeConf, 17, "  "); got != "" {
+		t.Errorf("calcIndentAt conf line 1: want %q, got %q", "", got)
+	}
+}
+
+func TestIndentNoOpMode(t *testing.T) {
+	if !indentNoOpMode(modeConf) {
+		t.Error("conf-mode should have no indentation logic")
+	}
+	for _, mode := range []string{"go", "java", "python", "bash", "perl", "json", "markdown", "yaml", "fundamental"} {
+		if indentNoOpMode(mode) {
+			t.Errorf("%s-mode should keep its indentation behaviour", mode)
+		}
 	}
 }
 

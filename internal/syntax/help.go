@@ -11,8 +11,14 @@ package syntax
 //   - key-binding text (…)               → FaceString
 type HelpHighlighter struct{}
 
-func (HelpHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h HelpHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.  HelpHighlighter does not implement
+// Resumable: whether a heading is top-level depends on the next non-empty line,
+// so it looks ahead as well as behind and cannot restart from a single offset.
+func (h HelpHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
 	n := len(runes)
 	end = min(end, n)
 

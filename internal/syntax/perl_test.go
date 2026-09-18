@@ -1,252 +1,154 @@
 package syntax
 
-import "testing"
+import (
+	"testing"
+	"unicode/utf8"
+)
+
+// wantExactSpan asserts that spans contains a span whose rune range exactly
+// covers the first occurrence of substr in text and whose Face is want.
+//
+// It deliberately checks both the offsets and the face: spanCoversText only
+// checks offsets (a keyword painted FaceComment passes) and
+// firstSpanWithFace/findSpanWithFace only check that some span carries the
+// face (a single span covering the whole line passes).  Tests in this file
+// and in python_test.go / bash_test.go / java_test.go use this helper so that
+// both mistakes are caught.
+func wantExactSpan(t *testing.T, spans []Span, text, substr string, want Face) {
+	t.Helper()
+	byteIdx := indexOf(text, substr)
+	if byteIdx < 0 {
+		t.Fatalf("substring %q is not present in %q", substr, text)
+	}
+	start := utf8.RuneCountInString(text[:byteIdx])
+	end := start + utf8.RuneCountInString(substr)
+	for _, sp := range spans {
+		if sp.Start == start && sp.End == end {
+			if sp.Face != want {
+				t.Errorf("span for %q at [%d,%d): face = %+v, want %+v",
+					substr, start, end, sp.Face, want)
+			}
+			return
+		}
+	}
+	t.Errorf("no span exactly covering %q at [%d,%d); got %v", substr, start, end, spans)
+}
+
+func perlSpans(text string) []Span {
+	h := PerlHighlighter{}
+	return h.Highlight(text, 0, len([]rune(text)))
+}
 
 func TestPerlHighlighter_Comment(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "# this is a comment\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	if len(spans) != 1 || spans[0].Face != FaceComment {
-		t.Fatalf("expected 1 FaceComment span, got %v", spans)
+	spans := perlSpans(text)
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d: %v", len(spans), spans)
 	}
+	wantExactSpan(t, spans, text, "# this is a comment", FaceComment)
 }
 
 func TestPerlHighlighter_Shebang(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "#!/usr/bin/perl\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
+	spans := perlSpans(text)
 	if len(spans) != 1 {
 		t.Fatalf("expected 1 span for shebang, got %d: %v", len(spans), spans)
 	}
-	if spans[0].Face != FaceComment {
-		t.Errorf("shebang: expected FaceComment, got %v", spans[0].Face)
-	}
+	wantExactSpan(t, spans, text, "#!/usr/bin/perl", FaceComment)
 }
 
 func TestPerlHighlighter_Keyword(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $x = 1;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var kwSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceKeyword {
-			kwSpan = &spans[i]
-			break
-		}
-	}
-	if kwSpan == nil {
-		t.Error("expected FaceKeyword span for 'my'")
-	}
+	wantExactSpan(t, perlSpans(text), text, "my", FaceKeyword)
 }
 
 func TestPerlHighlighter_DoubleQuotedString(t *testing.T) {
-	h := PerlHighlighter{}
 	text := `print "hello world";` + "\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var strSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceString {
-			strSpan = &spans[i]
-		}
-	}
-	if strSpan == nil {
-		t.Error("expected FaceString for double-quoted string")
-	}
+	wantExactSpan(t, perlSpans(text), text, `"hello world"`, FaceString)
 }
 
 func TestPerlHighlighter_SingleQuotedString(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $s = 'hello';\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var strSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceString {
-			strSpan = &spans[i]
-		}
-	}
-	if strSpan == nil {
-		t.Error("expected FaceString for single-quoted string")
-	}
+	wantExactSpan(t, perlSpans(text), text, "'hello'", FaceString)
 }
 
 func TestPerlHighlighter_Variable(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $name = 'Alice';\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var varSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceType {
-			varSpan = &spans[i]
-		}
-	}
-	if varSpan == nil {
-		t.Error("expected FaceType for scalar variable")
-	}
+	wantExactSpan(t, perlSpans(text), text, "$name", FaceType)
 }
 
 func TestPerlHighlighter_ArrayVariable(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my @items = (1, 2, 3);\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var varSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceType {
-			varSpan = &spans[i]
-		}
-	}
-	if varSpan == nil {
-		t.Error("expected FaceType for array variable")
-	}
+	wantExactSpan(t, perlSpans(text), text, "@items", FaceType)
 }
 
 func TestPerlHighlighter_Number(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $n = 42;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var numSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceNumber {
-			numSpan = &spans[i]
-		}
-	}
-	if numSpan == nil {
-		t.Error("expected FaceNumber for integer literal")
-	}
+	wantExactSpan(t, perlSpans(text), text, "42", FaceNumber)
 }
 
 func TestPerlHighlighter_HexNumber(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $n = 0xFF;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var numSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceNumber {
-			numSpan = &spans[i]
-		}
-	}
-	if numSpan == nil {
-		t.Error("expected FaceNumber for hex literal")
-	}
+	wantExactSpan(t, perlSpans(text), text, "0xFF", FaceNumber)
 }
 
 func TestPerlHighlighter_Builtin(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "print \"hello\\n\";\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var fnSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceFunction {
-			fnSpan = &spans[i]
-		}
-	}
-	if fnSpan == nil {
-		t.Error("expected FaceFunction for builtin 'print'")
-	}
+	spans := perlSpans(text)
+	wantExactSpan(t, spans, text, "print", FaceFunction)
+	wantExactSpan(t, spans, text, "\"hello\\n\"", FaceString)
 }
 
 func TestPerlHighlighter_PODComment(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "code;\n=pod\nThis is POD documentation.\n=cut\nmore code;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var commentSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceComment {
-			commentSpan = &spans[i]
-		}
-	}
-	if commentSpan == nil {
-		t.Error("expected FaceComment for POD block")
+	spans := perlSpans(text)
+	// The whole POD block, =pod through =cut, is one comment span; the code
+	// before and after it is not part of it.
+	wantExactSpan(t, spans, text, "=pod\nThis is POD documentation.\n=cut", FaceComment)
+	if len(spans) != 1 {
+		t.Errorf("expected only the POD span, got %d spans: %v", len(spans), spans)
 	}
 }
 
 func TestPerlHighlighter_BacktickString(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $out = `ls -l`;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var strSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceString {
-			strSpan = &spans[i]
-		}
-	}
-	if strSpan == nil {
-		t.Error("expected FaceString for backtick command string")
-	}
+	wantExactSpan(t, perlSpans(text), text, "`ls -l`", FaceString)
 }
 
 func TestPerlHighlighter_BracedVariable(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "print ${name};\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var varSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceType {
-			varSpan = &spans[i]
-		}
-	}
-	if varSpan == nil {
-		t.Error("expected FaceType for ${...} braced variable")
-	}
+	wantExactSpan(t, perlSpans(text), text, "${name}", FaceType)
 }
 
 func TestPerlHighlighter_PunctuationVariable(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "print $_;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var varSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceType {
-			varSpan = &spans[i]
-		}
-	}
-	if varSpan == nil {
-		t.Error("expected FaceType for $_ punctuation variable")
-	}
+	wantExactSpan(t, perlSpans(text), text, "$_", FaceType)
 }
 
 func TestPerlHighlighter_CaptureVariable(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $first = $1;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
+	spans := perlSpans(text)
+	wantExactSpan(t, spans, text, "$first", FaceType)
+	wantExactSpan(t, spans, text, "$1", FaceType)
 	count := 0
 	for i := range spans {
 		if spans[i].Face == FaceType {
 			count++
 		}
 	}
-	if count < 2 {
-		t.Errorf("expected FaceType for both $first and capture var $1, got %d", count)
+	if count != 2 {
+		t.Errorf("expected exactly 2 FaceType spans ($first and $1), got %d: %v", count, spans)
 	}
 }
 
 func TestPerlHighlighter_OctalNumber(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $n = 0b1010;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var numSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceNumber {
-			numSpan = &spans[i]
-		}
-	}
-	if numSpan == nil {
-		t.Error("expected FaceNumber for binary literal")
-	}
+	wantExactSpan(t, perlSpans(text), text, "0b1010", FaceNumber)
 }
 
 func TestPerlHighlighter_FloatNumber(t *testing.T) {
-	h := PerlHighlighter{}
 	text := "my $pi = 3.14e0;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	var numSpan *Span
-	for i := range spans {
-		if spans[i].Face == FaceNumber {
-			numSpan = &spans[i]
-		}
-	}
-	if numSpan == nil {
-		t.Error("expected FaceNumber for float literal")
-	}
+	wantExactSpan(t, perlSpans(text), text, "3.14e0", FaceNumber)
 }
 
 func TestPerlHighlighter_Empty(t *testing.T) {
@@ -257,13 +159,10 @@ func TestPerlHighlighter_Empty(t *testing.T) {
 }
 
 func TestPerlHighlighter_PlainIdentifier(t *testing.T) {
-	h := PerlHighlighter{}
 	// An identifier that is neither keyword nor builtin produces no span.
 	text := "frobnicate;\n"
-	spans := h.Highlight(text, 0, len([]rune(text)))
-	for _, sp := range spans {
-		if sp.Face == FaceKeyword || sp.Face == FaceFunction {
-			t.Errorf("plain identifier should not be highlighted: %v", sp)
-		}
+	spans := perlSpans(text)
+	if len(spans) != 0 {
+		t.Errorf("plain identifier should not be highlighted, got %v", spans)
 	}
 }

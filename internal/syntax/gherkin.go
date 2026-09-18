@@ -13,8 +13,24 @@ var gherkinKeywordPrefixes = []string{
 	"given ", "when ", "then ", "and ", "but ", "* ",
 }
 
-func (GherkinHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h GherkinHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h GherkinHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.scan(runes, ScanState{}, start, end, nil)
+}
+
+// HighlightResume implements Resumable.  Gherkin's only cross-line state is
+// whether the scan sits inside a docstring, which ScanState.Fence carries; a
+// line start with that flag is a safe restart point.
+func (h GherkinHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return h.scan(runes, st, st.Pos, end, cp)
+}
+
+func (h GherkinHighlighter) scan(runes []rune, st ScanState, start, end int, cp *Checkpoints) []Span {
 	n := len(runes)
 	var spans []Span
 
@@ -29,9 +45,10 @@ func (GherkinHighlighter) Highlight(text string, start, end int) []Span {
 	// The docstring state is still tracked from the first line onwards.
 	lineLimit := min(n, end)
 
-	inDocstring := false
-	i := 0
+	inDocstring := st.Fence
+	i := st.Pos
 	for i < lineLimit {
+		cp.mark(ScanState{Pos: i, Fence: inDocstring}, len(spans))
 		lineStart := i
 		for i < n && runes[i] != '\n' {
 			i++

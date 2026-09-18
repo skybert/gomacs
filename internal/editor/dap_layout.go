@@ -104,6 +104,25 @@ func (e *Editor) debugMarkSourceReadOnly(buf *buffer.Buffer) {
 	buf.SetReadOnly(true)
 }
 
+// debugAdoptSourceBuffer brings a buffer that was opened after the debug session
+// started under the session's read-only rule.  Stepping into a new file goes
+// through debugMarkSourceReadOnly directly (see dapFetchStoppedInfo), but a file
+// the *user* opens mid-session — find-file while stopped at a breakpoint — would
+// otherwise stay writable, and the single-letter shortcuts (n i o c e q) would
+// be typed into the file instead of driving the debugger.
+//
+// Only file-backed buffers are adopted: the debug panels, *Help*, *messages* and
+// the VC commit buffer have no filename and are not source code.  The buffer's
+// original flag is recorded by debugMarkSourceReadOnly, so debugTeardownLayout
+// restores it on debug-exit and a buffer the user could write before the session
+// is writable again after it.  A no-op when no session is active.
+func (e *Editor) debugAdoptSourceBuffer(buf *buffer.Buffer) {
+	if e.dap == nil || buf == nil || buf.Filename() == "" {
+		return
+	}
+	e.debugMarkSourceReadOnly(buf)
+}
+
 // debugTeardownLayout removes the 3 debug panel windows, restores the source
 // window to full-screen, and clears read-only / gutter settings.  Every source
 // buffer the session forced read-only gets its original flag back.

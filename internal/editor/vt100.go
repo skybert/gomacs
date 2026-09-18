@@ -5,27 +5,81 @@ package editor
 // vtScreen maintains a 2-D grid of cells and processes a byte stream of VT100
 // / ANSI escape sequences, updating the grid as though it were a real terminal.
 // Used by the built-in shell buffer (M-x shell).
+//
+// Two representation choices keep a flood of output cheap.  The grid is a slice
+// of row slices, so scrolling rotates row headers and clears one row instead of
+// moving the whole screen.  And a cell stores an interned style id rather than
+// an embedded syntax.Face, which keeps it at 8 bytes; faceAt resolves ids back
+// to faces for rendering.
 
 import (
-	"bytes"
-	"fmt"
-	"strconv"
 	"unicode/utf8"
 
 	"github.com/skybert/gomacs/internal/syntax"
 )
 
-// vtCell is a single character cell on the terminal screen.
-type vtCell struct {
-	ch   rune
-	face syntax.Face
+// vtStyleID indexes a screen's style palette.  vtStyleDefault is always the
+// zero face, so a zero-valued cell needs no further initialisation.
+type vtStyleID uint16
+
+const vtStyleDefault vtStyleID = 0
+
+// vtStylePalette interns syntax.Face values so that a grid cell needs only a
+// 2-byte id.  A shell session only ever uses a handful of distinct faces and
+// the palette only grows, so ids stay valid for the lifetime of the screen and
+// resolution is a plain slice index.
+type vtStylePalette struct {
+	faces []syntax.Face
+	ids   map[syntax.Face]vtStyleID
 }
+
+func newVTStylePalette() *vtStylePalette {
+	return &vtStylePalette{
+		faces: []syntax.Face{{}},
+		ids:   map[syntax.Face]vtStyleID{{}: vtStyleDefault},
+	}
+}
+
+// intern returns the id for f, adding it to the palette on first sight.  This
+// runs once per SGR sequence, never per character.  Pathological input with
+// more distinct faces than a vtStyleID can address falls back to the default
+// style rather than growing the palette further.
+func (p *vtStylePalette) intern(f syntax.Face) vtStyleID {
+	if id, ok := p.ids[f]; ok {
+		return id
+	}
+	if len(p.faces) > int(^vtStyleID(0)) {
+		return vtStyleDefault
+	}
+	id := vtStyleID(len(p.faces))
+	p.faces = append(p.faces, f)
+	p.ids[f] = id
+	return id
+}
+
+// face resolves a style id back to its syntax.Face.
+func (p *vtStylePalette) face(id vtStyleID) syntax.Face {
+	if int(id) < len(p.faces) {
+		return p.faces[id]
+	}
+	return syntax.Face{}
+}
+
+// vtCell is a single character cell on the terminal screen: a rune plus the id
+// of its style in the screen's palette.
+type vtCell struct {
+	ch    rune
+	style vtStyleID
+}
+
+// vtBlank is the cell an erase leaves behind: a space in the default style.
+var vtBlank = vtCell{ch: ' '}
 
 // vtScreen is a VT100 terminal emulator.
 type vtScreen struct {
 	rows, cols int
-	cells      []vtCell // main screen [row*cols+col]
-	altCells   []vtCell // alternate screen
+	grid       [][]vtCell // main screen, one slice per row
+	altGrid    [][]vtCell // alternate screen
 
 	useAlt bool // true when alternate screen is active
 
@@ -34,7 +88,16 @@ type vtScreen struct {
 	altSavedRow, altSavedCol int
 	scrollTop, scrollBot     int // scroll region, 0-based inclusive
 
-	curFace syntax.Face
+	curFace  syntax.Face
+	curStyle vtStyleID // palette id of curFace
+	palette  *vtStylePalette
+
+	// scratch holds the row headers being recycled by a scroll.
+	scratch [][]vtCell
+
+	// params is scratch for CSI parameter parsing, reused so that dispatching a
+	// CSI sequence allocates nothing.
+	params [vtMaxParams]int
 
 	// parser state
 	pstate int    // vtStateNormal / vtStateESC / vtStateCSI / vtStateOSC
@@ -55,59 +118,77 @@ func newVTScreen(rows, cols int) *vtScreen {
 		rows:      rows,
 		cols:      cols,
 		scrollBot: rows - 1,
+		palette:   newVTStylePalette(),
 	}
-	s.cells = vtBlankCells(rows * cols)
-	s.altCells = vtBlankCells(rows * cols)
+	s.grid = vtBlankGrid(rows, cols)
+	s.altGrid = vtBlankGrid(rows, cols)
 	return s
 }
 
-func vtBlankCells(n int) []vtCell {
-	cells := make([]vtCell, n)
-	for i := range cells {
-		cells[i] = vtCell{ch: ' '}
+// vtBlankGrid allocates a rows×cols grid of blank cells.  All rows are carved
+// out of one backing array so that a fresh screen is contiguous in memory.
+func vtBlankGrid(rows, cols int) [][]vtCell {
+	backing := make([]vtCell, rows*cols)
+	for i := range backing {
+		backing[i] = vtBlank
 	}
-	return cells
+	g := make([][]vtCell, rows)
+	for r := range rows {
+		g[r] = backing[r*cols : (r+1)*cols : (r+1)*cols]
+	}
+	return g
+}
+
+// vtEraseRow blanks every cell in a row.
+func vtEraseRow(row []vtCell) {
+	for i := range row {
+		row[i] = vtBlank
+	}
 }
 
 // resize changes the screen dimensions, preserving existing content.
 func (s *vtScreen) resize(rows, cols int) {
-	newCells := vtBlankCells(rows * cols)
-	newAlt := vtBlankCells(rows * cols)
+	newGrid := vtBlankGrid(rows, cols)
+	newAlt := vtBlankGrid(rows, cols)
 	minR := min(s.rows, rows)
 	minC := min(s.cols, cols)
-	for r := 0; r < minR; r++ {
-		for c := 0; c < minC; c++ {
-			newCells[r*cols+c] = s.cells[r*s.cols+c]
-			newAlt[r*cols+c] = s.altCells[r*s.cols+c]
-		}
+	for r := range minR {
+		copy(newGrid[r][:minC], s.grid[r][:minC])
+		copy(newAlt[r][:minC], s.altGrid[r][:minC])
 	}
 	s.rows, s.cols = rows, cols
-	s.cells, s.altCells = newCells, newAlt
+	s.grid, s.altGrid = newGrid, newAlt
 	s.curRow = min(s.curRow, rows-1)
 	s.curCol = min(s.curCol, cols-1)
 	s.scrollTop = 0
 	s.scrollBot = rows - 1
 }
 
-func (s *vtScreen) active() []vtCell {
+func (s *vtScreen) active() [][]vtCell {
 	if s.useAlt {
-		return s.altCells
+		return s.altGrid
 	}
-	return s.cells
+	return s.grid
 }
 
 func (s *vtScreen) cellAt(row, col int) vtCell {
 	if row < 0 || row >= s.rows || col < 0 || col >= s.cols {
-		return vtCell{ch: ' '}
+		return vtBlank
 	}
-	return s.active()[row*s.cols+col]
+	return s.active()[row][col]
+}
+
+// faceAt returns the resolved face of the cell at (row, col), or the zero face
+// when the coordinates are outside the screen.
+func (s *vtScreen) faceAt(row, col int) syntax.Face {
+	return s.palette.face(s.cellAt(row, col).style)
 }
 
 func (s *vtScreen) setCell(row, col int, c vtCell) {
 	if row < 0 || row >= s.rows || col < 0 || col >= s.cols {
 		return
 	}
-	s.active()[row*s.cols+col] = c
+	s.active()[row][col] = c
 }
 
 // write processes terminal output, updating the screen state.
@@ -229,7 +310,7 @@ func (s *vtScreen) dispatchCSI(cmd byte) {
 		private = true
 		buf = buf[1:]
 	}
-	nums := vtParseParams(buf)
+	nums := vtParseParams(buf, s.params[:0])
 
 	// nAt returns nums[i] if present and > 0, else def.
 	nAt := func(i, def int) int {
@@ -274,12 +355,12 @@ func (s *vtScreen) dispatchCSI(cmd byte) {
 				s.eraseLine(r)
 			}
 		case 1: // from start to cursor
-			for r := 0; r < s.curRow; r++ {
+			for r := range s.curRow {
 				s.eraseLine(r)
 			}
 			s.eraseLeft(s.curRow, s.curCol)
 		case 2, 3: // entire screen
-			for r := 0; r < s.rows; r++ {
+			for r := range s.rows {
 				s.eraseLine(r)
 			}
 		}
@@ -309,15 +390,12 @@ func (s *vtScreen) dispatchCSI(cmd byte) {
 			s.scrollTop = savedTop
 		}
 	case 'P': // Delete Characters
-		n := nAt(0, 1)
-		cells := s.active()
-		r := s.curRow
-		for c := s.curCol; c < s.cols-n; c++ {
-			cells[r*s.cols+c] = cells[r*s.cols+c+n]
-		}
-		for c := s.cols - n; c < s.cols; c++ {
-			cells[r*s.cols+c] = vtCell{ch: ' '}
-		}
+		row := s.active()[s.curRow]
+		// Clamped so that an absurd count deletes to end of line instead of
+		// running off the row.
+		n := min(nAt(0, 1), s.cols-s.curCol)
+		copy(row[s.curCol:s.cols-n], row[s.curCol+n:])
+		vtEraseRow(row[s.cols-n:])
 	case 'S': // Scroll Up
 		s.scrollUp(nAt(0, 1))
 	case 'T': // Scroll Down
@@ -325,17 +403,14 @@ func (s *vtScreen) dispatchCSI(cmd byte) {
 	case 'X': // Erase Characters
 		n := nAt(0, 1)
 		for c := s.curCol; c < s.curCol+n && c < s.cols; c++ {
-			s.setCell(s.curRow, c, vtCell{ch: ' '})
+			s.setCell(s.curRow, c, vtBlank)
 		}
 	case '@': // Insert Characters
-		n := nAt(0, 1)
-		cells := s.active()
-		r := s.curRow
-		for c := s.cols - 1; c >= s.curCol+n; c-- {
-			cells[r*s.cols+c] = cells[r*s.cols+c-n]
-		}
-		for c := s.curCol; c < s.curCol+n && c < s.cols; c++ {
-			cells[r*s.cols+c] = vtCell{ch: ' ', face: s.curFace}
+		row := s.active()[s.curRow]
+		n := min(nAt(0, 1), s.cols-s.curCol)
+		copy(row[s.curCol+n:], row[s.curCol:s.cols-n])
+		for c := s.curCol; c < s.curCol+n; c++ {
+			row[c] = vtCell{ch: ' ', style: s.curStyle}
 		}
 	case 'd': // Vertical Position Absolute
 		s.curRow = vtClamp(nAt(0, 1)-1, 0, s.rows-1)
@@ -394,8 +469,8 @@ func (s *vtScreen) setPrivateMode(mode int, enable bool) {
 func (s *vtScreen) switchAlt(enable bool) {
 	if enable && !s.useAlt {
 		s.useAlt = true
-		for i := range s.altCells {
-			s.altCells[i] = vtCell{ch: ' '}
+		for _, row := range s.altGrid {
+			vtEraseRow(row)
 		}
 		s.curRow, s.curCol = 0, 0
 	} else if !enable && s.useAlt {
@@ -406,6 +481,7 @@ func (s *vtScreen) switchAlt(enable bool) {
 func (s *vtScreen) processSGR(params []int) {
 	if len(params) == 0 {
 		s.curFace = syntax.Face{}
+		s.curStyle = vtStyleDefault
 		return
 	}
 	i := 0
@@ -437,7 +513,7 @@ func (s *vtScreen) processSGR(params []int) {
 				s.curFace.Fg = vtAnsi256(params[i+2])
 				i += 2
 			} else if i+4 < len(params) && params[i+1] == 2 {
-				s.curFace.Fg = fmt.Sprintf("#%02x%02x%02x", params[i+2], params[i+3], params[i+4])
+				s.curFace.Fg = vtHexColor(params[i+2], params[i+3], params[i+4])
 				i += 4
 			}
 		case p == 39:
@@ -449,7 +525,7 @@ func (s *vtScreen) processSGR(params []int) {
 				s.curFace.Bg = vtAnsi256(params[i+2])
 				i += 2
 			} else if i+4 < len(params) && params[i+1] == 2 {
-				s.curFace.Bg = fmt.Sprintf("#%02x%02x%02x", params[i+2], params[i+3], params[i+4])
+				s.curFace.Bg = vtHexColor(params[i+2], params[i+3], params[i+4])
 				i += 4
 			}
 		case p == 49:
@@ -461,6 +537,7 @@ func (s *vtScreen) processSGR(params []int) {
 		}
 		i++
 	}
+	s.curStyle = s.palette.intern(s.curFace)
 }
 
 func (s *vtScreen) insertChar(r rune) {
@@ -473,7 +550,7 @@ func (s *vtScreen) insertChar(r rune) {
 			s.scrollUp(1)
 		}
 	}
-	s.setCell(s.curRow, s.curCol, vtCell{ch: r, face: s.curFace})
+	s.setCell(s.curRow, s.curCol, vtCell{ch: r, style: s.curStyle})
 	s.curCol++
 }
 
@@ -486,81 +563,110 @@ func (s *vtScreen) lineFeed() {
 }
 
 func (s *vtScreen) eraseLine(row int) {
-	cells := s.active()
-	for c := 0; c < s.cols; c++ {
-		cells[row*s.cols+c] = vtCell{ch: ' '}
-	}
+	vtEraseRow(s.active()[row])
 }
 
 func (s *vtScreen) eraseRight(row, fromCol int) {
-	cells := s.active()
-	for c := fromCol; c < s.cols; c++ {
-		cells[row*s.cols+c] = vtCell{ch: ' '}
-	}
+	vtEraseRow(s.active()[row][vtClamp(fromCol, 0, s.cols):])
 }
 
 func (s *vtScreen) eraseLeft(row, toCol int) {
-	cells := s.active()
-	for c := 0; c <= toCol && c < s.cols; c++ {
-		cells[row*s.cols+c] = vtCell{ch: ' '}
-	}
+	vtEraseRow(s.active()[row][:vtClamp(toCol+1, 0, s.cols)])
 }
 
+// scrollUp moves the scroll region up by n lines.  Only row headers move, so
+// the cost is one header rotation plus n row clears rather than a copy of the
+// whole screen.
 func (s *vtScreen) scrollUp(n int) {
 	if n <= 0 {
 		return
 	}
-	cells := s.active()
+	g := s.active()
 	top, bot := s.scrollTop, s.scrollBot
 	height := bot - top + 1
 	if n >= height {
 		for r := top; r <= bot; r++ {
-			s.eraseLine(r)
+			vtEraseRow(g[r])
 		}
 		return
 	}
-	for r := top; r <= bot-n; r++ {
-		copy(cells[r*s.cols:r*s.cols+s.cols], cells[(r+n)*s.cols:(r+n)*s.cols+s.cols])
-	}
-	for r := bot - n + 1; r <= bot; r++ {
-		s.eraseLine(r)
+	// The n rows that scroll off the top are recycled as the new blank rows at
+	// the bottom of the region.
+	s.scratch = append(s.scratch[:0], g[top:top+n]...)
+	copy(g[top:bot+1-n], g[top+n:bot+1])
+	copy(g[bot+1-n:bot+1], s.scratch)
+	for r := bot + 1 - n; r <= bot; r++ {
+		vtEraseRow(g[r])
 	}
 }
 
+// scrollDown moves the scroll region down by n lines, recycling row headers the
+// same way scrollUp does.
 func (s *vtScreen) scrollDown(n int) {
 	if n <= 0 {
 		return
 	}
-	cells := s.active()
+	g := s.active()
 	top, bot := s.scrollTop, s.scrollBot
 	height := bot - top + 1
 	if n >= height {
 		for r := top; r <= bot; r++ {
-			s.eraseLine(r)
+			vtEraseRow(g[r])
 		}
 		return
 	}
-	for r := bot; r >= top+n; r-- {
-		copy(cells[r*s.cols:r*s.cols+s.cols], cells[(r-n)*s.cols:(r-n)*s.cols+s.cols])
-	}
+	s.scratch = append(s.scratch[:0], g[bot+1-n:bot+1]...)
+	copy(g[top+n:bot+1], g[top:bot+1-n])
+	copy(g[top:top+n], s.scratch)
 	for r := top; r < top+n; r++ {
-		s.eraseLine(r)
+		vtEraseRow(g[r])
 	}
 }
 
-// vtParseParams parses CSI parameter bytes into a slice of integers.
-func vtParseParams(p []byte) []int {
+// vtMaxParams caps how many CSI parameters are parsed.  Real sequences use at
+// most five (SGR truecolour: 38;2;R;G;B); the cap only bites on pathological
+// input, where the surplus parameters are dropped.
+const vtMaxParams = 16
+
+// vtParamLimit is the largest parameter value accepted.  Anything bigger is
+// treated as unparseable — and therefore zero — which is what strconv.Atoi
+// would have reported for an overlong digit run.
+const vtParamLimit = 1 << 20
+
+// vtParseParams parses CSI parameter bytes into dst, returning the filled
+// prefix.  dst is caller-owned scratch (vtScreen.params) so that a CSI dispatch
+// does not allocate.  A parameter containing anything other than digits — a
+// colon sub-parameter, say — reads as zero.
+func vtParseParams(p []byte, dst []int) []int {
 	if len(p) == 0 {
 		return nil
 	}
-	parts := bytes.Split(p, []byte(";"))
-	nums := make([]int, 0, len(parts))
-	for _, part := range parts {
-		if len(part) == 0 {
-			nums = append(nums, 0)
-			continue
+	nums := dst[:0]
+	n, ok := 0, true
+	for _, b := range p {
+		switch {
+		case b == ';':
+			if len(nums) == cap(nums) {
+				return nums
+			}
+			if !ok {
+				n = 0
+			}
+			nums = append(nums, n)
+			n, ok = 0, true
+		case b >= '0' && b <= '9':
+			n = n*10 + int(b-'0')
+			if n > vtParamLimit {
+				ok = false
+			}
+		default:
+			ok = false
 		}
-		n, _ := strconv.Atoi(string(part))
+	}
+	if len(nums) < cap(nums) {
+		if !ok {
+			n = 0
+		}
 		nums = append(nums, n)
 	}
 	return nums
@@ -585,13 +691,26 @@ func vtAnsi256(n int) string {
 	}
 	if n >= 232 {
 		v := (n-232)*10 + 8
-		return fmt.Sprintf("#%02x%02x%02x", v, v, v)
+		return vtHexColor(v, v, v)
 	}
 	n -= 16
 	r := (n / 36) * 51
 	g := ((n / 6) % 6) * 51
 	b := (n % 6) * 51
-	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+	return vtHexColor(r, g, b)
+}
+
+// vtHexColor formats an RGB triple as "#rrggbb".  SGR colour sequences are
+// common enough in shell output that it is worth avoiding fmt here.
+func vtHexColor(r, g, b int) string {
+	const hexDigits = "0123456789abcdef"
+	out := [7]byte{'#'}
+	for i, v := range [3]int{r, g, b} {
+		v = vtClamp(v, 0, 0xff)
+		out[1+i*2] = hexDigits[v>>4]
+		out[2+i*2] = hexDigits[v&0xf]
+	}
+	return string(out[:])
 }
 
 func vtClamp(v, lo, hi int) int {

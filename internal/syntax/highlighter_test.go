@@ -2,6 +2,7 @@ package syntax
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -441,4 +442,340 @@ func TestHighlighterTruncationStopsEarly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Rune fast path
+// ---------------------------------------------------------------------------
+
+// TestHighlightRunesMatchesHighlight pins the RuneHighlighter contract: taking
+// the caller's []rune must not change a single span, at any truncation point.
+func TestHighlightRunesMatchesHighlight(t *testing.T) {
+	for _, s := range diffSamples() {
+		rh, ok := s.hl.(RuneHighlighter)
+		if !ok {
+			continue
+		}
+		t.Run(s.name, func(t *testing.T) {
+			runes := []rune(s.text)
+			for wantEnd := 0; wantEnd <= len(runes); wantEnd++ {
+				want := s.hl.Highlight(s.text, 0, wantEnd)
+				got := rh.HighlightRunes(runes, 0, wantEnd)
+				if !sameSpans(got, want) {
+					t.Fatalf("end=%d: HighlightRunes differs from Highlight\n got: %v\nwant: %v",
+						wantEnd, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestEveryHighlighterTakesRunes guards against a highlighter being added
+// without the rune fast path: the renderer would then have to re-encode the
+// whole buffer to a string on every keystroke just for that one mode.
+func TestEveryHighlighterTakesRunes(t *testing.T) {
+	for _, s := range diffSamples() {
+		if _, ok := s.hl.(RuneHighlighter); !ok {
+			t.Errorf("%s (%T) does not implement RuneHighlighter", s.name, s.hl)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Checkpointed resumption
+// ---------------------------------------------------------------------------
+//
+// A resumable highlighter promises that restarting at a reported checkpoint
+// produces the same spans as never having stopped.  The tests below check that
+// promise exhaustively: every checkpoint the highlighter is willing to report
+// (Every: 1, so every safe point it knows of) is used as a restart point, and
+// the spans kept from before it plus the spans produced after it must equal the
+// spans of a single scan from offset 0.
+//
+// The samples are the same ones the truncation test uses, so a block comment, a
+// raw string, a here-doc, a POD block and a fenced code block all straddle
+// checkpoint boundaries.
+
+// sameSpans reports whether two span slices hold the same spans, treating a nil
+// slice and an empty one as equal.
+func sameSpans(a, b []Span) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// checkpoint is one restart point reported during a scan.
+type checkpoint struct {
+	st     ScanState
+	nspans int
+}
+
+// collectCheckpoints runs a full resumable scan of runes and returns every
+// restart point it reports at the given interval.
+func collectCheckpoints(hl Resumable, runes []rune, every int) []checkpoint {
+	var out []checkpoint
+	cp := Checkpoints{
+		Every: every,
+		Report: func(st ScanState, nspans int) {
+			out = append(out, checkpoint{st, nspans})
+		},
+	}
+	hl.HighlightResume(runes, ScanState{}, len(runes), &cp)
+	return out
+}
+
+// resumableSamples returns the diff samples whose highlighter can resume.
+func resumableSamples(t *testing.T) []diffSample {
+	t.Helper()
+	var out []diffSample
+	for _, s := range diffSamples() {
+		if _, ok := s.hl.(Resumable); ok {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no resumable highlighters found")
+	}
+	return out
+}
+
+// TestHighlightResumeZeroStateMatchesFullScan checks the base case of the
+// Resumable contract: the zero state means "start at the beginning".
+func TestHighlightResumeZeroStateMatchesFullScan(t *testing.T) {
+	for _, s := range resumableSamples(t) {
+		t.Run(s.name, func(t *testing.T) {
+			runes := []rune(s.text)
+			res := s.hl.(Resumable)
+			for wantEnd := 0; wantEnd <= len(runes); wantEnd++ {
+				want := res.HighlightRunes(runes, 0, wantEnd)
+				got := res.HighlightResume(runes, ScanState{}, wantEnd, nil)
+				if !sameSpans(got, want) {
+					t.Fatalf("end=%d: resume from the zero state differs from a plain scan\n got: %v\nwant: %v",
+						wantEnd, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestHighlightResumeFromEveryCheckpoint is the correctness gate for
+// checkpointed highlighting: for every checkpoint, the spans before it plus the
+// spans a resumed scan produces must be exactly the spans of one scan from 0.
+func TestHighlightResumeFromEveryCheckpoint(t *testing.T) {
+	for _, s := range resumableSamples(t) {
+		t.Run(s.name, func(t *testing.T) {
+			runes := []rune(s.text)
+			n := len(runes)
+			res := s.hl.(Resumable)
+			full := res.HighlightRunes(runes, 0, n)
+			cps := collectCheckpoints(res, runes, 1)
+			if len(cps) == 0 {
+				if len(full) != 0 {
+					t.Fatal("no checkpoints reported; resumption is untested for this highlighter")
+				}
+				t.Skip("highlighter emits no spans, so it has nothing to resume")
+			}
+			for _, c := range cps {
+				if c.nspans > len(full) {
+					t.Fatalf("checkpoint at %d reports %d spans, full scan has %d",
+						c.st.Pos, c.nspans, len(full))
+				}
+				got := append(full[:c.nspans:c.nspans], res.HighlightResume(runes, c.st, n, nil)...)
+				if !sameSpans(got, full) {
+					t.Fatalf("resume from %+v (after %d spans) differs from a full scan\n got: %v\nwant: %v",
+						c.st, c.nspans, got, full)
+				}
+			}
+		})
+	}
+}
+
+// TestHighlightResumeTruncatedMatchesFullBuffer combines resumption with early
+// termination, which is how the renderer actually uses both: resume from a
+// checkpoint *and* stop at the end of the visible region.  The spans that start
+// before end must still match the full-buffer scan.
+func TestHighlightResumeTruncatedMatchesFullBuffer(t *testing.T) {
+	for _, s := range resumableSamples(t) {
+		t.Run(s.name, func(t *testing.T) {
+			runes := []rune(s.text)
+			n := len(runes)
+			res := s.hl.(Resumable)
+			full := res.HighlightRunes(runes, 0, n)
+			for _, c := range collectCheckpoints(res, runes, 1) {
+				for wantEnd := c.st.Pos; wantEnd <= n; wantEnd++ {
+					got := append(full[:c.nspans:c.nspans],
+						res.HighlightResume(runes, c.st, wantEnd, nil)...)
+					wantVisible := spansStartingBefore(full, wantEnd)
+					gotVisible := spansStartingBefore(got, wantEnd)
+					if !sameSpans(gotVisible, wantVisible) {
+						t.Fatalf("resume from %+v with end=%d: visible spans differ\n got: %v\nwant: %v",
+							c.st, wantEnd, gotVisible, wantVisible)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestCheckpointsAreAligned pins the property the span cache relies on when it
+// keeps checkpoints across an edit: a resumed scan reports the same offsets a
+// scan from 0 would have, so checkpoint positions do not drift as the resume
+// point walks forward.
+func TestCheckpointsAreAligned(t *testing.T) {
+	const every = 8
+	for _, s := range resumableSamples(t) {
+		t.Run(s.name, func(t *testing.T) {
+			runes := []rune(s.text)
+			res := s.hl.(Resumable)
+			full := collectCheckpoints(res, runes, every)
+			if len(full) < 2 {
+				t.Skipf("only %d checkpoints at Every=%d; nothing to compare", len(full), every)
+			}
+			for i, c := range full[:len(full)-1] {
+				var got []checkpoint
+				cp := Checkpoints{
+					Every: every,
+					Report: func(st ScanState, nspans int) {
+						got = append(got, checkpoint{st, nspans})
+					},
+				}
+				res.HighlightResume(runes, c.st, len(runes), &cp)
+				want := full[i+1:]
+				if len(got) != len(want) {
+					t.Fatalf("resume from %+v reported %d checkpoints, want %d",
+						c.st, len(got), len(want))
+				}
+				for j := range got {
+					if got[j].st != want[j].st {
+						t.Fatalf("resume from %+v: checkpoint %d is %+v, want %+v",
+							c.st, j, got[j].st, want[j].st)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestCheckpointsDisabled documents that a nil or unarmed Checkpoints reports
+// nothing, which is what makes HighlightResume usable as a plain bounded scan.
+func TestCheckpointsDisabled(t *testing.T) {
+	runes := []rune(goDiffSample)
+	res := GoHighlighter{}
+	calls := 0
+	cp := Checkpoints{Report: func(ScanState, int) { calls++ }} // Every == 0
+	res.HighlightResume(runes, ScanState{}, len(runes), &cp)
+	if calls != 0 {
+		t.Errorf("Every=0 reported %d checkpoints, want 0", calls)
+	}
+	// A nil Checkpoints must not panic.
+	res.HighlightResume(runes, ScanState{}, len(runes), nil)
+}
+
+// TestCorruptCheckpointStateIsDetected is the mutation check on the guard above:
+// the resume tests would be worthless if ScanState carried nothing that mattered.
+// For every highlighter that keeps cross-line state, flipping that state at a
+// checkpoint must change the spans — otherwise the state is not really being
+// used and the differential tests are vacuous.
+func TestCorruptCheckpointStateIsDetected(t *testing.T) {
+	tests := []struct {
+		name string
+		hl   Resumable
+		text string
+	}{
+		{"markdown", MarkdownHighlighter{}, markdownDiffSample},
+		{"gherkin", GherkinHighlighter{}, gherkinDiffSample},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runes := []rune(tc.text)
+			n := len(runes)
+			full := tc.hl.HighlightRunes(runes, 0, n)
+			differed := 0
+			for _, c := range collectCheckpoints(tc.hl, runes, 1) {
+				bad := c.st
+				bad.Fence = !bad.Fence
+				got := append(full[:c.nspans:c.nspans],
+					tc.hl.HighlightResume(runes, bad, n, nil)...)
+				if !sameSpans(got, full) {
+					differed++
+				}
+			}
+			if differed == 0 {
+				t.Errorf("flipping ScanState.Fence never changed the spans: " +
+					"the state is unused, so the resume tests prove nothing")
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Resumption benchmarks
+// ---------------------------------------------------------------------------
+
+// benchSource returns a large sample of the named language: the diff sample
+// repeated until it is at least runes long, so multi-line constructs recur
+// throughout.
+func benchSource(sample string, runes int) []rune {
+	var sb strings.Builder
+	for utf8.RuneCountInString(sb.String()) < runes {
+		sb.WriteString(sample)
+	}
+	return []rune(sb.String())
+}
+
+// benchResume compares the two ways of highlighting the screenful that ends at
+// the far end of a large buffer: scanning everything from offset 0, and resuming
+// from the last checkpoint before it.  This is the per-keystroke cost the span
+// cache pays, isolated from the rest of a frame.
+func benchResume(bench *testing.B, hl Resumable, sample string, fromZero bool) {
+	const size = 400000
+	const every = 4096
+	runes := benchSource(sample, size)
+	end := len(runes)
+
+	// Find the last checkpoint, which is where a keystroke at the end of the
+	// buffer would resume from.
+	last := ScanState{}
+	cp := Checkpoints{Every: every, Report: func(st ScanState, _ int) { last = st }}
+	hl.HighlightResume(runes, ScanState{}, end, &cp)
+
+	st := last
+	if fromZero {
+		st = ScanState{}
+	}
+	bench.ReportAllocs()
+	bench.ResetTimer()
+	for range bench.N {
+		hl.HighlightResume(runes, st, end, nil)
+	}
+}
+
+func BenchmarkResumeGoFromZero(bench *testing.B) {
+	benchResume(bench, GoHighlighter{}, goDiffSample, true)
+}
+
+func BenchmarkResumeGoFromCheckpoint(bench *testing.B) {
+	benchResume(bench, GoHighlighter{}, goDiffSample, false)
+}
+
+func BenchmarkResumeMarkdownFromZero(bench *testing.B) {
+	benchResume(bench, MarkdownHighlighter{}, markdownDiffSample, true)
+}
+
+func BenchmarkResumeMarkdownFromCheckpoint(bench *testing.B) {
+	benchResume(bench, MarkdownHighlighter{}, markdownDiffSample, false)
+}
+
+func BenchmarkResumeYAMLFromZero(bench *testing.B) {
+	benchResume(bench, YAMLHighlighter{}, yamlDiffSample, true)
+}
+
+func BenchmarkResumeYAMLFromCheckpoint(bench *testing.B) {
+	benchResume(bench, YAMLHighlighter{}, yamlDiffSample, false)
 }

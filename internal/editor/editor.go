@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -323,13 +324,36 @@ type Editor struct {
 type spanCache struct {
 	gen   int
 	mode  string
-	text  string
 	runes []rune
+	// spare is the rune slice of the previous generation.  Keeping it lets the
+	// next scan fill a slice without allocating, and — more importantly — lets
+	// it compare the new content against the old one to find out where the edit
+	// was, which the buffer itself does not report.
+	spare []rune
 	spans []syntax.Span
-	// hiEnd is the rune offset up to which spans is complete.  Highlighters
-	// always scan from offset 0, so a cache built for [0, hiEnd) answers any
-	// later request whose needed end is <= hiEnd without rescanning.
+	// hiEnd is the rune offset up to which spans is complete: a cache built for
+	// [0, hiEnd) answers any later request whose needed end is <= hiEnd without
+	// rescanning.  Spans may reach further — a resumed scan keeps whatever it was
+	// handed — but nothing below hiEnd is missing.
 	hiEnd int
+	// checkpoints are the resume points the highlighter reported while scanning,
+	// in increasing Pos order.  An edit invalidates only the ones at or after
+	// the first changed rune; the rest, and the spans before them, are reused so
+	// a keystroke rescans a few thousand runes instead of the whole prefix.
+	// Empty when the highlighter is not syntax.Resumable.
+	checkpoints []spanCheckpoint
+	// hlType is the concrete type of the highlighter the checkpoints came from.
+	// The highlighter normally follows from the mode, but customHighlighters can
+	// override it, and a checkpoint from one highlighter means nothing to
+	// another.
+	hlType reflect.Type
+}
+
+// spanCheckpoint is one resume point: the highlighter state at a rune offset,
+// and the number of spans that precede it in spanCache.spans.
+type spanCheckpoint struct {
+	st     syntax.ScanState
+	nspans int
 }
 
 // ---------------------------------------------------------------------------
@@ -873,6 +897,10 @@ func (e *Editor) applyElispConfig() {
 			e.dap.localsAutoExpandDepth = int(i.V)
 		}
 	}
+	// Per-mode language-server commands, e.g. (setq java-lsp-command "jdtls").
+	// Applied here as well as in setLangMode so that files opened from the
+	// command line or find-file honour the override too.
+	e.applyElispLspCommands()
 	e.applyVisualLines()
 }
 
@@ -881,8 +909,40 @@ func (e *Editor) applyElispConfig() {
 // ---------------------------------------------------------------------------
 
 // Run starts the editor's main event loop.  It blocks until the user quits.
+// autoRevertPollInterval is how often the event loop is woken so that files
+// changed on disk are noticed.  PollEvent otherwise blocks indefinitely, which
+// meant a buffer only reverted once the user happened to press a key.
+// maybeAutoRevert throttles the actual stat calls, so this only has to be
+// frequent enough for the reload to feel automatic.
+const autoRevertPollInterval = 2 * time.Second
+
+// startAutoRevertPoll wakes the event loop periodically and returns a function
+// that stops the poller.  The wakeup is unconditional so that toggling
+// auto-revert at runtime needs no cross-goroutine coordination; whether
+// anything is actually reloaded is decided by maybeAutoRevert on the main
+// goroutine.  A wakeup costs one diffed Redraw, which emits no terminal output
+// when nothing changed.
+func (e *Editor) startAutoRevertPoll() func() {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(autoRevertPollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				e.term.PostWakeup()
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 func (e *Editor) Run() {
 	defer e.term.Close()
+	stopPoll := e.startAutoRevertPoll()
+	defer stopPoll()
 	e.Redraw()
 	for !e.quit {
 		ev := e.term.PollEvent() // block until at least one event arrives
@@ -897,9 +957,11 @@ func (e *Editor) Run() {
 			}
 			e.processEvent(next)
 		}
+		// Reload before rendering, so a file changed on disk appears in this
+		// frame rather than one event later.
+		e.maybeAutoRevert()
 		e.Redraw()
 		e.lspMaybeHover()
-		e.maybeAutoRevert()
 	}
 }
 
@@ -1373,7 +1435,13 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 		b.SetMode("perl")
 	case ext == ".feature":
 		b.SetMode("gherkin")
-	case ext == ".conf" || ext == ".toml" || strings.HasSuffix(base, "rc"):
+	// conf-mode covers .conf, .toml and rc-style config files.  The "rc" test is
+	// anchored so it only fires for a whole filename (inputrc, .npmrc) and not
+	// for a real extension that merely ends in those letters — "weird.src" and
+	// "main.arc" are not config files.  Note .bashrc/.zshrc are deliberately
+	// claimed by bash-mode above: they are shell scripts, not plain config.
+	case ext == ".conf" || ext == ".toml" ||
+		(strings.HasSuffix(base, "rc") && (ext == "" || ext == base)):
 		b.SetMode("conf")
 	case ext == ".json":
 		b.SetMode("json")
@@ -1396,6 +1464,10 @@ func (e *Editor) loadFile(path string) (*buffer.Buffer, error) {
 	}
 	// Start LSP server for this file's mode if one is configured.
 	e.lspActivate(b)
+	// While a debug session is active every source buffer is read-only, so the
+	// single-letter step shortcuts work in a file the user opens mid-session.
+	// The buffer's original flag is recorded and restored on debug-exit.
+	e.debugAdoptSourceBuffer(b)
 	return b, nil
 }
 
@@ -1594,7 +1666,7 @@ func (e *Editor) dispatchParsedKey(ke terminal.KeyEvent) {
 
 		// Debug session: mode-specific single-letter shortcuts.
 		if e.dap != nil {
-			switch mode {
+			switch baseMode(mode) {
 			case "debug-locals":
 				if e.debugLocalsDispatch(ke) {
 					return
@@ -2258,17 +2330,11 @@ func (e *Editor) isearchHandleKey(ke terminal.KeyEvent) {
 
 	case tcell.KeyCtrlS:
 		// C-s during search: find next match forward.
-		e.isearchFwd = true
-		if e.isearchStr != "" {
-			e.isearchFindNext()
-		}
+		e.isearchStep(true)
 
 	case tcell.KeyCtrlR:
 		// C-r during search: find next match backward.
-		e.isearchFwd = false
-		if e.isearchStr != "" {
-			e.isearchFindNext()
-		}
+		e.isearchStep(false)
 
 	case tcell.KeyCtrlW:
 		// C-w during search: pull the next word of buffer text into the query.
@@ -2413,6 +2479,66 @@ func (e *Editor) isearchYankWord() {
 	e.Message(isearchPromptMsg, e.isearchStr)
 }
 
+// isearchCurrentMatchStart returns the start offset of the match the point
+// currently sits on, or -1 if there is none.  After a forward search the point
+// rests at the match end; after a backward search it rests at the match start.
+// pointAtEnd says which of those to prefer when the text is ambiguous, as it is
+// for self-overlapping needles ("ab" at offset 2 of "abab").
+func (e *Editor) isearchCurrentMatchStart(pointAtEnd bool) int {
+	buf := e.ActiveBuffer()
+	runes := e.isearchGetRunes(buf)
+	needle := e.isearchGetNeedle()
+	if len(needle) == 0 {
+		return -1
+	}
+	match := runesMatch
+	if e.isSearchCaseFold {
+		match = runesMatchFold
+	}
+
+	cur := buf.Point()
+	atStart := cur >= 0 && cur+len(needle) <= len(runes) && match(runes[cur:], needle)
+	atEnd := cur-len(needle) >= 0 && match(runes[cur-len(needle):], needle)
+
+	switch {
+	case pointAtEnd && atEnd:
+		return cur - len(needle)
+	case !pointAtEnd && atStart:
+		return cur
+	case atEnd:
+		return cur - len(needle)
+	case atStart:
+		return cur
+	}
+	return -1
+}
+
+// isearchStep moves to the next match in the given direction.  Reversing
+// direction moves to the other end of the current match rather than skipping
+// past it, so that C-r after a C-s selects the same match and only flips the
+// direction — the behaviour Emacs has.
+func (e *Editor) isearchStep(forward bool) {
+	if e.isearchStr == "" {
+		e.isearchFwd = forward
+		return
+	}
+	reversing := e.isearchFwd != forward
+	if reversing {
+		if ms := e.isearchCurrentMatchStart(e.isearchFwd); ms >= 0 {
+			e.isearchFwd = forward
+			buf := e.ActiveBuffer()
+			if forward {
+				buf.SetPoint(ms + len(e.isearchGetNeedle()))
+			} else {
+				buf.SetPoint(ms)
+			}
+			return
+		}
+	}
+	e.isearchFwd = forward
+	e.isearchFindNext()
+}
+
 // isearchFindNext finds the next occurrence after the current point.  When the
 // scan runs off the end of the buffer it wraps around to the other end and
 // says so in the minibuffer.
@@ -2467,11 +2593,37 @@ func (e *Editor) isearchFindNext() {
 		return
 	}
 
-	if i := scanBack(cur-len(needle)-1, 0); i >= 0 {
+	e.isearchFindPrev(buf, runes, scanBack)
+}
+
+// isearchFindPrev is the backward half of isearchFindNext.  It is bounded by the
+// start of the match the point is on, not by "point minus needle length": during
+// a backward search the point already sits at the match start, and subtracting
+// the needle length a second time skipped len(needle) positions, which both hid
+// nearby matches and produced a bogus wrap message.
+func (e *Editor) isearchFindPrev(buf *buffer.Buffer, runes []rune,
+	scanBack func(hi, lo int) int,
+) {
+	cur := buf.Point()
+	matchStart := e.isearchCurrentMatchStart(false)
+
+	// Everything strictly before the current match (or at/before point when
+	// there is no current match).
+	hi := cur
+	if matchStart >= 0 {
+		hi = matchStart - 1
+	}
+	if i := scanBack(hi, 0); i >= 0 {
 		buf.SetPoint(i)
 		return
 	}
-	if i := scanBack(len(runes), cur); i >= 0 {
+	// Hit the top: wrap to the bottom, covering everything the first scan did
+	// not, without re-finding the match we started on.
+	lo := cur + 1
+	if matchStart >= 0 {
+		lo = matchStart + 1
+	}
+	if i := scanBack(len(runes), lo); i >= 0 {
 		buf.SetPoint(i)
 		e.Message(isearchWrapTopMsg, e.isearchStr)
 		return
@@ -2577,6 +2729,14 @@ func (e *Editor) Redraw() {
 // scrolling is served from the cache and costs no rehighlighting at all.
 const spanCacheMargin = 8192
 
+// spanCheckpointEvery is how far apart, in runes, highlighters are asked to
+// record resume points.  It bounds what an edit costs: a keystroke rescans at
+// most this much text before the edit, plus the visible region itself, instead
+// of everything from the top of the file.  Smaller means faster edits and a
+// longer checkpoint list — at 4096 runes even a 50 000-line file keeps only a few
+// hundred checkpoints, well under 20 KB.
+const spanCheckpointEvery = 4096
+
 // getSpanCache returns the cached syntax spans for the whole of buf.  Prefer
 // getSpanCacheUpTo when only the visible region is needed: highlighting is
 // O(text scanned), so asking for the whole buffer on every keystroke is what
@@ -2585,15 +2745,55 @@ func (e *Editor) getSpanCache(buf *buffer.Buffer) *spanCache {
 	return e.getSpanCacheUpTo(buf, buf.Len())
 }
 
+// firstDiffRune returns the index of the first rune at which a and b differ, or
+// limit if they agree throughout [0, limit).
+//
+// This is how the span cache finds out where an edit happened: the buffer does
+// not report edit positions, so the only way to learn that a prefix is unchanged
+// is to look at it.  Comparing runes costs a fraction of what rehighlighting
+// them does, and the comparison is bounded by the region the cache already
+// covers rather than by the size of the buffer.
+func firstDiffRune(a, b []rune, limit int) int {
+	limit = max(min(limit, len(a), len(b)), 0)
+	a, b = a[:limit], b[:limit]
+	for i, r := range a {
+		if b[i] != r {
+			return i
+		}
+	}
+	return limit
+}
+
+// growScratch returns a zero-length slice with room for at least n runes,
+// reusing dst when it is already big enough.
+//
+// buffer.AppendRunes allocates exactly what it needs, so handing it a slice that
+// is one rune too small would copy the whole buffer.  Typing grows the buffer one
+// rune at a time, so the extra headroom here is what keeps a keystroke in a large
+// file from reallocating a megabytes-long rune slice every time.
+func growScratch(dst []rune, n int) []rune {
+	if cap(dst) >= n {
+		return dst[:0]
+	}
+	return make([]rune, 0, n+n/8+64)
+}
+
 // getSpanCacheUpTo returns cached syntax spans that are complete for at least
-// [0, wantEnd).  Highlighters always scan from offset 0 — that is what keeps
-// multi-line state (block comments, raw strings, fenced code blocks) correct —
-// so a cache built for a wider range satisfies any narrower request and is
-// reused as-is.
+// [0, wantEnd).  A cache built for a wider range satisfies any narrower request
+// and is reused as-is.
 //
 // On a miss the covered range is grown to wantEnd + spanCacheMargin, and to at
 // least twice the previously covered range, so scrolling through a large file
 // costs a logarithmic number of rehighlights rather than one per screenful.
+//
+// Multi-line state (block comments, raw strings, fenced code blocks) means a
+// highlighter cannot simply start scanning in the middle of a buffer.  A
+// syntax.Resumable highlighter reports resume points as it goes, and the cache
+// keeps them: after an edit it resumes from the newest point that lies at or
+// before the first changed rune and keeps the spans from before it, so a
+// keystroke costs a few thousand runes of scanning rather than everything from
+// the top of the file.  A highlighter that cannot resume is still rescanned from
+// offset 0.
 func (e *Editor) getSpanCacheUpTo(buf *buffer.Buffer, wantEnd int) *spanCache {
 	if e.spanCaches == nil {
 		e.spanCaches = make(map[*buffer.Buffer]*spanCache)
@@ -2610,31 +2810,111 @@ func (e *Editor) getSpanCacheUpTo(buf *buffer.Buffer, wantEnd int) *spanCache {
 	if hl == nil {
 		hl = highlighterFor(buf)
 	}
+	hlType := reflect.TypeOf(hl)
+
+	// unchanged is the scrolling case: same content, same mode, but the visible
+	// region has moved past what the cache covers.
+	unchanged := c != nil && c.gen == gen && c.mode == mode
 	hiEnd := wantEnd + spanCacheMargin
-	if c != nil && c.gen == gen && c.mode == mode {
-		// Extending the cache for unchanged content — this is the scrolling
-		// case.  At least double the covered range so paging to the end of a
-		// large file costs a logarithmic number of rescans rather than one per
-		// screenful.  After an edit the range starts over from the visible
-		// region, which is the whole point of the partial cache.
+	if unchanged {
+		// At least double the covered range so paging to the end of a large file
+		// costs a logarithmic number of rescans rather than one per screenful.
 		hiEnd = max(hiEnd, 2*c.hiEnd)
 	}
 	hiEnd = min(hiEnd, bufLen)
-	text := buf.String()
-	runes := []rune(text)
+
+	// Materialise the buffer's runes.  When the content has not changed the
+	// cached slice is still correct; otherwise fill the previous generation's
+	// slice, which leaves c.runes intact for the comparison below and reuses the
+	// allocation.
+	var runes, spare []rune
+	switch {
+	case unchanged:
+		runes, spare = c.runes, c.spare
+	case c != nil:
+		runes, spare = buf.AppendRunes(growScratch(c.spare, bufLen)), c.runes
+	default:
+		runes = buf.AppendRunes(growScratch(nil, bufLen))
+	}
 	// buf.Len() counts runes, but guard anyway so a stale length cannot make the
 	// highlighter scan past the text it was handed.
 	hiEnd = min(hiEnd, len(runes))
-	spans := hl.Highlight(text, 0, hiEnd)
-	c = &spanCache{gen: gen, mode: mode, text: text, runes: runes, spans: spans, hiEnd: hiEnd}
+
+	var spans []syntax.Span
+	var checkpoints []spanCheckpoint
+
+	res, resumable := hl.(syntax.Resumable)
+	switch {
+	case resumable:
+		st := syntax.ScanState{}
+		if c != nil && c.mode == mode && c.hlType == hlType && len(c.checkpoints) > 0 {
+			last := c.checkpoints[len(c.checkpoints)-1].st.Pos
+			// Unchanged content needs no comparison: every checkpoint still
+			// describes the buffer it was taken from.
+			diff := last
+			if !unchanged {
+				diff = firstDiffRune(c.runes, runes, last)
+			}
+			keep := 0
+			for keep < len(c.checkpoints) && c.checkpoints[keep].st.Pos <= diff {
+				keep++
+			}
+			if keep > 0 {
+				cp := c.checkpoints[keep-1]
+				st = cp.st
+				// Reuse both arrays: nothing outside this function holds on to
+				// the cache entry that is about to be replaced.
+				spans = c.spans[:cp.nspans]
+				checkpoints = c.checkpoints[:keep]
+			}
+		}
+		base := len(spans)
+		collect := syntax.Checkpoints{
+			Every: spanCheckpointEvery,
+			Report: func(st syntax.ScanState, nspans int) {
+				checkpoints = append(checkpoints, spanCheckpoint{st: st, nspans: base + nspans})
+			},
+		}
+		spans = append(spans, res.HighlightResume(runes, st, hiEnd, &collect)...)
+
+	default:
+		if rh, ok := hl.(syntax.RuneHighlighter); ok {
+			spans = rh.HighlightRunes(runes, 0, hiEnd)
+		} else {
+			spans = hl.Highlight(string(runes), 0, hiEnd)
+		}
+	}
+
+	c = &spanCache{
+		gen:         gen,
+		mode:        mode,
+		runes:       runes,
+		spare:       spare,
+		spans:       spans,
+		hiEnd:       hiEnd,
+		checkpoints: checkpoints,
+		hlType:      hlType,
+	}
 	e.spanCaches[buf] = c
 	return c
 }
 
+// baseMode strips any "+language" suffix from a mode name, e.g.
+// "debug-repl+java" → "debug-repl" and "vc-annotate+go" → "vc-annotate".  The
+// suffix exists only to tell the renderer which language highlighter to use;
+// everything that dispatches on the mode itself wants the base name.
+func baseMode(mode string) string {
+	if b, _, ok := strings.Cut(mode, "+"); ok {
+		return b
+	}
+	return mode
+}
+
 // modeFromShebang inspects the first line of content for a shebang (#!) and
 // returns the corresponding major mode name, or "" if none is recognised.
-// It handles both "#!" and "#! " variants and both direct paths and env-style
-// invocations (e.g. "#!/usr/bin/env python3.10").
+// It handles both "#!" and "#! " variants, env-style invocations (including
+// "env -S"), leading VAR=value assignments, and interpreter flags — so the
+// canonical "#!/usr/bin/perl -w" is recognised as well as a bare path.
 func modeFromShebang(content string) string {
 	if len(content) < 2 || content[0] != '#' || content[1] != '!' {
 		return ""
@@ -2644,15 +2924,24 @@ func modeFromShebang(content string) string {
 	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
 		line = line[:nl]
 	}
-	// Grab the interpreter name: the last path component after optional "env".
-	fields := strings.Fields(line[2:]) // skip "#!"
-	if len(fields) == 0 {
-		return ""
-	}
-	interp := fields[len(fields)-1]
-	// Strip the directory component.
-	if i := strings.LastIndexByte(interp, '/'); i >= 0 {
-		interp = interp[i+1:]
+	// Find the interpreter: the first field that is not a flag, an env-style
+	// VAR=value assignment, or the "env" launcher itself.  Scanning left to
+	// right rather than taking the last field is what makes trailing
+	// interpreter flags ("perl -w", "python3 -u") work.
+	interp := ""
+	for _, f := range strings.Fields(line[2:]) { // skip "#!"
+		if strings.HasPrefix(f, "-") || strings.Contains(f, "=") {
+			continue
+		}
+		base := f
+		if i := strings.LastIndexByte(base, '/'); i >= 0 {
+			base = base[i+1:]
+		}
+		if base == "env" {
+			continue // a launcher, not the interpreter
+		}
+		interp = base
+		break
 	}
 	switch {
 	case interp == "bash":
@@ -2880,13 +3169,25 @@ func (e *Editor) renderWindow(w *window.Window) {
 
 	_, winY, winW, _ := w.Left(), w.Top(), w.Width(), w.Height()
 
+	// The breakpoint map and the adapter's stopped file are both keyed by
+	// canonical path (see canonPath), so the buffer's name has to be resolved
+	// the same way or nothing ever matches — on macOS a /var path resolves to
+	// /private/var, and a relative filename never matched at all.  Resolve it
+	// once per frame, not per line, because canonPath hits the filesystem; and
+	// skip it entirely unless a debug session or a breakpoint actually exists.
+	canonName := ""
+	if buf.Filename() != "" && (e.dap != nil || len(e.dapBreakpoints) > 0) {
+		canonName = canonPath(buf.Filename())
+	}
+	bpLines := e.dapBreakpoints[canonName]
+	stoppedHere := e.dap != nil && canonName != "" && e.dap.stoppedFile == canonName
+
 	// Gutter: columns reserved at the left for breakpoint/exec-pos indicators.
 	// Always show a 2-column gutter when the file has any breakpoints set OR a
 	// debug session is active (even before dapSetupLayout has run).
 	gutterW := w.GutterWidth()
 	if gutterW == 0 && buf.Filename() != "" {
-		absName, _ := filepath.Abs(buf.Filename())
-		if len(e.dapBreakpoints[absName]) > 0 || e.dap != nil {
+		if len(bpLines) > 0 || e.dap != nil {
 			gutterW = 2
 		}
 	}
@@ -2931,13 +3232,13 @@ func (e *Editor) renderWindow(w *window.Window) {
 		// Gutter phase: draw breakpoint/exec-pos indicators in the reserved columns.
 		if gutterW >= 2 {
 			bpCh, bpFace := ' ', syntax.FaceDefault
-			if e.dapHasBreakpoint(buf.Filename(), vl.Line) {
+			if _, has := bpLines[vl.Line]; has {
 				bpCh, bpFace = '●', syntax.FaceBreakpoint
 			}
 			e.term.SetCell(w.Left(), screenRow, rune(bpCh), bpFace)
 
 			epCh, epFace := ' ', syntax.FaceDefault
-			if e.dap != nil && e.dap.stoppedFile == buf.Filename() && e.dap.stoppedLine == vl.Line {
+			if stoppedHere && e.dap.stoppedLine == vl.Line {
 				epCh, epFace = '→', syntax.FaceExecPos
 			}
 			e.term.SetCell(w.Left()+1, screenRow, rune(epCh), epFace)
@@ -3034,12 +3335,14 @@ func (e *Editor) renderModeline(w *window.Window) {
 	}
 
 	label := fmt.Sprintf(" %s  %-20s  (%s%s%s%s)  L%d C%d ", modifiedMark, name, mode, narrow, macro, diag, line, col)
-	// Pad to window width.
-	for len(label) < winW {
-		label += " "
-	}
-	if len(label) > winW {
-		label = label[:winW]
+	// Pad (or truncate) to the window width.  This has to be measured in runes,
+	// not bytes: the terminal is rune-addressed, so a non-ASCII buffer name
+	// would otherwise mis-pad the modeline or truncate mid-UTF-8-sequence.
+	// strings.Repeat also replaces a loop that allocated once per column.
+	if lr := []rune(label); len(lr) < winW {
+		label += strings.Repeat(" ", winW-len(lr))
+	} else if len(lr) > winW {
+		label = string(lr[:winW])
 	}
 
 	// For the *compilation* buffer, colour the buffer-name segment on the
@@ -3051,10 +3354,13 @@ func (e *Editor) renderModeline(w *window.Window) {
 		}
 		// Blend: keep the modeline background, override only Fg/Bold.
 		nameFace.Bg = syntax.FaceModeline.Bg
-		// Split label around the buffer name.
+		// Split label around the buffer name.  Rune offsets, for the same
+		// reason the padding above uses them.
 		prefix := fmt.Sprintf(" %s  ", modifiedMark)
-		suffix := label[len(prefix)+len(fmt.Sprintf("%-20s", name)):]
 		nameField := fmt.Sprintf("%-20s", name)
+		labelRunes := []rune(label)
+		split := min(len([]rune(prefix))+len([]rune(nameField)), len(labelRunes))
+		suffix := string(labelRunes[split:])
 		col := w.Left()
 		e.term.DrawString(col, modeRow, prefix, syntax.FaceModeline)
 		col += len([]rune(prefix))
@@ -3264,7 +3570,7 @@ func (e *Editor) applyVisualLines() {
 		col = 80
 	}
 	for _, w := range e.windows {
-		mode := w.Buf().Mode()
+		mode := baseMode(w.Buf().Mode())
 		if mode == "vc-grep" || mode == "lsp-refs" || mode == "vc-status" ||
 			mode == "vc-log" || mode == "vc-show" || mode == "diff" ||
 			mode == "compilation" || mode == "vc-fixup-select" || mode == "shell" ||

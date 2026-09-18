@@ -412,16 +412,21 @@ func TestTransposeWordsMidPhrase(t *testing.T) {
 }
 
 func TestTransposeWordsSingleWord(t *testing.T) {
-	// Only one word in the buffer — should set a message, no crash.
+	// Only one word in the buffer: there is nothing to swap, so the buffer
+	// must come out byte-for-byte unchanged and the change generation must not
+	// move (no undo record for a no-op).
 	e := newTestEditor("onlyone")
 	b := buf(e)
 	b.SetPoint(0)
 	before := b.String()
+	genBefore := b.ChangeGen()
 	e.cmdTransposeWords()
-	// Buffer must be unchanged (or contain some variation that keeps content).
-	// The command should not panic.
-	_ = b.String()
-	_ = before
+	if got := b.String(); got != before {
+		t.Errorf("transpose-words with a single word changed the buffer: %q -> %q", before, got)
+	}
+	if got := b.ChangeGen(); got != genBefore {
+		t.Errorf("transpose-words with a single word bumped ChangeGen: %d -> %d", genBefore, got)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -25,7 +25,8 @@ type langModeInfo struct {
 	// modeName is the internal mode string stored on the buffer (e.g. "go").
 	modeName string
 	// lspCmd is the command and arguments to start the LSP server.
-	// Empty means no LSP support for this mode.
+	// Empty means no LSP support for this mode.  The user can override (or
+	// supply) it with (setq <mode>-lsp-command "…"); see applyElispLspCommands.
 	lspCmd []string
 	// dapCmd is the command and arguments to start the DAP debug adapter.
 	// Empty means no DAP support for this mode, unless dapKind names an adapter
@@ -37,6 +38,14 @@ type langModeInfo struct {
 	// rootMarkers are filenames that indicate the project root when walking
 	// upward from the file's directory (e.g. "go.mod", "pyproject.toml").
 	rootMarkers []string
+	// indentUnitAware reports whether the mode's indentation engine honours the
+	// per-level indent unit that modeIndentStr resolves.  Modes without an
+	// indentation engine of their own (markdown, yaml, text, …) copy the previous
+	// line's indentation and ignore the unit entirely, so for them a
+	// "<mode>-indent" variable would be a knob that does nothing — which is why
+	// only the aware modes get one documented.  See indentVarName and
+	// TestModeIndentUnitAwarenessMatchesIndentEngine.
+	indentUnitAware bool
 }
 
 // hasDebugAdapter reports whether debug-start has any way of obtaining a debug
@@ -59,15 +68,18 @@ func (i *langModeInfo) dapAdapterName() string {
 
 // langModes lists every supported language mode.
 var langModes = []langModeInfo{
-	{modeName: "go", lspCmd: []string{"gopls"}, dapCmd: []string{"dlv", "dap"}, rootMarkers: []string{"go.mod", "go.work"}},
-	{modeName: "python", rootMarkers: []string{"pyproject.toml", "setup.py", "setup.cfg"}},
-	{modeName: "java", dapKind: dapAdapterJdtls, rootMarkers: []string{"pom.xml", "build.gradle", "build.gradle.kts"}},
-	{modeName: "bash", rootMarkers: []string{}},
-	{modeName: "perl", rootMarkers: []string{}},
+	{modeName: "go", lspCmd: []string{"gopls"}, dapCmd: []string{"dlv", "dap"}, rootMarkers: []string{"go.mod", "go.work"}, indentUnitAware: true},
+	{modeName: "python", rootMarkers: []string{"pyproject.toml", "setup.py", "setup.cfg"}, indentUnitAware: true},
+	// jdtls is both the java language server and — via the java-debug bundle it
+	// loads — the way a java debug adapter is reached, so debug-start depends on
+	// this command having produced a live connection; see dapStartJdtls.
+	{modeName: "java", lspCmd: []string{"jdtls"}, dapKind: dapAdapterJdtls, rootMarkers: []string{"pom.xml", "build.gradle", "build.gradle.kts"}, indentUnitAware: true},
+	{modeName: "bash", rootMarkers: []string{}, indentUnitAware: true},
+	{modeName: "perl", rootMarkers: []string{}, indentUnitAware: true},
 	{modeName: "gherkin", rootMarkers: []string{}},
 	{modeName: "markdown", rootMarkers: []string{}},
 	{modeName: "elisp", rootMarkers: []string{}},
-	{modeName: "json", rootMarkers: []string{}},
+	{modeName: "json", rootMarkers: []string{}, indentUnitAware: true},
 	{modeName: "yaml", rootMarkers: []string{}},
 	{modeName: "makefile", rootMarkers: []string{}},
 	{modeName: "conf", rootMarkers: []string{}},
@@ -90,6 +102,9 @@ func langModeByName(name string) *langModeInfo {
 func (e *Editor) setLangMode(buf *buffer.Buffer, mode string) {
 	buf.SetMode(mode)
 	if buf.Filename() != "" {
+		// Pick up any (setq <mode>-lsp-command …) before the server is started, so
+		// a value the user set after startup is honoured by the next mode switch.
+		e.applyElispLspCommands()
 		e.lspActivate(buf)
 	}
 	e.markVisualLinesDirty()
@@ -194,15 +209,16 @@ func (e *Editor) cmdGherkinMode() {
 }
 
 // modeIndentStr returns the per-level indent string for the given major mode.
-// The value is read from the Elisp global variable "<mode>-indent" (bash uses
-// "sh-indent").  An Int value is expanded to that many spaces; a StringVal is
-// used verbatim.  If the variable is unset, sensible defaults are returned:
-// "\t" for Go, two spaces for everything else.
+// The value is read from the Elisp global variable named by indentVarName.  An
+// Int value is expanded to that many spaces; a StringVal is used verbatim.  If
+// the variable is unset, sensible defaults are returned: "\t" for Go, two
+// spaces for everything else.
+//
+// The result only reaches the buffer for modes whose langModeInfo is
+// indentUnitAware; the other modes copy the previous line's indentation and
+// ignore the unit.
 func (e *Editor) modeIndentStr(mode string) string {
-	varName := mode + "-indent"
-	if mode == "bash" {
-		varName = "sh-indent"
-	}
+	varName := indentVarName(mode)
 	if v, ok := e.lisp.GetGlobalVar(varName); ok {
 		switch val := v.(type) {
 		case elisp.Int:
@@ -219,4 +235,50 @@ func (e *Editor) modeIndentStr(mode string) string {
 		return "\t"
 	}
 	return "  "
+}
+
+// indentVarName returns the Elisp variable that configures the per-level indent
+// unit of the given major mode.  bash-mode is spelled "sh-indent" for Emacs
+// compatibility; every other mode uses "<mode>-indent".
+func indentVarName(mode string) string {
+	if mode == "bash" {
+		return "sh-indent"
+	}
+	return mode + "-indent"
+}
+
+// lspCommandVarName returns the Elisp variable that sets the language-server
+// command of the given major mode, e.g. "java-lsp-command".
+func lspCommandVarName(mode string) string {
+	return mode + "-lsp-command"
+}
+
+// applyElispLspCommands sets each major mode's language-server command from
+// "<mode>-lsp-command", e.g. (setq java-lsp-command "jdtls -data /tmp/ws").  The
+// value is split on whitespace so arguments can be included, and the empty
+// string disables the mode's language server altogether.  This is the only way
+// to give a mode that ships without a default (python, bash, …) an LSP
+// connection — and, for java, the only way to point gomacs at a jdtls wrapper,
+// which debug-start needs since the java debug adapter is reached through the
+// language server.
+//
+// The command is written into langModes, which is what lspActivate reads: the
+// table is process-wide configuration and there is one editor per process.
+// Called from setLangMode before a server is started, and intended to be called
+// from applyElispConfig too so that files opened straight from the command line
+// or find-file — which reach lspActivate through loadFile, not setLangMode — pick
+// the override up as well.
+func (e *Editor) applyElispLspCommands() {
+	if e.lisp == nil {
+		return
+	}
+	for i := range langModes {
+		v, ok := e.lisp.GetGlobalVar(lspCommandVarName(langModes[i].modeName))
+		if !ok {
+			continue
+		}
+		if s, isStr := v.(elisp.StringVal); isStr {
+			langModes[i].lspCmd = strings.Fields(s.V)
+		}
+	}
 }

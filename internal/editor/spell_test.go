@@ -1,7 +1,9 @@
 package editor
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +49,91 @@ func newSpellTestEditor(t *testing.T, content string) *Editor {
 	e.spellLanguage = "en"
 	e.spellCaches = make(map[*buffer.Buffer]*spellCache)
 	return e
+}
+
+// fakeAspell writes a stub spell checker to a temporary directory and returns
+// its path.  It ignores its arguments and its stdin and reports every word in
+// words as misspelled, which is the whole contract runAspellList relies on.
+// The stub keeps the tests hermetic: CI has no aspell installed.
+func fakeAspell(t *testing.T, words ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-aspell")
+	script := "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n'"
+	for _, w := range words {
+		script += " " + w
+	}
+	if err := os.WriteFile(path, []byte(script+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// ---------------------------------------------------------------------------
+// computeSpellSpansForMode — comment-only modes
+// ---------------------------------------------------------------------------
+
+// TestComputeSpellSpansForMode_ConfComments checks that conf-mode '#' comments
+// are spell-checked: doc/gomacs-spec.md requires conf-mode to spell-check
+// comments like the other programming modes.  It regressed once because
+// syntax.LangToHighlighter had no "conf" case, so no comment spans were found.
+func TestComputeSpellSpansForMode_ConfComments(t *testing.T) {
+	const bad = "mispelled"
+	stub := fakeAspell(t, bad)
+	tests := []struct {
+		name string
+		text string
+		// want holds the [start, end) rune ranges expected to be flagged.
+		want [][2]int
+	}{
+		{
+			name: "full line comment",
+			text: "# a mispelled word\nkey = 1\n",
+			want: [][2]int{{4, 13}},
+		},
+		{
+			name: "inline comment",
+			text: "key = 1 # mispelled\n",
+			want: [][2]int{{10, 19}},
+		},
+		{
+			// Keys and values are code, not prose: only comments are checked.
+			name: "no comments",
+			text: "mispelled = mispelled\n",
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spans := computeSpellSpansForMode(stub, "en", tc.text, "conf")
+			if len(spans) != len(tc.want) {
+				t.Fatalf("got %d spans %v, want %d", len(spans), spans, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if spans[i].Start != w[0] || spans[i].End != w[1] {
+					t.Errorf("span %d = [%d,%d), want [%d,%d)",
+						i, spans[i].Start, spans[i].End, w[0], w[1])
+				}
+				if got := []rune(tc.text)[spans[i].Start:spans[i].End]; string(got) != bad {
+					t.Errorf("span %d covers %q, want %q", i, string(got), bad)
+				}
+			}
+		})
+	}
+}
+
+// TestComputeSpellSpansForMode_ConfMatchesBash pins conf-mode's comment
+// spell-checking to bash-mode's, since both use '#' comments.
+func TestComputeSpellSpansForMode_ConfMatchesBash(t *testing.T) {
+	stub := fakeAspell(t, "mispelled")
+	text := "# mispelled\n"
+	conf := computeSpellSpansForMode(stub, "en", text, "conf")
+	bash := computeSpellSpansForMode(stub, "en", text, "bash")
+	if len(conf) == 0 {
+		t.Fatal("conf-mode found no spell errors in a '#' comment")
+	}
+	if len(conf) != len(bash) || conf[0] != bash[0] {
+		t.Errorf("conf spans %v differ from bash spans %v", conf, bash)
+	}
 }
 
 // ---------------------------------------------------------------------------

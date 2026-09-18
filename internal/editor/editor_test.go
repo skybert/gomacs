@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1815,6 +1817,116 @@ func BenchmarkSpanCacheTextMaterialise(bench *testing.B) {
 }
 
 // ---------------------------------------------------------------------------
+// keystroke benchmark matrix: mode × file size × cursor position
+// ---------------------------------------------------------------------------
+
+// markdownSource returns Markdown with roughly lines lines, including fenced
+// code blocks so the fence state has to be carried across many of them.
+func markdownSource(lines int) string {
+	var sb strings.Builder
+	sb.WriteString("# Title\n\n")
+	for i := range lines / 8 {
+		fmt.Fprintf(&sb, "## Section %d\n\nSome *italic* and **bold** and `code` "+
+			"and a [link](http://example.com/%d).\n\n```go\nfunc f%d() {}\n```\n\n", i, i, i)
+	}
+	return sb.String()
+}
+
+// yamlSource returns YAML with roughly lines lines.
+func yamlSource(lines int) string {
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	for i := range lines / 6 {
+		fmt.Fprintf(&sb, "# comment %d\nitem%d:\n  name: \"value %d\"\n"+
+			"  count: %d\n  enabled: true\n  tags: [a, b, c]\n", i, i, i, i)
+	}
+	return sb.String()
+}
+
+// benchModeSource returns source text for mode with roughly lines lines.
+func benchModeSource(mode string, lines int) string {
+	switch mode {
+	case "markdown":
+		return markdownSource(lines)
+	case "yaml":
+		return yamlSource(lines)
+	default:
+		return goSource(lines / 8)
+	}
+}
+
+// plainHighlighter hides a highlighter's rune and resume fast paths behind the
+// bare Highlighter interface.  Installing it reproduces what a keystroke cost
+// before checkpointed resumption — the whole prefix re-encoded to a string and
+// rescanned from offset 0 — so the benchmarks below measure both in one run.
+type plainHighlighter struct{ inner syntax.Highlighter }
+
+func (p plainHighlighter) Highlight(text string, start, end int) []syntax.Span {
+	return p.inner.Highlight(text, start, end)
+}
+
+// benchKeystrokeRedraw measures one keystroke (insert + delete, so the buffer
+// content is restored but two change generations have gone by) followed by a
+// full Redraw, with the window scrolled so that the cursor sits on scrollLine.
+// When plain is true the highlighter's fast paths are hidden, which is the
+// pre-optimisation behaviour.
+func benchKeystrokeRedraw(bench *testing.B, src, mode string, scrollLine int, plain bool) {
+	e := newCapTestEditor(src)
+	b := buf(e)
+	b.SetMode(mode)
+	if plain {
+		e.customHighlighters[b] = plainHighlighter{inner: highlighterFor(b)}
+	}
+	w := e.activeWin
+	w.SetScrollLine(scrollLine)
+	pt := w.ViewLines()[0].StartPos
+	b.SetPoint(pt)
+
+	bench.ReportAllocs()
+	bench.ResetTimer()
+	for range bench.N {
+		b.Insert(pt, 'x')
+		b.Delete(pt, 1)
+		e.Redraw()
+	}
+}
+
+// BenchmarkKeystrokeRedraw is the headline typing benchmark: how long one
+// keystroke plus a full frame costs across modes, file sizes and cursor
+// positions.  The cursor position matters because a highlighter that cannot
+// resume has to rescan the whole prefix before the cursor — which is what the
+// "scan0" variant of each case measures.
+func BenchmarkKeystrokeRedraw(bench *testing.B) {
+	for _, mode := range []string{"go", "markdown", "yaml"} {
+		for _, lines := range []int{1000, 10000, 50000} {
+			src := benchModeSource(mode, lines)
+			total := strings.Count(src, "\n") + 1
+			for _, pos := range []struct {
+				name string
+				line int
+			}{
+				{"top", 1},
+				{"mid", total / 2},
+				{"end", max(total-20, 1)},
+			} {
+				for _, variant := range []struct {
+					name  string
+					plain bool
+				}{
+					{"resume", false},
+					{"scan0", true},
+				} {
+					bench.Run(fmt.Sprintf("%s/%dk/%s/%s", mode, lines/1000, pos.name, variant.name),
+						func(bench *testing.B) {
+							benchKeystrokeRedraw(bench, src, mode, pos.line, variant.plain)
+						})
+				}
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // end-to-end: bounded highlighting draws the same faces as full highlighting
 // ---------------------------------------------------------------------------
 
@@ -1952,6 +2064,11 @@ func newCapTestEditor(content string) *Editor {
 		isSearchCaseFold:           true,
 		saveBufferDeleteTrailingWS: true,
 		customHighlighters:         make(map[*buffer.Buffer]syntax.Highlighter),
+		autoRevertMtimes:           make(map[*buffer.Buffer]time.Time),
+		// lspAsync sends its completion callback to lspCbs; leaving it nil made
+		// every async spell/LSP path block a goroutine forever and hid the
+		// callback from assertions.  Buffered so nothing has to drain it.
+		lspCbs: make(chan func(), 64),
 	}
 	e.minibufWin = window.New(e.minibufBuf, 23, 0, 80, 1)
 	e.lisp = elisp.NewEvaluator()
@@ -4498,5 +4615,689 @@ func TestKillBuffer(t *testing.T) {
 	}
 	if e.FindBuffer("*extra*") != nil {
 		t.Fatal("KillBuffer: *extra* buffer still exists")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isearch backward: reversal and repeat (regression tests)
+// ---------------------------------------------------------------------------
+
+// ctrlS / ctrlR drive isearch through the real key handler so isearchStep's
+// direction-reversal logic is exercised, not bypassed.
+func ctrlS(e *Editor) { e.isearchHandleKey(terminal.KeyEvent{Key: tcell.KeyCtrlS}) }
+func ctrlR(e *Editor) { e.isearchHandleKey(terminal.KeyEvent{Key: tcell.KeyCtrlR}) }
+
+// TestIsearchBackward_RepeatFindsCloseMatch is defect 1: with matches closer
+// together than the needle length, the backward scan used to skip over the
+// nearer one and wrongly report a wrap.
+func TestIsearchBackward_RepeatFindsCloseMatch(t *testing.T) {
+	e := newTestEditorWithIsearch("abab")
+	b := buf(e)
+	b.SetPoint(b.Len())
+	e.isearching = true
+	e.isearchFwd = false
+	e.isearchStart = b.Len()
+	e.isearchStr = "ab"
+	e.isearchFind()
+	if got := b.Point(); got != 2 {
+		t.Fatalf("first backward match: point = %d, want 2", got)
+	}
+
+	e.message = ""
+	ctrlR(e)
+
+	if got := b.Point(); got != 0 {
+		t.Errorf("second backward match: point = %d, want 0", got)
+	}
+	if strings.Contains(e.message, "Wrapped") {
+		t.Errorf("should not report a wrap when an earlier match exists, got %q", e.message)
+	}
+}
+
+// TestIsearchReverseLandsOnCurrentMatch is defect 2: reversing direction onto
+// the only match used to report "Failing isearch" and leave point put.  Emacs
+// moves to the other end of the same match.
+func TestIsearchReverseLandsOnCurrentMatch(t *testing.T) {
+	e := newTestEditorWithIsearch("hello needle world")
+	b := buf(e)
+	startFwdIsearch(e, 0)
+	e.isearchStr = "needle"
+	e.isearchFind()
+	if got, want := b.Point(), len("hello needle"); got != want {
+		t.Fatalf("forward match: point = %d, want %d", got, want)
+	}
+
+	e.message = ""
+	ctrlR(e)
+
+	if got, want := b.Point(), len("hello "); got != want {
+		t.Errorf("after C-r: point = %d, want %d (start of the same match)", got, want)
+	}
+	if strings.Contains(e.message, "Failing") {
+		t.Errorf("reversing onto an existing match must not fail, got %q", e.message)
+	}
+}
+
+// TestIsearchReverseForwardAgainReturnsToMatchEnd is the mirror case.
+func TestIsearchReverseForwardAgainReturnsToMatchEnd(t *testing.T) {
+	e := newTestEditorWithIsearch("hello needle world")
+	b := buf(e)
+	startFwdIsearch(e, 0)
+	e.isearchStr = "needle"
+	e.isearchFind()
+	ctrlR(e) // now at match start
+	ctrlS(e) // reversing again → match end
+
+	if got, want := b.Point(), len("hello needle"); got != want {
+		t.Errorf("after C-r then C-s: point = %d, want %d", got, want)
+	}
+}
+
+// TestIsearchBackward_StillWrapsWhenNoEarlierMatch keeps the wrap behaviour the
+// spec asks for, so the defect-1 fix did not remove it.
+func TestIsearchBackward_StillWrapsWhenNoEarlierMatch(t *testing.T) {
+	e := newTestEditorWithIsearch("abc defX")
+	b := buf(e)
+	e.isearching = true
+	e.isearchFwd = false
+	e.isearchStr = "X"
+	b.SetPoint(0)
+
+	e.isearchFindNext()
+
+	if got, want := b.Point(), len("abc def"); got != want {
+		t.Errorf("point = %d, want %d", got, want)
+	}
+	if !strings.Contains(e.message, "top of buffer") {
+		t.Errorf("message = %q, want it to mention the top of the buffer", e.message)
+	}
+}
+
+func TestIsearchCurrentMatchStart(t *testing.T) {
+	e := newTestEditorWithIsearch("abab")
+	b := buf(e)
+	e.isearching = true
+	e.isearchStr = "ab"
+
+	// Point at 2 is both a match start and a match end; pointAtEnd decides.
+	b.SetPoint(2)
+	if got := e.isearchCurrentMatchStart(true); got != 0 {
+		t.Errorf("pointAtEnd=true: got %d, want 0", got)
+	}
+	if got := e.isearchCurrentMatchStart(false); got != 2 {
+		t.Errorf("pointAtEnd=false: got %d, want 2", got)
+	}
+	// A position with no match either side.
+	e.isearchStr = "zz"
+	if got := e.isearchCurrentMatchStart(true); got != -1 {
+		t.Errorf("no match: got %d, want -1", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// modeFromShebang with interpreter flags
+// ---------------------------------------------------------------------------
+
+func TestModeFromShebang_WithInterpreterFlags(t *testing.T) {
+	cases := []struct {
+		shebang string
+		want    string
+	}{
+		{"#!/usr/bin/perl -w\n", "perl"}, // the canonical Perl shebang
+		{"#!/bin/bash -e\n", "bash"},
+		{"#!/bin/bash -eu -o pipefail\n", "bash"},
+		{"#!/usr/bin/env bash -x\n", "bash"},
+		{"#!/usr/bin/python -u\n", "python"},
+		{"#!/usr/bin/env python3 -u\n", "python"},
+		{"#!/usr/bin/env -S python3 -u\n", "python"},
+		{"#!/usr/bin/env -S perl -w\n", "perl"},
+		{"#!/usr/bin/env VAR=1 python3\n", "python"},
+		{"#!/bin/sh -e\n", "bash"},
+		// Still no mode for interpreters we do not know.
+		{"#!/usr/bin/env ruby -w\n", ""},
+		{"#!\n", ""},
+		{"#! \n", ""},
+	}
+	for _, tc := range cases {
+		if got := modeFromShebang(tc.shebang); got != tc.want {
+			t.Errorf("modeFromShebang(%q) = %q, want %q", tc.shebang, got, tc.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// baseMode
+// ---------------------------------------------------------------------------
+
+func TestBaseMode(t *testing.T) {
+	cases := map[string]string{
+		"debug-repl":      "debug-repl",
+		"debug-repl+java": "debug-repl",
+		"vc-annotate+go":  "vc-annotate",
+		"go":              "go",
+		"":                "",
+	}
+	for in, want := range cases {
+		if got := baseMode(in); got != want {
+			t.Errorf("baseMode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestApplyVisualLinesDebugReplSuffixDoesNotWrap is a regression test: the REPL
+// buffer's mode carries a "+lang" suffix, which used to miss the no-wrap list
+// and let REPL output wrap.
+func TestApplyVisualLinesDebugReplSuffixDoesNotWrap(t *testing.T) {
+	for _, mode := range []string{"debug-repl", "debug-repl+go", "debug-repl+java"} {
+		e := newTestEditor("some quite long repl output line")
+		e.visualLines = true
+		e.visualLinesSynced = false
+		buf(e).SetMode(mode)
+		if got := buf(e).Mode(); got != mode {
+			t.Fatalf("SetMode(%q) did not stick, got %q", mode, got)
+		}
+		e.applyVisualLines()
+		if got := e.activeWin.WrapCol(); got != 0 {
+			t.Errorf("mode %q: wrapCol = %d, want 0 (no wrapping)", mode, got)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// conf-mode file association
+// ---------------------------------------------------------------------------
+
+// TestLoadFileConfModeAssociation pins the spec's conf-mode file list and the
+// two edge cases that were wrong: "weird.src" is not a config file just because
+// its extension ends in "rc", and .bashrc stays bash-mode because it is a shell
+// script rather than plain config.
+func TestLoadFileConfModeAssociation(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"app.conf", "conf"},
+		{"settings.toml", "conf"},
+		{"inputrc", "conf"},
+		{".npmrc", "conf"},
+		{"mysqlrc", "conf"},
+		{"weird.src", "fundamental"}, // extension merely ends in "rc"
+		{"main.arc", "fundamental"},
+		{".bashrc", "bash"}, // deliberate: shell scripts get bash-mode
+		{".zshrc", "bash"},
+	}
+	dir := t.TempDir()
+	for _, tc := range cases {
+		path := filepath.Join(dir, tc.name)
+		if err := os.WriteFile(path, []byte("key = value\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		e := newTestEditor("")
+		b, err := e.loadFile(path)
+		if err != nil {
+			t.Fatalf("loadFile(%s): %v", tc.name, err)
+		}
+		if got := b.Mode(); got != tc.want {
+			t.Errorf("%s: mode = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// debug gutter path canonicalisation
+// ---------------------------------------------------------------------------
+
+// TestRenderWindowGutterMatchesNonCanonicalFilename is a regression test: the
+// breakpoint map is keyed by canonical path, but rendering compared the raw
+// buffer filename, so the marker and the exec arrow never appeared for any
+// buffer whose name was relative or went through a symlinked directory.
+func TestRenderWindowGutterMatchesNonCanonicalFilename(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "prog.txt")
+	if err := os.WriteFile(real, []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A non-canonical spelling of the same file.
+	noisy := filepath.Join(dir, ".", "prog.txt")
+
+	e := newCapTestEditor("one\ntwo\nthree\n")
+	b := e.ActiveBuffer()
+	b.SetFilename(noisy)
+	e.dapBreakpoints = map[string]map[int]struct{}{
+		canonPath(noisy): {2: {}},
+	}
+	e.dap = &dapState{stoppedFile: canonPath(noisy), stoppedLine: 3}
+
+	e.renderWindow(e.activeWin)
+
+	if ch, _ := e.term.CaptureCell(0, 1); ch != '●' {
+		t.Errorf("breakpoint marker on line 2: got %q, want '●'", ch)
+	}
+	if ch, _ := e.term.CaptureCell(1, 2); ch != '→' {
+		t.Errorf("exec arrow on line 3: got %q, want '→'", ch)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// modeline padding
+// ---------------------------------------------------------------------------
+
+// TestRenderModelinePadsByRunesNotBytes checks a non-ASCII buffer name does not
+// mis-pad or truncate the modeline mid-UTF-8-sequence.
+func TestRenderModelinePadsByRunesNotBytes(t *testing.T) {
+	e := newCapTestEditor("hello\n")
+	e.ActiveBuffer().SetName("køpenhavn-æøå.txt")
+
+	e.renderModeline(e.activeWin)
+
+	// The modeline is the window's last row.
+	row := captureRow(t, e, e.activeWin.Top()+e.activeWin.Height()-1)
+	if strings.ContainsRune(row, '�') {
+		t.Errorf("modeline contains a replacement rune (truncated mid-sequence): %q", row)
+	}
+	width, _ := e.term.CaptureSize()
+	if len([]rune(row)) != width {
+		t.Errorf("modeline spans %d runes, want the full window width %d", len([]rune(row)), width)
+	}
+	if !strings.Contains(row, "køpenhavn") {
+		t.Errorf("modeline should show the buffer name, got %q", row)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// span cache: checkpointed resumption
+// ---------------------------------------------------------------------------
+
+func TestFirstDiffRune(t *testing.T) {
+	tests := []struct {
+		name  string
+		a, b  string
+		limit int
+		want  int
+	}{
+		{"identical", "hello world", "hello world", 11, 11},
+		{"differ at 0", "xello", "hello", 5, 0},
+		{"differ in the middle", "hello world", "hello WORLD", 11, 6},
+		{"insertion shifts the tail", "abcdef", "abXcdef", 6, 2},
+		{"limit stops the search early", "abcdef", "abcXef", 3, 3},
+		{"b is shorter", "abcdef", "abc", 6, 3},
+		{"a is shorter", "abc", "abcdef", 6, 3},
+		{"both empty", "", "", 0, 0},
+		{"negative limit", "abc", "xyz", -1, 0},
+		{"multibyte", "sø" + "en", "sø" + "an", 4, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := firstDiffRune([]rune(tc.a), []rune(tc.b), tc.limit); got != tc.want {
+				t.Errorf("firstDiffRune(%q, %q, %d) = %d, want %d",
+					tc.a, tc.b, tc.limit, got, tc.want)
+			}
+		})
+	}
+}
+
+// resumeRecorder wraps a resumable highlighter and records the state every scan
+// resumed from, so a test can see whether an edit reused a checkpoint or started
+// over at offset 0.
+type resumeRecorder struct {
+	inner   syntax.Resumable
+	resumes []syntax.ScanState
+}
+
+func (r *resumeRecorder) Highlight(text string, start, end int) []syntax.Span {
+	return r.inner.Highlight(text, start, end)
+}
+
+func (r *resumeRecorder) HighlightRunes(runes []rune, start, end int) []syntax.Span {
+	return r.inner.HighlightRunes(runes, start, end)
+}
+
+func (r *resumeRecorder) HighlightResume(runes []rune, st syntax.ScanState, end int,
+	cp *syntax.Checkpoints) []syntax.Span {
+	r.resumes = append(r.resumes, st)
+	return r.inner.HighlightResume(runes, st, end, cp)
+}
+
+// lastResume returns the offset the most recent scan started from.
+func (r *resumeRecorder) lastResume(t *testing.T) int {
+	t.Helper()
+	if len(r.resumes) == 0 {
+		t.Fatal("the highlighter was never asked to resume")
+	}
+	return r.resumes[len(r.resumes)-1].Pos
+}
+
+// newResumeTestEditor returns an editor over content whose buffer uses a
+// recording resumable highlighter.
+func newResumeTestEditor(content, mode string, inner syntax.Resumable) (*Editor, *buffer.Buffer, *resumeRecorder) {
+	e := newCapTestEditor(content)
+	b := buf(e)
+	b.SetMode(mode)
+	rec := &resumeRecorder{inner: inner}
+	e.spanCaches = make(map[*buffer.Buffer]*spanCache)
+	e.customHighlighters[b] = rec
+	return e, b, rec
+}
+
+func TestSpanCacheRecordsCheckpoints(t *testing.T) {
+	e, b, _ := newResumeTestEditor(goSource(2000), "go", syntax.GoHighlighter{})
+	c := e.getSpanCache(b)
+	if len(c.checkpoints) < 2 {
+		t.Fatalf("full scan recorded %d checkpoints, want several", len(c.checkpoints))
+	}
+	prev := -1
+	for i, cp := range c.checkpoints {
+		if cp.st.Pos <= prev {
+			t.Fatalf("checkpoint %d at %d is not past the previous one at %d", i, cp.st.Pos, prev)
+		}
+		prev = cp.st.Pos
+		if cp.nspans > len(c.spans) {
+			t.Fatalf("checkpoint %d records %d spans, cache holds %d", i, cp.nspans, len(c.spans))
+		}
+	}
+}
+
+// TestSpanCacheResumesAfterEditNearTheEnd is the point of the whole exercise: a
+// keystroke deep into a large file must not rescan the text before it.
+func TestSpanCacheResumesAfterEditNearTheEnd(t *testing.T) {
+	src := goSource(2000)
+	e, b, rec := newResumeTestEditor(src, "go", syntax.GoHighlighter{})
+	e.getSpanCache(b) // prime a full-buffer cache with checkpoints
+	if got := rec.lastResume(t); got != 0 {
+		t.Fatalf("the priming scan resumed from %d, want 0", got)
+	}
+	editPos := b.Len() - 40
+	b.Insert(editPos, 'x')
+	e.getSpanCache(b)
+
+	got := rec.lastResume(t)
+	if got == 0 {
+		t.Fatal("an edit near the end of the buffer rescanned from offset 0")
+	}
+	if got > editPos {
+		t.Errorf("resumed from %d, which is past the edit at %d", got, editPos)
+	}
+	if editPos-got > spanCheckpointEvery {
+		t.Errorf("resumed from %d for an edit at %d: %d runes further back than the %d-rune checkpoint interval",
+			got, editPos, editPos-got, spanCheckpointEvery)
+	}
+}
+
+// TestSpanCacheDiscardsCheckpointsAtTheEdit checks the other half of the
+// contract: an edit near the top must invalidate everything after it.
+func TestSpanCacheDiscardsCheckpointsAtTheEdit(t *testing.T) {
+	e, b, rec := newResumeTestEditor(goSource(2000), "go", syntax.GoHighlighter{})
+	e.getSpanCache(b)
+	b.Insert(3, 'x')
+	e.getSpanCache(b)
+	if got := rec.lastResume(t); got > 3 {
+		t.Errorf("resumed from %d after an edit at offset 3", got)
+	}
+}
+
+// TestSpanCacheChangingHighlighterDropsCheckpoints guards the hlType check: a
+// checkpoint taken by one highlighter says nothing about another's state, so
+// swapping the highlighter for a buffer (as the compilation buffer does) must
+// start the scan over.
+func TestSpanCacheChangingHighlighterDropsCheckpoints(t *testing.T) {
+	e, b, rec := newResumeTestEditor(goSource(500), "go", syntax.GoHighlighter{})
+	c := e.getSpanCache(b)
+	if len(c.checkpoints) < 2 {
+		t.Fatalf("only %d checkpoints; nothing to drop", len(c.checkpoints))
+	}
+	// Stand in for a highlighter swap: the recorded type no longer matches the
+	// one the next scan will use.
+	c.hlType = reflect.TypeOf(syntax.PythonHighlighter{})
+	b.Insert(b.Len()-10, 'x')
+	e.getSpanCache(b)
+	if got := rec.lastResume(t); got != 0 {
+		t.Errorf("checkpoints from another highlighter were reused: resumed from %d, want 0", got)
+	}
+}
+
+// TestSpanCacheReusesRuneScratch pins the double-buffering: the slice retired
+// when the content changes comes back as the fill target next time, so steady
+// state typing does not allocate a fresh copy of the buffer per keystroke.
+func TestSpanCacheReusesRuneScratch(t *testing.T) {
+	e, b, _ := newResumeTestEditor(goSource(200), "go", syntax.GoHighlighter{})
+	first := e.getSpanCache(b)
+	b.Insert(0, 'x')
+	second := e.getSpanCache(b)
+	if &second.spare[0] != &first.runes[0] {
+		t.Error("the previous generation's rune slice was not retained as scratch")
+	}
+	b.Insert(0, 'y')
+	third := e.getSpanCache(b)
+	if &third.runes[0] != &second.spare[0] {
+		t.Error("the scratch slice was not reused as the next generation's runes")
+	}
+}
+
+// TestSpanCacheResumedSpansMatchFullScan is the editor-side differential test
+// for resumption: after an edit anywhere in the buffer, the cached spans must be
+// the ones a scan from offset 0 produces.
+func TestSpanCacheResumedSpansMatchFullScan(t *testing.T) {
+	src := goSourceWithMultiLineState()
+	e := newCapTestEditor(src)
+	b := buf(e)
+	b.SetMode("go")
+	e.getSpanCache(b)
+
+	// Edit at many positions, including inside the block comment and the raw
+	// string near the top, and check the whole cache after each one.
+	for _, frac := range []int{0, 1, 5, 12, 25, 40, 50, 60, 75, 90, 99} {
+		pos := b.Len() * frac / 100
+		b.Insert(pos, 'x')
+		got := e.getSpanCache(b)
+
+		ref := newCapTestEditor(b.String())
+		buf(ref).SetMode("go")
+		want := ref.getSpanCache(buf(ref))
+		if len(got.spans) != len(want.spans) {
+			t.Fatalf("edit at %d%% (offset %d): cache holds %d spans, a full scan gives %d",
+				frac, pos, len(got.spans), len(want.spans))
+		}
+		for i := range got.spans {
+			if got.spans[i] != want.spans[i] {
+				t.Fatalf("edit at %d%% (offset %d): span %d is %v, want %v",
+					frac, pos, i, got.spans[i], want.spans[i])
+			}
+		}
+		b.Delete(pos, 1)
+		e.getSpanCache(b)
+	}
+}
+
+// TestRenderWindowFacesMatchAfterEdits is the end-to-end guard: after an edit at
+// each of many positions, every cell the renderer draws must carry the face a
+// full-buffer highlight would give it.  Both markdown (cross-line fence state)
+// and Go (raw strings and block comments) are covered.
+func TestRenderWindowFacesMatchAfterEdits(t *testing.T) {
+	cases := []struct {
+		mode string
+		src  string
+	}{
+		{"go", goSourceWithMultiLineState()},
+		{"markdown", markdownSourceWithFences()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			e := newCapTestEditor(tc.src)
+			b := buf(e)
+			b.SetMode(tc.mode)
+			total := b.LineCount()
+
+			for _, frac := range []int{0, 3, 10, 25, 50, 75, 97} {
+				for _, scrollFrac := range []int{0, 20, 55, 95} {
+					scrollLine := max(total*scrollFrac/100, 1)
+					pos := b.Len() * frac / 100
+					b.Insert(pos, 'z')
+					e.activeWin.SetScrollLine(scrollLine)
+					e.Redraw()
+					got := captureFaces(t, e)
+
+					ref := newCapTestEditor(b.String())
+					buf(ref).SetMode(tc.mode)
+					ref.activeWin.SetScrollLine(scrollLine)
+					ref.getSpanCache(buf(ref)) // full-buffer reference
+					ref.Redraw()
+					want := captureFaces(t, ref)
+
+					coloured := 0
+					for _, f := range want {
+						if f != syntax.FaceDefault && f != (syntax.Face{}) {
+							coloured++
+						}
+					}
+					if coloured == 0 {
+						t.Fatalf("edit=%d%% scroll=%d: reference render has no colour; the check would be vacuous",
+							frac, scrollLine)
+					}
+					width, _ := e.term.CaptureSize()
+					for i := range got {
+						if got[i] != want[i] {
+							t.Fatalf("edit=%d%% scroll=%d: face mismatch at row %d col %d: got %+v, want %+v",
+								frac, scrollLine, i/width, i%width, got[i], want[i])
+						}
+					}
+					b.Delete(pos, 1)
+				}
+			}
+		})
+	}
+}
+
+// markdownSourceWithFences returns Markdown with long fenced code blocks, so
+// that checkpoints land inside a fence and the carried fence state matters.
+func markdownSourceWithFences() string {
+	var sb strings.Builder
+	sb.WriteString("# Title\n\nIntro paragraph with *italic* and `code`.\n\n")
+	for i := range 60 {
+		fmt.Fprintf(&sb, "## Section %d\n\nA paragraph with **bold** and a [link](http://x/%d).\n\n```go\n", i, i)
+		for j := range 20 {
+			fmt.Fprintf(&sb, "// line %d inside the fence: # not a heading, > not a quote\n", j)
+		}
+		sb.WriteString("```\n\n> a blockquote\n\n")
+	}
+	return sb.String()
+}
+
+// TestSpanCacheCorruptCheckpointIsCaught is the mutation check on the end-to-end
+// guard above.  Deliberately flipping the fence flag stored in a checkpoint must
+// change what gets drawn — if it did not, the checkpoint state would be dead
+// weight and TestRenderWindowFacesMatchAfterEdits would prove nothing.
+func TestSpanCacheCorruptCheckpointIsCaught(t *testing.T) {
+	src := markdownSourceWithFences()
+	e := newCapTestEditor(src)
+	b := buf(e)
+	b.SetMode("markdown")
+	c := e.getSpanCache(b)
+	if len(c.checkpoints) < 4 {
+		t.Fatalf("only %d checkpoints; nothing worth corrupting", len(c.checkpoints))
+	}
+
+	// Corrupt every checkpoint's fence flag, then force a rescan by editing at
+	// the very end so that the newest checkpoint is the one that gets used.
+	for i := range c.checkpoints {
+		c.checkpoints[i].st.Fence = !c.checkpoints[i].st.Fence
+	}
+	b.Insert(b.Len()-2, 'z')
+	got := e.getSpanCache(b)
+
+	ref := newCapTestEditor(b.String())
+	buf(ref).SetMode("markdown")
+	want := ref.getSpanCache(buf(ref))
+
+	if len(got.spans) == len(want.spans) {
+		same := true
+		for i := range got.spans {
+			if got.spans[i] != want.spans[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			t.Error("corrupting every checkpoint's fence state changed nothing: " +
+				"the state is not being used, so the resume tests prove nothing")
+		}
+	}
+}
+
+// TestSpanCacheScrollingResumesFromCheckpoint pins the other half of the win:
+// scrolling past what the cache covers extends it from the newest checkpoint
+// rather than rescanning the file from the top.
+func TestSpanCacheScrollingResumesFromCheckpoint(t *testing.T) {
+	e, b, rec := newResumeTestEditor(goSource(4000), "go", syntax.GoHighlighter{})
+	w := e.activeWin
+	e.getSpanCacheUpTo(b, visibleEndOf(w))
+	first := e.spanCaches[b]
+	if first.hiEnd >= b.Len() {
+		t.Fatalf("primed cache already covers the whole buffer (%d)", b.Len())
+	}
+
+	// Jump past the covered range so the cache has to be extended.
+	e.getSpanCacheUpTo(b, first.hiEnd+1)
+	got := rec.lastResume(t)
+	if got == 0 {
+		t.Error("extending the cache rescanned from offset 0")
+	}
+	if got > first.hiEnd {
+		t.Errorf("resumed from %d, past the previously covered end %d", got, first.hiEnd)
+	}
+}
+
+// TestStartAutoRevertPollStopsCleanly checks the poller goroutine started for
+// the event loop terminates when stopped, so quitting the editor does not leak
+// it.  (The wakeup itself is a no-op without a real screen, so it cannot be
+// observed through the capture terminal.)
+func TestStartAutoRevertPollStopsCleanly(t *testing.T) {
+	e := newCapTestEditor("hello\n")
+
+	before := runtime.NumGoroutine()
+	stop := e.startAutoRevertPoll()
+	stop()
+
+	// Give the goroutine a moment to observe the close and return.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= before {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("poller goroutine still running after stop (%d > %d)",
+		runtime.NumGoroutine(), before)
+}
+
+// TestAutoRevertShowsNewContentInSameFrame covers the ordering half of the fix:
+// the event loop reverts before rendering, so a file changed on disk is visible
+// immediately rather than one event later.
+func TestAutoRevertShowsNewContentInSameFrame(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "watched.txt")
+	if err := os.WriteFile(path, []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newCapTestEditor("original\n")
+	b := e.ActiveBuffer()
+	b.SetFilename(path)
+	b.SetModified(false)
+	e.autoRevert = true
+	e.autoRevertMtimes[b] = time.Now().Add(-time.Hour)
+
+	if err := os.WriteFile(path, []byte("changed on disk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The loop order: revert, then render.
+	e.maybeAutoRevert()
+	e.renderWindow(e.activeWin)
+
+	if got := b.String(); !strings.Contains(got, "changed on disk") {
+		t.Fatalf("buffer was not reverted, got %q", got)
+	}
+	if row := captureRow(t, e, 0); !strings.Contains(row, "changed on disk") {
+		t.Errorf("reverted content not rendered in the same frame, row 0 = %q", row)
 	}
 }

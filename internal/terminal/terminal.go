@@ -24,6 +24,16 @@ type Terminal struct {
 	screen     tcell.Screen
 	styleCache map[syntax.Face]tcell.Style // faceToStyle cache; reset on theme change
 
+	// One-entry memo of the most recently resolved face/style pair.  Runs of
+	// identical faces (a syntax span, a padded modeline, a run of spaces) are
+	// overwhelmingly the common case, so this avoids even the map lookup for
+	// most cells.  lastFaceValid guards against the zero Face colliding with
+	// an unset memo. Cleared by InvalidateStyleCache so a theme change takes
+	// effect immediately.
+	lastFace      syntax.Face
+	lastStyle     tcell.Style
+	lastFaceValid bool
+
 	// Capture mode: non-nil when the terminal is headless (no real screen).
 	// All drawing operations write to this grid instead of calling screen.
 	captureCells []captureCell
@@ -138,12 +148,7 @@ func (t *Terminal) SetCell(col, row int, ch rune, face syntax.Face) {
 		}
 		return
 	}
-	style, ok := t.styleCache[face]
-	if !ok {
-		style = faceToStyle(face)
-		t.styleCache[face] = style
-	}
-	t.screen.SetContent(col, row, ch, nil, style)
+	t.screen.SetContent(col, row, ch, nil, t.styleFor(face))
 }
 
 // DrawString draws the string s starting at (col, row).
@@ -160,11 +165,7 @@ func (t *Terminal) DrawString(col, row int, s string, face syntax.Face) {
 		}
 		return
 	}
-	style, ok := t.styleCache[face]
-	if !ok {
-		style = faceToStyle(face)
-		t.styleCache[face] = style
-	}
+	style := t.styleFor(face)
 	x := col
 	for _, r := range s {
 		t.screen.SetContent(x, row, r, nil, style)
@@ -172,10 +173,31 @@ func (t *Terminal) DrawString(col, row int, s string, face syntax.Face) {
 	}
 }
 
-// InvalidateStyleCache clears the faceToStyle cache.  Call this after a theme
-// change so that stale style values are not used for subsequent rendering.
+// styleFor resolves face to a tcell.Style, consulting the one-entry memo
+// before falling back to the styleCache map (and, on a full miss,
+// faceToStyle). Only called on the real-screen path; capture mode stores
+// faces directly and never needs a Style.
+func (t *Terminal) styleFor(face syntax.Face) tcell.Style {
+	if t.lastFaceValid && face == t.lastFace {
+		return t.lastStyle
+	}
+	style, ok := t.styleCache[face]
+	if !ok {
+		style = faceToStyle(face)
+		t.styleCache[face] = style
+	}
+	t.lastFace = face
+	t.lastStyle = style
+	t.lastFaceValid = true
+	return style
+}
+
+// InvalidateStyleCache clears the faceToStyle cache and the one-entry memo.
+// Call this after a theme change so that stale style values are not used for
+// subsequent rendering.
 func (t *Terminal) InvalidateStyleCache() {
 	clear(t.styleCache)
+	t.lastFaceValid = false
 }
 
 // PollEvent blocks until a tcell event arrives and returns it.

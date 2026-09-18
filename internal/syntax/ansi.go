@@ -197,3 +197,9 @@ type ANSIHighlighter struct {
 func (h ANSIHighlighter) Highlight(_ string, _, _ int) []Span {
 	return h.Spans
 }
+
+// HighlightRunes implements RuneHighlighter.  The spans are pre-computed, so
+// there is nothing to resume and ANSIHighlighter does not implement Resumable.
+func (h ANSIHighlighter) HighlightRunes(_ []rune, _, _ int) []Span {
+	return h.Spans
+}

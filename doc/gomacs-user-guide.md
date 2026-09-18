@@ -333,7 +333,10 @@ the cursor rests on a symbol (eldoc-style).
 While a debug session is active, **n**, **i**, **o**, **c**, **e**
 and **q** also work as single-letter shortcuts (without the
 **C-c d**
-prefix) when the active buffer is a source file.
+prefix) when the active buffer is a source file.  To make that unambiguous,
+every source buffer is read-only for the duration of the session, including
+files opened after it started; each buffer's original state is restored by
+**debug-exit**.
 **debug-start**
 inspects the current context (test file, main program, or server) to
 decide how to launch the program.  Breakpoints are shown in a gutter
@@ -341,6 +344,17 @@ in the left margin of the source buffer; while stopped, the
 ***Debug Locals***, ***Debug Stack*** and ***Debug REPL***
 buffers show local variables, the call stack, and an evaluation
 prompt.
+
+Go buffers are debugged with
+**dlv**,
+which must be on
+**PATH**.
+Java buffers are debugged through the running jdtls language server, which
+must have been started with the java-debug plugin; see
+**java-lsp-command**
+under
+**CONFIGURATION**
+below.
 
 ### Spell Checking
 
@@ -440,6 +454,20 @@ Default: t.
 Example: **(setq isearch-case-insensitive nil)**
 
 
+**auto-revert**  
+When non-nil (the default), an unmodified buffer is reloaded when its file
+changes on disk.
+Default: t.
+Example: **(setq auto-revert nil)**
+
+
+**subword-mode**  
+When non-nil (the default), word motion stops at the sub-words of a
+CamelCase identifier.
+Default: t.
+Example: **(setq subword-mode nil)**
+
+
 **go-indent**  
 Per-level indentation string for Go buffers.
 An integer is expanded to that many spaces; a string is used verbatim.
@@ -471,23 +499,41 @@ Default: two spaces.
 Example: **(setq json-indent 4)**
 
 
-**yaml-indent**  
-Per-level indentation string for YAML buffers.
-Default: two spaces.
-Example: **(setq yaml-indent 2)**
-
-
-**markdown-indent**  
-Per-level indentation string for Markdown buffers.
-Default: two spaces.
-Example: **(setq markdown-indent 4)**
-
-
 **perl-indent**  
 Per-level indentation string for Perl buffers.
 Default: two spaces.
 Example: **(setq perl-indent 4)**
 
+
+Go, Python, Bash, Java, JSON and Perl are the modes with an indentation engine
+of their own, and so the only ones with a per-level indent unit to configure.
+Every other mode (Markdown, YAML, Makefile, Gherkin, Text, Fundamental) indents
+a new line to match the previous one, and Emacs Lisp indents relative to the
+enclosing form; none of them takes an indent unit.
+
+**go-lsp-command**  
+Command, with optional arguments, that starts the language server for Go
+buffers.  Set to the empty string to disable the server.
+Default: "gopls".
+Example: **(setq go-lsp-command "gopls -remote=auto")**
+
+
+**java-lsp-command**  
+Command, with optional arguments, that starts the language server for Java
+buffers.  This is also how
+**debug-start**
+reaches the Java debug adapter, which jdtls provides through the java-debug
+plugin, so point this at a jdtls launcher started with that plugin in its
+initializationOptions.bundles.
+Set to the empty string to disable the server.
+Default: "jdtls".
+Example: **(setq java-lsp-command "jdtls -data /tmp/jdtls-ws")**
+
+
+The same
+**<mode>-lsp-command**
+pattern works for every major mode, so a mode that ships without a language
+server can be given one, for example **(setq python-lsp-command "pylsp")**.
 
 **save-buffer-delete-trailing-whitespace**  
 When non-nil (the default), trailing whitespace is deleted automatically
@@ -496,6 +542,13 @@ when a buffer is saved.  Set to
 to disable.
 Default: t.
 Example: **(setq save-buffer-delete-trailing-whitespace nil)**
+
+
+**delete-trailing-whitespace**  
+Shorter alias of
+**save-buffer-delete-trailing-whitespace**.
+Default: t.
+Example: **(setq delete-trailing-whitespace nil)**
 
 
 **visual-lines**  
@@ -520,19 +573,17 @@ Default: "en".
 Example: **(setq spell-language "de")**
 
 
+**completion-menu-trigger-chars**  
+Minimum number of characters typed before the auto-completion menu appears.
+Default: 3.
+Example: **(setq completion-menu-trigger-chars 1)**
+
+
 **lsp-completion-min-chars**  
-Minimum number of characters typed before LSP auto-completion is triggered.
-Default: 1.
-Example: **(setq lsp-completion-min-chars 3)**
-
-
-**screenshot-dir**  
-Directory where
-**M-x screenshot**
-saves PNG files.
-If not set, files are saved to the working directory from which gomacs was started.
-The directory is created if it does not exist.
-Example: **(setq screenshot-dir "~/pictures/screenshots")**
+Deprecated alias of
+**completion-menu-trigger-chars**.
+Default: 3.
+Example: **(setq lsp-completion-min-chars 1)**
 
 
 **debug-locals-auto-expand-depth**  
@@ -541,6 +592,14 @@ Number of struct levels to auto-expand in the
 panel when the debugger stops.
 Default: 1.
 Example: **(setq debug-locals-auto-expand-depth 2)**
+
+
+**theme**  
+Name of the colour theme.  See
+**Themes**
+below for the available names and for face overrides.
+Default: "sweet".
+Example: **(setq theme 'default)**
 
 
 ### Key bindings
@@ -618,7 +677,7 @@ Torstein Krause Johansen <torstein@skybert.net>
 
 ## VERSION
 
-v1.9.0-18-ga5dbe52-dirty
+v2.0.0-dirty
 
 ## Screenshots
 

@@ -4,9 +4,12 @@ package editor
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
@@ -309,6 +312,128 @@ func TestShellDispatch_ReservedKeys(t *testing.T) {
 	if e.shellDispatch(terminal.KeyEvent{Key: tcell.KeyCtrlV}) {
 		t.Fatal("C-v should not be consumed by the shell")
 	}
+	// C-SPC (set mark) falls through: KeyRune + ModCtrl + Rune ' '.
+	if e.shellDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: ' ', Mod: tcell.ModCtrl}) {
+		t.Fatal("C-SPC should not be consumed by the shell")
+	}
+	// A plain space, by contrast, belongs to the shell.
+	if !e.shellDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: ' '}) {
+		t.Fatal("a plain space should be written to the PTY")
+	}
+}
+
+// ptySawNoBytes reports whether the shell PTY received nothing at all.  A
+// sentinel byte is written after the key was dispatched, so if the first byte
+// readable from the pipe is the sentinel, no key bytes were sent before it.
+func ptySawNoBytes(t *testing.T, st *shellState, pr *os.File) bool {
+	t.Helper()
+	const sentinel = 0xff
+	if _, err := st.master.Write([]byte{sentinel}); err != nil {
+		t.Fatalf("sentinel write: %v", err)
+	}
+	b := make([]byte, 1)
+	if _, err := pr.Read(b); err != nil {
+		t.Fatalf("sentinel read: %v", err)
+	}
+	return b[0] == sentinel
+}
+
+// TestShellDispatch_CtrlSpaceSetsMark drives the real key path (tcell event →
+// terminal.ParseKey → dispatchParsedKey) to verify the spec requirement that
+// C-<space> sets the mark inside a shell buffer instead of reaching the PTY.
+// tcell v3 delivers C-<space> as {KeyRune, " ", ModCtrl}.
+func TestShellDispatch_CtrlSpaceSetsMark(t *testing.T) {
+	e, sb, st, pr := newShellStateEditor(t)
+	defer func() { _ = pr.Close() }()
+
+	e.dispatchParsedKey(terminal.ParseKey(tcell.NewEventKey(tcell.KeyRune, " ", tcell.ModCtrl)))
+
+	if !sb.MarkActive() {
+		t.Error("C-SPC in a shell buffer should set the mark")
+	}
+	if sb.Mark() != sb.Point() {
+		t.Errorf("mark = %d, want point %d", sb.Mark(), sb.Point())
+	}
+	if e.lastCommand != "set-mark-command" {
+		t.Errorf("C-SPC should run set-mark-command, ran %q", e.lastCommand)
+	}
+	if !ptySawNoBytes(t, st, pr) {
+		t.Error("C-SPC should not be written to the PTY")
+	}
+}
+
+// TestShellDispatch_ReservedKeysReachGomacs covers the complete set of keys the
+// spec reserves for gomacs inside a shell buffer.  Each case drives the real key
+// path and asserts both that the gomacs command ran and that nothing leaked to
+// the PTY, so a future change cannot silently break one of them.
+func TestShellDispatch_ReservedKeysReachGomacs(t *testing.T) {
+	ctrlX := tcell.NewEventKey(tcell.KeyCtrlX, "", tcell.ModCtrl)
+	cases := []struct {
+		name        string
+		events      []*tcell.EventKey
+		wantCommand string
+		wantMinibuf bool
+	}{
+		{
+			name:        "C-SPC",
+			events:      []*tcell.EventKey{tcell.NewEventKey(tcell.KeyRune, " ", tcell.ModCtrl)},
+			wantCommand: "set-mark-command",
+		},
+		{
+			name:        "C-v",
+			events:      []*tcell.EventKey{tcell.NewEventKey(tcell.KeyCtrlV, "", tcell.ModCtrl)},
+			wantCommand: "scroll-up",
+		},
+		{
+			name:        "M-v",
+			events:      []*tcell.EventKey{tcell.NewEventKey(tcell.KeyRune, "v", tcell.ModAlt)},
+			wantCommand: "scroll-down",
+		},
+		{
+			name:        "M-w",
+			events:      []*tcell.EventKey{tcell.NewEventKey(tcell.KeyRune, "w", tcell.ModAlt)},
+			wantCommand: "copy-region-as-kill",
+		},
+		{
+			name:        "M-x",
+			events:      []*tcell.EventKey{tcell.NewEventKey(tcell.KeyRune, "x", tcell.ModAlt)},
+			wantCommand: "execute-extended-command",
+			wantMinibuf: true,
+		},
+		{
+			name:        "C-x b",
+			events:      []*tcell.EventKey{ctrlX, tcell.NewEventKey(tcell.KeyRune, "b", 0)},
+			wantCommand: "switch-to-buffer",
+			wantMinibuf: true,
+		},
+		{
+			name:        "C-x k",
+			events:      []*tcell.EventKey{ctrlX, tcell.NewEventKey(tcell.KeyRune, "k", 0)},
+			wantCommand: "kill-buffer",
+			wantMinibuf: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _, st, pr := newShellStateEditor(t)
+			defer func() { _ = pr.Close() }()
+
+			for _, ev := range tc.events {
+				e.dispatchParsedKey(terminal.ParseKey(ev))
+			}
+
+			if e.lastCommand != tc.wantCommand {
+				t.Errorf("%s should run %q, ran %q", tc.name, tc.wantCommand, e.lastCommand)
+			}
+			if tc.wantMinibuf && !e.minibufActive {
+				t.Errorf("%s should open a minibuffer prompt", tc.name)
+			}
+			if !ptySawNoBytes(t, st, pr) {
+				t.Errorf("%s should not be written to the PTY", tc.name)
+			}
+		})
+	}
 }
 
 func TestShellDispatch_NoState(t *testing.T) {
@@ -417,5 +542,130 @@ func TestCmdShell_SwitchesToExisting(t *testing.T) {
 	e.cmdShell()
 	if e.ActiveBuffer().Name() != name {
 		t.Fatalf("cmdShell should switch to the existing shell buffer %q, got %q", name, e.ActiveBuffer().Name())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// shellReadPump — PTY output must cost one render, not one per chunk
+// ---------------------------------------------------------------------------
+
+// newShellPumpEditor is the mirror image of newShellStateEditor: the shell
+// state's "PTY master" is the *read* end of a pipe, so a test can feed output
+// into the pump by writing to the returned write end.
+func newShellPumpEditor(t *testing.T) (*Editor, *buffer.Buffer, *shellState, *os.File) {
+	t.Helper()
+	e := newCapTestEditor("")
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &shellState{master: pr, vt: newVTScreen(23, 80)}
+	sb := buffer.New("*shell*")
+	sb.SetMode("shell")
+	e.buffers = append(e.buffers, sb)
+	e.activeWin.SetBuf(sb)
+	e.shellStates = map[*buffer.Buffer]*shellState{sb: st}
+	// newCapTestEditor leaves lspCbs nil; the pump needs a real channel.
+	e.lspCbs = make(chan func(), 16)
+	return e, sb, st, pw
+}
+
+// TestShellReadPump_ChunksDoNotRender feeds several chunks of PTY output through
+// the pump and runs each posted callback the way processEvent does.  None of
+// them may touch the terminal: the event loop redraws once after the drain, so
+// N chunks must cost one render's worth of work rather than N.
+func TestShellReadPump_ChunksDoNotRender(t *testing.T) {
+	e, sb, st, pw := newShellPumpEditor(t)
+
+	done := make(chan struct{})
+	go func() {
+		e.shellReadPump(sb, st)
+		close(done)
+	}()
+	defer func() {
+		_ = pw.Close() // EOF stops the pump
+		<-done
+	}()
+
+	// Each chunk lands on its own screen row.  Waiting for chunk i to be
+	// processed before writing chunk i+1 forces the pump into one PTY read (and
+	// therefore one posted callback) per chunk.
+	const chunks = 8
+	callbacks := 0
+	deadline := time.After(10 * time.Second)
+	for i := range chunks {
+		if _, err := fmt.Fprintf(pw, "chunk%d\r\n", i); err != nil {
+			t.Fatalf("write chunk %d: %v", i, err)
+		}
+		for st.vt.cellAt(i, 0).ch != 'c' {
+			select {
+			case fn := <-e.lspCbs:
+				fn()
+				callbacks++
+				if ch, _ := e.term.CaptureCell(0, 0); ch != ' ' {
+					t.Fatalf("callback %d rendered to the terminal: cell(0,0) = %q", callbacks, ch)
+				}
+			case <-deadline:
+				t.Fatalf("timed out on chunk %d; %d callbacks ran", i, callbacks)
+			}
+		}
+	}
+	if callbacks != chunks {
+		t.Fatalf("%d chunks produced %d callbacks, want one per chunk", chunks, callbacks)
+	}
+
+	// The output is not lost: the single post-drain Redraw() that Run() performs
+	// makes every chunk visible.
+	e.Redraw()
+	if ch, _ := e.term.CaptureCell(0, 0); ch != 'c' {
+		t.Errorf("after Redraw cell(0,0) = %q, want 'c'", ch)
+	}
+	for i := range chunks {
+		if got := st.vt.cellAt(i, 5).ch; got != rune('0'+i) {
+			t.Errorf("vt row %d should end in %q, got %q", i, rune('0'+i), got)
+		}
+	}
+}
+
+// TestShellReadPump_PostsExitCallback checks that closing the PTY master makes
+// the pump report the exit exactly once and return.
+func TestShellReadPump_PostsExitCallback(t *testing.T) {
+	e, sb, st, pw := newShellPumpEditor(t)
+
+	done := make(chan struct{})
+	go func() {
+		e.shellReadPump(sb, st)
+		close(done)
+	}()
+	_ = pw.Close()
+	<-done
+
+	fn := <-e.lspCbs
+	fn()
+	if _, ok := e.shellStates[sb]; ok {
+		t.Error("the exit callback should drop the shell state")
+	}
+	if len(e.lspCbs) != 0 {
+		t.Errorf("pump posted %d extra callbacks after EOF", len(e.lspCbs))
+	}
+}
+
+// TestShellProcessExited_CleansUpAndNotes checks the exit path: the PTY state is
+// dropped, the buffer is annotated, and it stays read-only.
+func TestShellProcessExited_CleansUpAndNotes(t *testing.T) {
+	e, sb, _, pw := newShellPumpEditor(t)
+	defer func() { _ = pw.Close() }()
+	sb.SetReadOnly(true)
+
+	e.shellProcessExited(sb)
+
+	if _, ok := e.shellStates[sb]; ok {
+		t.Error("shell state should be removed after the process exits")
+	}
+	if !strings.Contains(sb.String(), "[Process exited]") {
+		t.Errorf("buffer should note the exit, got %q", sb.String())
+	}
+	if !sb.ReadOnly() {
+		t.Error("shell buffer should still be read-only after the process exits")
 	}
 }

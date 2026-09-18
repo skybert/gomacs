@@ -7,9 +7,7 @@ func TestPythonHighlightKeyword(t *testing.T) {
 	src := "def foo():\n    return True"
 	spans := h.Highlight(src, 0, len([]rune(src)))
 	for _, kw := range []string{"def", "return", "True"} {
-		if !spanCoversText(spans, src, kw) {
-			t.Errorf("keyword %q not highlighted", kw)
-		}
+		wantExactSpan(t, spans, src, kw, FaceKeyword)
 	}
 }
 
@@ -18,9 +16,7 @@ func TestPythonHighlightBuiltin(t *testing.T) {
 	src := "print(len(x))"
 	spans := h.Highlight(src, 0, len([]rune(src)))
 	for _, fn := range []string{"print", "len"} {
-		if !spanCoversText(spans, src, fn) {
-			t.Errorf("builtin %q not highlighted", fn)
-		}
+		wantExactSpan(t, spans, src, fn, FaceFunction)
 	}
 }
 
@@ -28,45 +24,36 @@ func TestPythonHighlightComment(t *testing.T) {
 	h := PythonHighlighter{}
 	src := "# this is a comment\nx = 1"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if s := firstSpanWithFace(spans, FaceComment); s == nil {
-		t.Error("comment not highlighted")
-	}
+	wantExactSpan(t, spans, src, "# this is a comment", FaceComment)
 }
 
 func TestPythonHighlightString(t *testing.T) {
 	h := PythonHighlighter{}
 	src := `x = "hello"`
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, `"hello"`) {
-		t.Error("string literal not highlighted")
-	}
+	wantExactSpan(t, spans, src, `"hello"`, FaceString)
 }
 
 func TestPythonHighlightTripleQuotedString(t *testing.T) {
 	h := PythonHighlighter{}
 	src := `"""docstring"""`
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, `"""docstring"""`) {
-		t.Error("triple-quoted string not highlighted")
-	}
+	wantExactSpan(t, spans, src, `"""docstring"""`, FaceString)
 }
 
 func TestPythonHighlightDecorator(t *testing.T) {
 	h := PythonHighlighter{}
 	src := "@staticmethod\ndef foo(): pass"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, "@staticmethod") {
-		t.Error("decorator @staticmethod not highlighted")
-	}
+	wantExactSpan(t, spans, src, "@staticmethod", FaceFunction)
+	wantExactSpan(t, spans, src, "def", FaceKeyword)
 }
 
 func TestPythonHighlightNumber(t *testing.T) {
 	h := PythonHighlighter{}
 	src := "x = 42"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, "42") {
-		t.Error("number 42 not highlighted")
-	}
+	wantExactSpan(t, spans, src, "42", FaceNumber)
 }
 
 func TestPythonHighlightEmpty(t *testing.T) {

@@ -159,42 +159,57 @@ func (e *Editor) cmdShell() {
 	}
 	e.shellStates[shellBuf] = st
 
-	// Background goroutine: read PTY output → update vtScreen → redraw.
+	// Background goroutine: read PTY output → update vtScreen.
 	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := master.Read(buf)
-			if n > 0 {
-				data := make([]byte, n)
-				copy(data, buf[:n])
-				e.lspCbs <- func() {
-					st.mu.Lock()
-					st.vt.write(data)
-					st.mu.Unlock()
-					e.Redraw()
-				}
-				e.term.PostWakeup()
-			}
-			if err != nil {
-				// PTY closed (shell exited).
-				e.lspCbs <- func() {
-					e.Message("Shell process exited")
-					if st2, ok := e.shellStates[shellBuf]; ok {
-						st2.close()
-						delete(e.shellStates, shellBuf)
-					}
-					shellBuf.SetReadOnly(false)
-					shellBuf.InsertString(shellBuf.Len(), "\n[Process exited]\n")
-					shellBuf.SetReadOnly(true)
-					e.Redraw()
-				}
-				e.term.PostWakeup()
-				break
-			}
-		}
+		e.shellReadPump(shellBuf, st)
 		// Reap child to avoid zombie.
 		_ = cmd.Wait()
 	}()
+}
+
+// shellReadChunk is the PTY read buffer size.
+const shellReadChunk = 4096
+
+// shellReadPump reads PTY output for a shell buffer until the master reports an
+// error or EOF, handing each chunk to the vtScreen from the main loop.
+//
+// The posted callbacks deliberately do not redraw.  processEvent drains *every*
+// pending callback in one go and Run() then redraws once, so a command emitting
+// megabytes of output costs a single render rather than one per chunk.
+func (e *Editor) shellReadPump(shellBuf *buffer.Buffer, st *shellState) {
+	buf := make([]byte, shellReadChunk)
+	for {
+		n, err := st.master.Read(buf)
+		if n > 0 {
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			e.lspCbs <- func() {
+				st.mu.Lock()
+				st.vt.write(data)
+				st.mu.Unlock()
+			}
+			e.term.PostWakeup()
+		}
+		if err != nil {
+			// PTY closed (shell exited).
+			e.lspCbs <- func() { e.shellProcessExited(shellBuf) }
+			e.term.PostWakeup()
+			return
+		}
+	}
+}
+
+// shellProcessExited drops the PTY state for a shell buffer whose process has
+// gone away and notes the exit in the buffer text.
+func (e *Editor) shellProcessExited(shellBuf *buffer.Buffer) {
+	e.Message("Shell process exited")
+	if st, ok := e.shellStates[shellBuf]; ok {
+		st.close()
+		delete(e.shellStates, shellBuf)
+	}
+	shellBuf.SetReadOnly(false)
+	shellBuf.InsertString(shellBuf.Len(), "\n[Process exited]\n")
+	shellBuf.SetReadOnly(true)
 }
 
 // shellDispatch handles key events when the active buffer is *shell*.
@@ -216,7 +231,8 @@ func (e *Editor) shellDispatch(ke terminal.KeyEvent) bool {
 		}
 	case ke.Key == tcell.KeyCtrlV:
 		return false // scroll down
-	case ke.Key == tcell.KeyRune && ke.Mod == 0 && ke.Rune == 0:
+	case ke.Key == tcell.KeyRune && ke.Mod&tcell.ModCtrl != 0 && ke.Rune == ' ':
+		// tcell v3 delivers C-<space> as KeyRune with ModCtrl and Rune==' '.
 		return false // C-space (set mark)
 	}
 
@@ -270,15 +286,14 @@ func (e *Editor) renderShellWindow(w *window.Window) {
 
 	top := w.Top()
 	left := w.Left()
-	for r := 0; r < rows; r++ {
-		for c := 0; c < cols; c++ {
-			cell := st.vt.cellAt(r, c)
-			face := cell.face
+	for r := range rows {
+		for c := range cols {
+			face := st.vt.faceAt(r, c)
 			// Fall back to default face for blank cells.
 			if face == (syntax.Face{}) {
 				face = syntax.FaceDefault
 			}
-			e.term.SetCell(left+c, top+r, cell.ch, face)
+			e.term.SetCell(left+c, top+r, st.vt.cellAt(r, c).ch, face)
 		}
 	}
 }

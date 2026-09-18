@@ -569,6 +569,60 @@ func TestDebugSourceDispatch_Keys(t *testing.T) {
 	}
 }
 
+// TestDebugSourceDispatch_AdoptsFileOpenedMidSession covers the case the spec
+// calls out — "the source buffers should be switched to read only, so that the
+// user can use single letter shortcuts to navigate" — for a file the user opens
+// while the session is running rather than one stepping opened.  Such a buffer
+// used to stay writable, so anything the single-letter shortcuts do not claim was
+// typed straight into it.  The other half of the contract matters just as much:
+// debug-exit must hand the buffer back writable.
+func TestDebugSourceDispatch_AdoptsFileOpenedMidSession(t *testing.T) {
+	e, m := newDAPCapEditor("package main\n")
+	e.autoRevertMtimes = make(map[*buffer.Buffer]time.Time)
+	e.lspConns = make(map[string]*lspConn)
+
+	path := filepath.Join(t.TempDir(), "opened.go")
+	if err := os.WriteFile(path, []byte("package p\n\nfunc f() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The user runs find-file while stopped at a breakpoint.  loadFile adopts
+	// the buffer straight away, so the modeline shows it read-only immediately
+	// rather than only after the first keystroke.
+	opened, err := e.loadFile(path)
+	if err != nil {
+		t.Fatalf("loadFile: %v", err)
+	}
+	if !opened.ReadOnly() {
+		t.Fatal("a file opened during a debug session should be read-only at once")
+	}
+	e.activeWin.SetBuf(opened)
+
+	// 'c' must drive the debugger, and the buffer must be read-only from here on.
+	if !e.debugSourceDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'c'}) {
+		t.Fatal("'c' should be handled as a debug shortcut")
+	}
+	if got := waitCall(t, m); got != "continue" {
+		t.Fatalf("'c' should continue, got %q", got)
+	}
+	if !opened.ReadOnly() {
+		t.Error("a file opened mid-session should be read-only while debugging")
+	}
+
+	// Even a rune the debugger does not claim must not reach self-insert.
+	if e.debugSourceDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'Z'}) {
+		t.Fatal("'Z' is not a debug shortcut and should not be consumed here")
+	}
+	if !opened.ReadOnly() {
+		t.Error("the buffer should still be read-only after an unhandled key")
+	}
+
+	e.cmdDebugExit()
+	if opened.ReadOnly() {
+		t.Error("debug-exit must restore the buffer the user opened to writable")
+	}
+}
+
 func TestDebugSourceDispatch_NotStopped(t *testing.T) {
 	e, _ := newDAPCapEditor("foo")
 	e.dap.stoppedThread = 0
@@ -811,26 +865,21 @@ func TestCmdDebugStart_JavaWithoutJdtls(t *testing.T) {
 	e.ActiveBuffer().SetMode("java")
 	e.ActiveBuffer().SetFilename(path)
 
-	// java-mode has a debug adapter configured, so the start attempt proceeds …
+	// java-mode has a debug adapter configured, but it is reached through the
+	// language server, so with no connection debug-start refuses up front rather
+	// than opening a session it cannot use.
 	e.cmdDebugStart()
-	if e.dap == nil {
-		t.Fatal("debug-start should attempt to start a java session")
-	}
-	// … but with no jdtls connection it fails with an actionable message.
-	select {
-	case fn := <-e.dapCbs:
-		fn()
-	case <-time.After(5 * time.Second):
-		t.Fatal("expected a failure callback on dapCbs")
-	}
 	if e.dap != nil {
-		t.Error("a failed start should clear the session")
+		t.Error("debug-start must not open a session without a language server")
 	}
 	if !strings.Contains(e.message, "jdtls") {
 		t.Errorf("expected a message naming jdtls, got %q", e.message)
 	}
 	if !strings.Contains(e.message, "java-debug") {
 		t.Errorf("expected the message to say what to install, got %q", e.message)
+	}
+	if !strings.Contains(e.message, "java-lsp-command") {
+		t.Errorf("expected the message to name the variable that fixes it, got %q", e.message)
 	}
 }
 
@@ -917,6 +966,12 @@ func TestCmdDebugStart_SeedsConfiguredExpandDepth(t *testing.T) {
 	}
 	e.ActiveBuffer().SetMode("java")
 	e.ActiveBuffer().SetFilename(path)
+	// A ready (if useless) language server so the java precheck lets debug-start
+	// get as far as creating the session state; resolving the main class then
+	// fails on the worker goroutine, which is fine here.
+	conn, cleanup := fakeJdtlsServer(t, nil)
+	defer cleanup()
+	e.lspConns = map[string]*lspConn{"java": conn}
 
 	e.cmdDebugStart()
 	if e.dap == nil {

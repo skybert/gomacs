@@ -54,23 +54,69 @@ var builtinFuncs = map[string]bool{
 // Highlight tokenizes text using go/scanner and returns face spans for
 // tokens whose rune positions overlap [start, end).
 func (g GoHighlighter) Highlight(text string, start, end int) []Span {
+	spans, _ := g.scan(text, 0, start, end, nil)
+	return spans
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (g GoHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	spans, _ := g.scan(string(runes), 0, start, end, nil)
+	return spans
+}
+
+// goScanSlack is how far past the requested end the source handed to go/scanner
+// reaches.  Anything but a multi-line token (a raw string, a /* … */ comment)
+// finishes well inside it, so the rescan below is rare.
+const goScanSlack = 256
+
+// HighlightResume implements Resumable.
+//
+// go/scanner keeps no state that a token boundary does not settle: a raw string
+// or a /* … */ comment is a single token, so restarting the scanner on the source
+// that begins at a token boundary yields exactly the tokens the full scan would
+// have produced from there.  ScanState.Pos therefore carries the whole state.
+//
+// Only the source from Pos onwards has to be encoded to bytes for go/scanner,
+// and only as far as the scan will read — which is what keeps a keystroke at the
+// top of a large file from paying to encode the whole file.  Cutting the source
+// short would truncate a token that straddles the cut and so mis-colour it, so a
+// scan whose last token reaches the cut is redone against everything that is
+// left.  The rescan produces the same tokens up to that point, so the
+// checkpoints already reported stay valid and are not reported again.
+func (g GoHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	from := st.Pos
+	cut := min(max(end+goScanSlack, from), len(runes))
+	spans, reach := g.scan(string(runes[from:cut]), from, from, end, cp)
+	if cut < len(runes) && reach >= cut {
+		spans, _ = g.scan(string(runes[from:]), from, from, end, cp)
+	}
+	return spans
+}
+
+// scan tokenizes src, the buffer text starting at rune offset base, and returns
+// spans in whole-buffer rune coordinates that overlap [start, end).  The second
+// result is the offset just past the last token that began before end: when it
+// reaches the end of src, a token was cut short and the caller must rescan with
+// more source.
+func (g GoHighlighter) scan(src string, base, start, end int, cp *Checkpoints) ([]Span, int) {
 	fset := token.NewFileSet()
-	file := fset.AddFile("", fset.Base(), len(text))
+	file := fset.AddFile("", fset.Base(), len(src))
 
 	var s scanner.Scanner
 	// Collect errors silently — partial / in-progress source is common.
-	s.Init(file, []byte(text), nil /* no error handler */, scanner.ScanComments)
+	s.Init(file, []byte(src), nil /* no error handler */, scanner.ScanComments)
 
 	// curByte and curRune form a monotonically-advancing cursor that converts
 	// byte offsets to rune offsets without rescanning from position 0 each time.
 	// Since go/scanner emits tokens in strictly increasing byte-offset order
-	// this is O(len(text)) overall instead of O(len(text) × num_tokens).
+	// this is O(len(src)) overall instead of O(len(src) × num_tokens).
 	curByte := 0
-	curRune := 0
+	curRune := base
 
 	advanceTo := func(target int) int {
 		for curByte < target {
-			_, size := utf8.DecodeRuneInString(text[curByte:])
+			_, size := utf8.DecodeRuneInString(src[curByte:])
 			curByte += size
 			curRune++
 		}
@@ -78,6 +124,7 @@ func (g GoHighlighter) Highlight(text string, start, end int) []Span {
 	}
 
 	var spans []Span
+	reach := base
 
 	for {
 		pos, tok, lit := s.Scan()
@@ -98,12 +145,8 @@ func (g GoHighlighter) Highlight(text string, start, end int) []Span {
 		byteEnd := byteStart + tokLen
 
 		// Guard against scanner returning offsets beyond the source.
-		if byteStart > len(text) {
-			byteStart = len(text)
-		}
-		if byteEnd > len(text) {
-			byteEnd = len(text)
-		}
+		byteStart = min(byteStart, len(src))
+		byteEnd = min(byteEnd, len(src))
 
 		// Advance cursor to byteStart, then byteEnd — never backward.
 		runeStart := advanceTo(byteStart)
@@ -115,7 +158,11 @@ func (g GoHighlighter) Highlight(text string, start, end int) []Span {
 			break
 		}
 
+		// The start of a token is a safe place to resume from.
+		cp.mark(ScanState{Pos: runeStart}, len(spans))
+
 		runeEnd := advanceTo(byteEnd)
+		reach = runeEnd
 
 		// Only emit spans that overlap [start, end).
 		if runeEnd <= start {
@@ -130,7 +177,7 @@ func (g GoHighlighter) Highlight(text string, start, end int) []Span {
 		spans = append(spans, Span{Start: runeStart, End: runeEnd, Face: face})
 	}
 
-	return spans
+	return spans, reach
 }
 
 // faceForToken maps a token type (and optional literal) to a Face.

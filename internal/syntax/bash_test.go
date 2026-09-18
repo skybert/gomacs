@@ -7,82 +7,66 @@ func TestBashHighlightKeyword(t *testing.T) {
 	src := "if [ -f foo ]; then echo hi; fi"
 	spans := h.Highlight(src, 0, len([]rune(src)))
 	for _, kw := range []string{"if", "then", "fi"} {
-		if !spanCoversText(spans, src, kw) {
-			t.Errorf("keyword %q not highlighted in %q", kw, src)
-		}
+		wantExactSpan(t, spans, src, kw, FaceKeyword)
 	}
+	wantExactSpan(t, spans, src, "echo", FaceFunction)
 }
 
 func TestBashHighlightBuiltin(t *testing.T) {
 	h := BashHighlighter{}
 	src := "echo hello"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, "echo") {
-		t.Errorf("builtin 'echo' not highlighted")
-	}
+	wantExactSpan(t, spans, src, "echo", FaceFunction)
 }
 
 func TestBashHighlightComment(t *testing.T) {
 	h := BashHighlighter{}
 	src := "# this is a comment\necho hi"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if s := firstSpanWithFace(spans, FaceComment); s == nil {
-		t.Error("comment not highlighted")
-	}
+	wantExactSpan(t, spans, src, "# this is a comment", FaceComment)
 }
 
 func TestBashHighlightShebang(t *testing.T) {
 	h := BashHighlighter{}
 	src := "#!/bin/bash\necho hi"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if s := firstSpanWithFace(spans, FaceComment); s == nil {
-		t.Error("shebang not highlighted as comment")
-	}
+	wantExactSpan(t, spans, src, "#!/bin/bash", FaceComment)
 }
 
 func TestBashHighlightDoubleQuotedString(t *testing.T) {
 	h := BashHighlighter{}
 	src := `echo "hello world"`
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, `"hello world"`) {
-		t.Error("double-quoted string not highlighted")
-	}
+	wantExactSpan(t, spans, src, `"hello world"`, FaceString)
 }
 
 func TestBashHighlightSingleQuotedString(t *testing.T) {
 	h := BashHighlighter{}
 	src := "echo 'hello world'"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, "'hello world'") {
-		t.Error("single-quoted string not highlighted")
-	}
+	wantExactSpan(t, spans, src, "'hello world'", FaceString)
 }
 
 func TestBashHighlightVariable(t *testing.T) {
 	h := BashHighlighter{}
 	src := "echo $HOME"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, "$HOME") {
-		t.Error("variable $HOME not highlighted")
-	}
+	wantExactSpan(t, spans, src, "$HOME", FaceType)
 }
 
 func TestBashHighlightBraceVariable(t *testing.T) {
 	h := BashHighlighter{}
 	src := "echo ${HOME}"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, "${HOME}") {
-		t.Error("brace variable ${HOME} not highlighted")
-	}
+	wantExactSpan(t, spans, src, "${HOME}", FaceType)
 }
 
 func TestBashHighlightNumber(t *testing.T) {
 	h := BashHighlighter{}
 	src := "exit 42"
 	spans := h.Highlight(src, 0, len([]rune(src)))
-	if !spanCoversText(spans, src, "42") {
-		t.Error("number 42 not highlighted")
-	}
+	wantExactSpan(t, spans, src, "42", FaceNumber)
+	wantExactSpan(t, spans, src, "exit", FaceKeyword)
 }
 
 func TestBashHighlightEmpty(t *testing.T) {

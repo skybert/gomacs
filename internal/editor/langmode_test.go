@@ -3,6 +3,7 @@ package editor
 import (
 	"testing"
 
+	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/elisp"
 )
 
@@ -344,5 +345,221 @@ func TestModeIndentStr_EmptyStringIgnored(t *testing.T) {
 	}
 	if got := e.modeIndentStr("go"); got != "\t" {
 		t.Errorf("empty string ignored: want \"\\t\", got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// configuration variable names
+// ---------------------------------------------------------------------------
+
+func TestIndentVarName(t *testing.T) {
+	tests := []struct{ mode, want string }{
+		{"go", "go-indent"},
+		{"python", "python-indent"},
+		{"bash", "sh-indent"}, // Emacs spelling, not "bash-indent"
+		{"json", "json-indent"},
+	}
+	for _, tt := range tests {
+		if got := indentVarName(tt.mode); got != tt.want {
+			t.Errorf("indentVarName(%q) = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+func TestLspCommandVarName(t *testing.T) {
+	tests := []struct{ mode, want string }{
+		{"go", "go-lsp-command"},
+		{"java", "java-lsp-command"},
+		{"python", "python-lsp-command"},
+	}
+	for _, tt := range tests {
+		if got := lspCommandVarName(tt.mode); got != tt.want {
+			t.Errorf("lspCommandVarName(%q) = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// indentUnitProbes holds, per major mode, a snippet whose last line should be
+// indented one level deep.  TestModeIndentUnitAwarenessMatchesIndentEngine feeds
+// each snippet to the indentation engine twice with different indent units and
+// checks whether the result changes, which is the ground truth for the
+// indentUnitAware flag in langModes.  Every mode needs an entry so that a new
+// mode cannot be added without classifying it.
+var indentUnitProbes = map[string]string{
+	"go":          "package p\n\nfunc f() {\nx\n",
+	"java":        "class C {\nx\n",
+	"perl":        "sub f {\nx\n",
+	"bash":        "if true; then\nx\n",
+	"json":        "{\nx\n",
+	"python":      "if x:\nx\n",
+	"conf":        "[s]\n  a=1\nx\n",
+	"markdown":    "- a\n  b\nx\n",
+	"yaml":        "a:\n  b: 1\nx\n",
+	"makefile":    "all:\n\techo hi\nx\n",
+	"gherkin":     "Feature: f\n  Scenario: s\nx\n",
+	"elisp":       "(defun f ()\nx\n",
+	"text":        "para\n  cont\nx\n",
+	"fundamental": "line\n  cont\nx\n",
+}
+
+// TestModeIndentUnitAwarenessMatchesIndentEngine keeps langModes'
+// indentUnitAware flags honest by exercising the real indentation engine rather
+// than trusting a hand-maintained list: a mode is unit-aware exactly when
+// changing the indent unit changes the indentation it produces.  This is what
+// stops M-x help (and the man page) from advertising a "<mode>-indent" variable
+// for a mode that silently discards it — the failure mode this test was written
+// for, where markdown-indent and yaml-indent were documented but had no effect.
+func TestModeIndentUnitAwarenessMatchesIndentEngine(t *testing.T) {
+	for i := range langModes {
+		mode := langModes[i].modeName
+		probe, ok := indentUnitProbes[mode]
+		if !ok {
+			t.Errorf("mode %q has no entry in indentUnitProbes: add one and set "+
+				"indentUnitAware to whatever the indentation engine actually does", mode)
+			continue
+		}
+		b := buffer.NewWithContent(mode+"-probe", probe)
+		b.SetMode(mode)
+		bol := b.BeginningOfLine(b.Len() - 1)
+		narrow := calcIndentAt(b, mode, bol, "  ")
+		wide := calcIndentAt(b, mode, bol, "        ")
+		unitUsed := narrow != wide
+		if unitUsed != langModes[i].indentUnitAware {
+			t.Errorf("mode %q: indent engine honours the indent unit = %v "+
+				"(indent with a 2-space unit %q, with an 8-space unit %q), but "+
+				"indentUnitAware = %v",
+				mode, unitUsed, narrow, wide, langModes[i].indentUnitAware)
+		}
+	}
+}
+
+func TestIndentUnitProbesHaveNoUnknownModes(t *testing.T) {
+	for mode := range indentUnitProbes {
+		if langModeByName(mode) == nil {
+			t.Errorf("indentUnitProbes has an entry for %q, which is not a known major mode", mode)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// <mode>-lsp-command
+// ---------------------------------------------------------------------------
+
+func TestLangModeJavaDefaultsToJdtls(t *testing.T) {
+	// java debugging goes through the language server (dapStartJdtls), so java
+	// without an lspCmd means debug-start can never work.
+	info := langModeByName("java")
+	if len(info.lspCmd) == 0 || info.lspCmd[0] != "jdtls" {
+		t.Errorf("java lspCmd = %v, want [jdtls]", info.lspCmd)
+	}
+}
+
+// restoreLangModeLspCmds snapshots every mode's lspCmd and restores it when the
+// test ends: applyElispLspCommands writes into the process-wide langModes table.
+func restoreLangModeLspCmds(t *testing.T) {
+	t.Helper()
+	saved := make([][]string, len(langModes))
+	for i := range langModes {
+		saved[i] = langModes[i].lspCmd
+	}
+	t.Cleanup(func() {
+		for i := range langModes {
+			langModes[i].lspCmd = saved[i]
+		}
+	})
+}
+
+func TestApplyElispLspCommands_SetsCommandWithArgs(t *testing.T) {
+	restoreLangModeLspCmds(t)
+	e := newEditorWithLisp("")
+	if _, err := e.lisp.EvalString(`(setq java-lsp-command "jdtls -data /tmp/ws")`); err != nil {
+		t.Fatalf("setq failed: %v", err)
+	}
+	e.applyElispLspCommands()
+
+	want := []string{"jdtls", "-data", "/tmp/ws"}
+	got := langModeByName("java").lspCmd
+	if len(got) != len(want) {
+		t.Fatalf("java lspCmd = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("java lspCmd = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestApplyElispLspCommands_GivesModeWithoutDefaultAServer(t *testing.T) {
+	restoreLangModeLspCmds(t)
+	if len(langModeByName("python").lspCmd) != 0 {
+		t.Fatal("python is expected to ship without a default language server")
+	}
+	e := newEditorWithLisp("")
+	if _, err := e.lisp.EvalString(`(setq python-lsp-command "pylsp")`); err != nil {
+		t.Fatalf("setq failed: %v", err)
+	}
+	e.applyElispLspCommands()
+	if got := langModeByName("python").lspCmd; len(got) != 1 || got[0] != "pylsp" {
+		t.Errorf("python lspCmd = %v, want [pylsp]", got)
+	}
+}
+
+func TestApplyElispLspCommands_EmptyStringDisablesServer(t *testing.T) {
+	restoreLangModeLspCmds(t)
+	e := newEditorWithLisp("")
+	if _, err := e.lisp.EvalString(`(setq go-lsp-command "")`); err != nil {
+		t.Fatalf("setq failed: %v", err)
+	}
+	e.applyElispLspCommands()
+	if got := langModeByName("go").lspCmd; len(got) != 0 {
+		t.Errorf("go lspCmd = %v, want empty (server disabled)", got)
+	}
+}
+
+func TestApplyElispLspCommands_UnsetLeavesDefaults(t *testing.T) {
+	restoreLangModeLspCmds(t)
+	e := newEditorWithLisp("")
+	e.applyElispLspCommands()
+	if got := langModeByName("go").lspCmd; len(got) != 1 || got[0] != "gopls" {
+		t.Errorf("go lspCmd = %v, want the [gopls] default", got)
+	}
+}
+
+func TestApplyElispLspCommands_NonStringIgnored(t *testing.T) {
+	restoreLangModeLspCmds(t)
+	e := newEditorWithLisp("")
+	if _, err := e.lisp.EvalString("(setq go-lsp-command 42)"); err != nil {
+		t.Fatalf("setq failed: %v", err)
+	}
+	e.applyElispLspCommands()
+	if got := langModeByName("go").lspCmd; len(got) != 1 || got[0] != "gopls" {
+		t.Errorf("go lspCmd = %v, want the [gopls] default to survive a non-string value", got)
+	}
+}
+
+func TestApplyElispLspCommands_NoEvaluator(t *testing.T) {
+	restoreLangModeLspCmds(t)
+	e := newTestEditor("")
+	e.lisp = nil
+	e.applyElispLspCommands() // must not panic
+}
+
+// TestSetLangModeAppliesLspCommand covers the mode-switch path: applyElispConfig
+// applies the overrides at startup, and setLangMode re-reads them so a value the
+// user sets after startup takes effect on the next M-x <lang>-mode.
+func TestSetLangModeAppliesLspCommand(t *testing.T) {
+	restoreLangModeLspCmds(t)
+	e := newEditorWithLisp("#!/usr/bin/perl\n")
+	// A command that cannot exist, so nothing is spawned when lspActivate runs.
+	if _, err := e.lisp.EvalString(`(setq perl-lsp-command "gomacs-no-such-lsp-server")`); err != nil {
+		t.Fatalf("setq failed: %v", err)
+	}
+	buf(e).SetFilename("/tmp/script.pl")
+
+	e.cmdPerlMode()
+
+	got := langModeByName("perl").lspCmd
+	if len(got) != 1 || got[0] != "gomacs-no-such-lsp-server" {
+		t.Errorf("perl lspCmd = %v, want the configured command", got)
 	}
 }

@@ -502,22 +502,111 @@ func TestCmdLSPFindReferences_FlushesPendingDidChange(t *testing.T) {
 	waitForNotifyCount(t, rec, "textDocument/didChange", 1, time.Second)
 }
 
-func TestLspMaybeHover_FlushesPendingDidChange(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Passive hover uses the debounced path, not a forced flush
+//
+// lspMaybeHover fires from Run() after every Redraw(), i.e. on every
+// keystroke that moves point — not just when the user explicitly asks for
+// documentation. It used to call lspFlushDidChange, which defeated
+// lspDidChangeDebounce entirely: a fast typist paid a full buf.String() +
+// json.Marshal + blocking pipe write on every character. It now calls the
+// debounced lspMaybeDidChange instead, like lspMaybeTriggerCompletion does, and
+// tolerates a keystroke or two of staleness.
+// ---------------------------------------------------------------------------
+
+func TestLspMaybeHover_DoesNotForceFlushWithinDebounceWindow(t *testing.T) {
 	orig := lspDidChangeDebounce
-	lspDidChangeDebounce = time.Hour
+	lspDidChangeDebounce = time.Hour // effectively "never" via the debounced path
 	t.Cleanup(func() { lspDidChangeDebounce = orig })
 
+	// lastSent is recent, so the debounce window is in effect from the start.
 	rec := &notifyRecorder{}
-	e, _, _ := newDidChangeTestConn(t, rec, time.Now().Add(-time.Hour), nil)
+	e, _, _ := newDidChangeTestConn(t, rec, time.Now(), nil)
 	b := buf(e)
-	b.InsertString(b.Len(), "!")
+	b.InsertString(b.Len(), "!") // dirty; only a forced flush would send this
 	e.lastHoverFile = ""
 	e.lastHoverPoint = -1
 	e.messageTime = 0
 
 	e.lspMaybeHover()
+	drainOneLSPCb(t, e)
+	time.Sleep(15 * time.Millisecond)
+	if got := rec.count("textDocument/didChange"); got != 0 {
+		t.Fatalf("hover must not force a didChange send inside the debounce window, got %d", got)
+	}
+}
+
+// TestLspMaybeHover_BurstDoesNotForceDidChangePerKeystroke is the regression
+// test for the measured bug: before the fix, each of these iterations would
+// have forced its own full-document didChange (an O(n) buf.String() copy, a
+// JSON marshal, and a blocking pipe write) because point moves on every
+// insert and Run() calls lspMaybeHover after every Redraw(). With the fix,
+// they all fall inside a single debounce window and coalesce to zero sends.
+func TestLspMaybeHover_BurstDoesNotForceDidChangePerKeystroke(t *testing.T) {
+	orig := lspDidChangeDebounce
+	lspDidChangeDebounce = time.Hour // never elapses during this test
+	t.Cleanup(func() { lspDidChangeDebounce = orig })
+
+	rec := &notifyRecorder{}
+	e, _, _ := newDidChangeTestConn(t, rec, time.Now(), nil)
+	b := buf(e)
+	e.lastHoverFile = ""
+	e.lastHoverPoint = -1
+	e.messageTime = 0
+
+	const keystrokes = 25
+	for range keystrokes {
+		b.InsertString(b.Len(), "x")
+		e.lastHoverPoint = -1 // force the "point moved since last hover" check to pass
+		e.lspMaybeHover()
+		drainOneLSPCb(t, e) // resets hoverInflight so the next iteration isn't skipped
+	}
+
+	if got := rec.count("textDocument/didChange"); got != 0 {
+		t.Fatalf("burst of %d keystrokes should coalesce to 0 didChange sends within the debounce window, got %d", keystrokes, got)
+	}
+}
+
+// TestLspMaybeHover_EventuallySendsOnceDebounceWindowElapses proves the
+// debounced path is eventually consistent: hover doesn't force a send, but a
+// pending edit is still picked up once lspDidChangeDebounce has elapsed.
+func TestLspMaybeHover_EventuallySendsOnceDebounceWindowElapses(t *testing.T) {
+	orig := lspDidChangeDebounce
+	lspDidChangeDebounce = 50 * time.Millisecond
+	t.Cleanup(func() { lspDidChangeDebounce = orig })
+
+	rec := &notifyRecorder{}
+	// lastSent is far in the past, so the first hover call finds the
+	// debounce window already elapsed and sends immediately.
+	e, _, _ := newDidChangeTestConn(t, rec, time.Now().Add(-time.Hour), nil)
+	b := buf(e)
+	e.lastHoverFile = ""
+	e.lastHoverPoint = -1
+	e.messageTime = 0
+
+	b.InsertString(b.Len(), "!")
+	e.lspMaybeHover()
 	waitForNotifyCount(t, rec, "textDocument/didChange", 1, time.Second)
-	drainOne(t, e, "hover")
+	drainOneLSPCb(t, e)
+
+	// A second "keystroke" hot on the heels of the first falls inside the
+	// debounce window: hover must not force another send.
+	b.InsertString(b.Len(), "!")
+	e.lastHoverPoint = -1
+	e.lspMaybeHover()
+	time.Sleep(15 * time.Millisecond)
+	if got := rec.count("textDocument/didChange"); got != 1 {
+		t.Fatalf("expected the second hover to be debounced, got %d didChange notifications", got)
+	}
+	drainOneLSPCb(t, e)
+
+	// Once the debounce window has elapsed, hover picks up the still-dirty
+	// buffer on its next call.
+	time.Sleep(60 * time.Millisecond)
+	e.lastHoverPoint = -1
+	e.lspMaybeHover()
+	waitForNotifyCount(t, rec, "textDocument/didChange", 2, time.Second)
+	drainOneLSPCb(t, e)
 }
 
 func TestLspDidSave_EarlyReturns(t *testing.T) {

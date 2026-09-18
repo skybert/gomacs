@@ -1,6 +1,9 @@
 package buffer
 
 import (
+	"math/rand/v2"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -532,13 +535,64 @@ func lineStartRef(b *Buffer, line int) int {
 	return b.Len()
 }
 
-// checkLineStarts asserts LineStart agrees with the reference scan for every
-// line number from 1 to LineCount()+2 (i.e. including past-EOF lines).
+// lineStartsRef rebuilds the whole line-start index from scratch with a naive
+// scan, for cross-checking the incrementally patched one.
+func lineStartsRef(b *Buffer) []int {
+	out := []int{0}
+	for i := range b.Len() {
+		if b.RuneAt(i) == '\n' {
+			out = append(out, i+1)
+		}
+	}
+	return out
+}
+
+// lineColRef is a naive reference implementation of LineCol.
+func lineColRef(b *Buffer, pos int) (line, col int) {
+	pos = min(max(pos, 0), b.Len())
+	line, col = 1, 0
+	for i := range pos {
+		if b.RuneAt(i) == '\n' {
+			line++
+			col = 0
+		} else {
+			col++
+		}
+	}
+	return line, col
+}
+
+// checkLineStarts cross-checks the line-start index and everything derived from
+// it against naive from-scratch scans: the raw index itself (before anything can
+// trigger a rebuild that would paper over a bad patch), the incremental line
+// count, LineStart for every line from 1 to LineCount()+2 (i.e. including
+// past-EOF lines), LineCol for every position, and the PosForLineCol round trip.
 func checkLineStarts(t *testing.T, b *Buffer, what string) {
 	t.Helper()
+	want := lineStartsRef(b)
+	if b.lineStartsReady {
+		if !slices.Equal(b.lineStarts, want) {
+			t.Errorf("%s: lineStarts = %v, want %v (content %q)", what, b.lineStarts, want, b.String())
+		}
+		if got := b.lineCountDelta; got != len(want)-1 {
+			t.Errorf("%s: lineCountDelta = %d, want %d", what, got, len(want)-1)
+		}
+	}
 	for line := 1; line <= b.LineCount()+2; line++ {
 		if got, want := b.LineStart(line), lineStartRef(b, line); got != want {
 			t.Errorf("%s: LineStart(%d) = %d, want %d (content %q)", what, line, got, want, b.String())
+		}
+	}
+	for pos := 0; pos <= b.Len(); pos++ {
+		line, col := b.LineCol(pos)
+		wantLine, wantCol := lineColRef(b, pos)
+		if line != wantLine || col != wantCol {
+			t.Errorf("%s: LineCol(%d) = (%d,%d), want (%d,%d) (content %q)",
+				what, pos, line, col, wantLine, wantCol, b.String())
+		}
+		if got := b.PosForLineCol(line, col); got != pos {
+			t.Errorf("%s: PosForLineCol(%d,%d) = %d, want %d (round trip from pos %d)",
+				what, line, col, got, pos, pos)
 		}
 	}
 }
@@ -1347,6 +1401,167 @@ func TestDeleteClampsMarkInsideRange(t *testing.T) {
 	}
 }
 
+// ---- insert/delete point & mark boundary conditions ------------------------
+//
+// insertRunes adjusts point and mark with `>= pos`, i.e. text inserted at
+// exactly the point (or the mark) pushes it forward.  That is the single most
+// executed path in the editor (self-insert types at the point) and flipping
+// either comparison to `> pos` is otherwise invisible to the suite: every
+// other test inserts strictly before or strictly after point/mark.  The tables
+// below therefore hard-code the resulting Point()/Mark() for insertion one
+// rune before, exactly at, and one rune after each of them.
+
+func TestInsertAdjustsPointAtBoundaries(t *testing.T) {
+	const content = "hello" // 5 runes
+	tests := []struct {
+		name      string
+		point     int
+		insertAt  int
+		insert    string
+		wantText  string
+		wantPoint int
+	}{
+		{"insert one rune before point", 2, 1, "AB", "hABello", 4},
+		{"insert exactly at point", 2, 2, "AB", "heABllo", 4},
+		{"insert one rune after point", 2, 3, "AB", "helABlo", 2},
+		{"insert at point 0", 0, 0, "AB", "ABhello", 2},
+		{"insert one rune after point 0", 0, 1, "AB", "hABello", 0},
+		{"insert at end with point at end", 5, 5, "AB", "helloAB", 7},
+		{"insert before point at end", 5, 4, "AB", "hellABo", 7},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewWithContent("t", content)
+			b.SetPoint(tc.point)
+			if b.Point() != tc.point {
+				t.Fatalf("SetPoint(%d) gave Point() = %d", tc.point, b.Point())
+			}
+			b.InsertString(tc.insertAt, tc.insert)
+			mustString(b, tc.wantText, t)
+			if got := b.Point(); got != tc.wantPoint {
+				t.Errorf("Point() after inserting %q at %d with point %d = %d, want %d",
+					tc.insert, tc.insertAt, tc.point, got, tc.wantPoint)
+			}
+		})
+	}
+}
+
+func TestInsertAdjustsMarkAtBoundaries(t *testing.T) {
+	const content = "hello"
+	tests := []struct {
+		name     string
+		mark     int
+		insertAt int
+		insert   string
+		wantMark int
+	}{
+		{"insert one rune before mark", 3, 2, "AB", 5},
+		{"insert exactly at mark", 3, 3, "AB", 5},
+		{"insert one rune after mark", 3, 4, "AB", 3},
+		{"insert at mark 0", 0, 0, "AB", 2},
+		{"insert one rune after mark 0", 0, 1, "AB", 0},
+		{"insert at mark at end", 5, 5, "AB", 7},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewWithContent("t", content)
+			b.SetMark(tc.mark)
+			b.InsertString(tc.insertAt, tc.insert)
+			if got := b.Mark(); got != tc.wantMark {
+				t.Errorf("Mark() after inserting %q at %d with mark %d = %d, want %d",
+					tc.insert, tc.insertAt, tc.mark, got, tc.wantMark)
+			}
+		})
+	}
+}
+
+func TestInsertAtPointEqualToMarkMovesBoth(t *testing.T) {
+	b := NewWithContent("t", "hello")
+	b.SetPoint(2)
+	b.SetMark(2)
+	b.InsertString(2, "XYZ")
+	mustString(b, "heXYZllo", t)
+	if b.Point() != 5 {
+		t.Errorf("Point() = %d, want 5 (point rides over text inserted at it)", b.Point())
+	}
+	if b.Mark() != 5 {
+		t.Errorf("Mark() = %d, want 5 (mark rides over text inserted at it)", b.Mark())
+	}
+	// The region between point and mark stays empty, so a region command
+	// operates on nothing rather than on the freshly typed text.
+	if b.Point() != b.Mark() {
+		t.Errorf("point (%d) and mark (%d) should stay equal", b.Point(), b.Mark())
+	}
+}
+
+func TestInsertLeavesUnsetMarkAlone(t *testing.T) {
+	b := NewWithContent("t", "hello")
+	if b.Mark() != -1 {
+		t.Fatalf("fresh buffer Mark() = %d, want -1", b.Mark())
+	}
+	b.InsertString(0, "AB")
+	if b.Mark() != -1 {
+		t.Errorf("Mark() = %d after insert at 0, want -1 (unset mark must not move)", b.Mark())
+	}
+}
+
+// TestDeleteAdjustsPointAndMarkAtBoundaries pins point/mark for a deletion of
+// [pos, pos+count) with point/mark before, at pos, inside, at pos+count and
+// after.
+//
+// Note: unlike insertRunes, the boundary comparisons in deleteRunes cannot be
+// pinned by any test.  Flipping `b.point > pos+count` to `>=` (or `b.point >
+// pos` to `>=`) is semantically *equivalent*: at point == pos+count both
+// branches produce pos (pos+count-count), and at point == pos both leave the
+// point at pos.  Those mutants are therefore untestable rather than untested.
+func TestDeleteAdjustsPointAndMarkAtBoundaries(t *testing.T) {
+	const content = "hello world" // 11 runes
+	// Delete 5 runes starting at 3: "lo wo" -> "helrld"
+	const pos, count = 3, 5
+	tests := []struct {
+		name string
+		at   int
+		want int
+	}{
+		{"before deleted range", 1, 1},
+		{"exactly at pos", pos, pos},
+		{"inside deleted range", pos + 2, pos},
+		{"at last rune of deleted range", pos + count - 1, pos},
+		{"exactly at pos+count", pos + count, pos},
+		{"one rune past deleted range", pos + count + 1, pos + 1},
+		{"at end of buffer", 11, 11 - count},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name+" (point)", func(t *testing.T) {
+			b := NewWithContent("t", content)
+			b.SetPoint(tc.at)
+			b.Delete(pos, count)
+			mustString(b, "helrld", t)
+			if got := b.Point(); got != tc.want {
+				t.Errorf("Point() with point %d after Delete(%d,%d) = %d, want %d",
+					tc.at, pos, count, got, tc.want)
+			}
+		})
+		t.Run(tc.name+" (mark)", func(t *testing.T) {
+			b := NewWithContent("t", content)
+			b.SetMark(tc.at)
+			b.Delete(pos, count)
+			if got := b.Mark(); got != tc.want {
+				t.Errorf("Mark() with mark %d after Delete(%d,%d) = %d, want %d",
+					tc.at, pos, count, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDeleteLeavesUnsetMarkAlone(t *testing.T) {
+	b := NewWithContent("t", "hello world")
+	b.Delete(0, 6)
+	if b.Mark() != -1 {
+		t.Errorf("Mark() = %d after delete, want -1 (unset mark must not move)", b.Mark())
+	}
+}
+
 // ---- Delete edge cases -----------------------------------------------------
 
 func TestDeleteNegativePosClamped(t *testing.T) {
@@ -1536,5 +1751,625 @@ func TestReplaceStringBasic(t *testing.T) {
 	b.ReplaceString(0, 5, "hello")
 	if got := b.String(); got != "hello World" {
 		t.Fatalf("after replace: want %q, got %q", "hello World", got)
+	}
+}
+
+// ---- performance benchmarks -------------------------------------------------
+
+// benchSizes are the buffer sizes every performance benchmark is measured at.
+var benchSizes = []int{1000, 10000, 50000}
+
+// BenchmarkLineCol measures the uncached LineCol cost — the price the modeline
+// pays on the first call of a frame — for a position half way through and at
+// the very end of the buffer.
+func BenchmarkLineCol(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		for _, frac := range []struct {
+			name string
+			num  int
+		}{{"50%", 1}, {"100%", 2}} {
+			pos := buf.Len() * frac.num / 2
+			b.Run(sizeName(lines)+"/pos"+frac.name, func(b *testing.B) {
+				for b.Loop() {
+					buf.lcacheValid = false // defeat the (changeGen,pos) memo
+					_, _ = buf.LineCol(pos)
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkLineColCached measures the memoised path, which must stay O(1).
+func BenchmarkLineColCached(b *testing.B) {
+	buf := NewWithContent("bench", benchContent(50000))
+	pos := buf.Len() / 2
+	for b.Loop() {
+		_, _ = buf.LineCol(pos)
+	}
+}
+
+// BenchmarkPosForLineCol measures the inverse mapping for the last line.
+func BenchmarkPosForLineCol(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		last := buf.LineCount()
+		b.Run(sizeName(lines), func(b *testing.B) {
+			for b.Loop() {
+				_ = buf.PosForLineCol(last, 10)
+			}
+		})
+	}
+}
+
+// BenchmarkEnsureLineStartsRebuild measures a full index rebuild from scratch —
+// the cost that a dropped index imposes on the next LineStart() call.
+func BenchmarkEnsureLineStartsRebuild(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		b.Run(sizeName(lines), func(b *testing.B) {
+			for b.Loop() {
+				buf.invalidateLineStarts()
+				buf.ensureLineStarts()
+			}
+		})
+	}
+}
+
+// BenchmarkInsertMidThenLineStart measures typing in the middle of a buffer
+// followed by a line-start query — the pattern behind every keystroke.
+func BenchmarkInsertMidThenLineStart(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		mid := buf.Len() / 2
+		last := buf.LineCount()
+		b.Run(sizeName(lines), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				buf.Insert(mid, 'x')
+				_ = buf.LineStart(last)
+			}
+		})
+	}
+}
+
+// BenchmarkDeleteMidThenLineStart is the deletion counterpart.
+func BenchmarkDeleteMidThenLineStart(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		last := buf.LineCount()
+		b.Run(sizeName(lines), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				mid := buf.Len() / 2
+				buf.Insert(mid, 'x')
+				buf.Delete(mid, 1)
+				_ = buf.LineStart(last)
+			}
+		})
+	}
+}
+
+// BenchmarkStringRunes measures the UTF-8 round trip callers currently pay when
+// they need the buffer as runes.
+func BenchmarkStringRunes(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		b.Run(sizeName(lines), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = []rune(buf.String())
+			}
+		})
+	}
+}
+
+// sizeName labels a benchmark sub-test with its buffer size in lines.
+func sizeName(lines int) string {
+	switch {
+	case lines >= 1000:
+		return strconv.Itoa(lines/1000) + "k"
+	default:
+		return strconv.Itoa(lines)
+	}
+}
+
+// ---- line-start index: in-place patching ------------------------------------
+
+// TestLineStartIndexPatchedNotRebuilt pins down the point of the patching path:
+// a mid-buffer edit must leave the index valid instead of dropping it, so the
+// next LineStart() does not pay for a full rebuild.
+func TestLineStartIndexPatchedNotRebuilt(t *testing.T) {
+	b := NewWithContent("test", "aaa\nbbb\nccc\nddd\n")
+	_ = b.LineStart(2) // build the index
+	if !b.lineStartsReady {
+		t.Fatal("index should be ready after LineStart")
+	}
+
+	steps := []struct {
+		what string
+		edit func()
+	}{
+		{"insert mid-line", func() { b.Insert(5, 'x') }},
+		{"insert newline mid-buffer", func() { b.InsertString(6, "\n") }},
+		{"insert multi-line mid-buffer", func() { b.InsertString(2, "1\n2\n3") }},
+		{"insert at position 0", func() { b.InsertString(0, "Z\n") }},
+		{"delete mid-line", func() { b.Delete(3, 1) }},
+		{"delete spanning lines", func() { b.Delete(1, 6) }},
+		{"replace mid-buffer", func() { b.ReplaceString(2, 3, "q\nr") }},
+		{"undo", func() { b.ApplyUndo() }},
+		{"redo", func() { b.ApplyRedo() }},
+	}
+	for _, s := range steps {
+		s.edit()
+		if !b.lineStartsReady {
+			t.Errorf("%s: index was dropped, want it patched in place", s.what)
+			_ = b.LineStart(1) // rebuild so the remaining steps stay meaningful
+		}
+		checkLineStarts(t, b, s.what)
+	}
+}
+
+// TestLineStartIndexPatchedAcrossEditKinds walks every mutation shape the buffer
+// supports and cross-checks the whole index after each one.
+func TestLineStartIndexPatchedAcrossEditKinds(t *testing.T) {
+	t.Run("insert at start", func(t *testing.T) {
+		b := NewWithContent("test", "abc\nde\nfghi")
+		checkLineStarts(t, b, "initial")
+		b.InsertString(0, "Z\nY\n")
+		checkLineStarts(t, b, "after insert at start")
+	})
+
+	t.Run("multi-line insert in middle", func(t *testing.T) {
+		b := NewWithContent("test", "abc\nde\nfghi")
+		checkLineStarts(t, b, "initial")
+		b.InsertString(5, "\n\n\nQ\n")
+		checkLineStarts(t, b, "after multi-line insert")
+	})
+
+	t.Run("insert consecutive newlines at end", func(t *testing.T) {
+		b := NewWithContent("test", "abc")
+		checkLineStarts(t, b, "initial")
+		b.InsertString(b.Len(), "\n\n\n")
+		checkLineStarts(t, b, "after newline run")
+	})
+
+	t.Run("delete spanning several lines", func(t *testing.T) {
+		b := NewWithContent("test", "a\nb\nc\nd\ne\nf\n")
+		checkLineStarts(t, b, "initial")
+		b.Delete(2, 6) // removes "b\nc\nd\n"
+		checkLineStarts(t, b, "after multi-line delete")
+	})
+
+	t.Run("delete exactly one newline", func(t *testing.T) {
+		b := NewWithContent("test", "a\nb\nc")
+		checkLineStarts(t, b, "initial")
+		b.Delete(1, 1) // just the first '\n'
+		checkLineStarts(t, b, "after newline delete")
+	})
+
+	t.Run("delete everything then refill", func(t *testing.T) {
+		b := NewWithContent("test", "a\nb\nc\n")
+		checkLineStarts(t, b, "initial")
+		b.Delete(0, b.Len())
+		checkLineStarts(t, b, "after delete all")
+		b.InsertString(0, "x\ny\n")
+		checkLineStarts(t, b, "after refill")
+	})
+
+	t.Run("edits either side of the gap", func(t *testing.T) {
+		b := NewWithContent("test", "aaa\nbbb\nccc\nddd\neee\n")
+		checkLineStarts(t, b, "initial")
+		b.InsertString(10, "\nmid") // leaves the gap around position 14
+		checkLineStarts(t, b, "after edit leaving gap mid-buffer")
+		b.InsertString(2, "\nbefore") // insert before the gap
+		checkLineStarts(t, b, "after insert before gap")
+		b.InsertString(b.Len()-2, "after\n") // insert after the gap
+		checkLineStarts(t, b, "after insert after gap")
+		b.Delete(1, 5) // delete before the gap
+		checkLineStarts(t, b, "after delete before gap")
+	})
+
+	t.Run("replace shorter and longer", func(t *testing.T) {
+		b := NewWithContent("test", "one\ntwo\nthree\n")
+		checkLineStarts(t, b, "initial")
+		b.ReplaceString(4, 3, "x") // shorter, no newlines
+		checkLineStarts(t, b, "after shorter replace")
+		b.ReplaceString(4, 1, "a\nb\nc\n") // longer, adds newlines
+		checkLineStarts(t, b, "after longer replace")
+		b.ReplaceString(0, b.Len(), "single line") // collapses the buffer
+		checkLineStarts(t, b, "after whole-buffer replace")
+	})
+
+	t.Run("undo and redo a multi-line insert", func(t *testing.T) {
+		b := NewWithContent("test", "abc\nde")
+		checkLineStarts(t, b, "initial")
+		b.InsertString(2, "1\n2\n3")
+		checkLineStarts(t, b, "after insert")
+		b.ApplyUndo()
+		checkLineStarts(t, b, "after undo")
+		b.ApplyRedo()
+		checkLineStarts(t, b, "after redo")
+		b.ApplyUndo()
+		checkLineStarts(t, b, "after second undo")
+	})
+
+	t.Run("undo and redo a multi-line delete", func(t *testing.T) {
+		b := NewWithContent("test", "a\nb\nc\nd\n")
+		checkLineStarts(t, b, "initial")
+		b.Delete(2, 4)
+		checkLineStarts(t, b, "after delete")
+		b.ApplyUndo()
+		checkLineStarts(t, b, "after undo")
+		b.ApplyRedo()
+		checkLineStarts(t, b, "after redo")
+	})
+
+	t.Run("undo and redo a replace", func(t *testing.T) {
+		b := NewWithContent("test", "a\nb\nc\n")
+		checkLineStarts(t, b, "initial")
+		b.ReplaceString(2, 2, "X\nY\nZ\n")
+		checkLineStarts(t, b, "after replace")
+		b.ApplyUndo()
+		checkLineStarts(t, b, "after undo")
+		b.ApplyRedo()
+		checkLineStarts(t, b, "after redo")
+	})
+
+	t.Run("with narrowing active", func(t *testing.T) {
+		b := NewWithContent("test", "aaa\nbbb\nccc\nddd\n")
+		checkLineStarts(t, b, "initial")
+		b.Narrow(4, 12)
+		checkLineStarts(t, b, "narrowed")
+		b.InsertString(6, "X\nY")
+		checkLineStarts(t, b, "narrowed after insert")
+		b.Delete(5, 3)
+		checkLineStarts(t, b, "narrowed after delete")
+		b.Widen()
+		checkLineStarts(t, b, "after widen")
+	})
+
+	t.Run("unicode content", func(t *testing.T) {
+		b := NewWithContent("test", "héllo\nwörld\n日本語\n")
+		checkLineStarts(t, b, "initial")
+		b.InsertString(3, "æø\nå")
+		checkLineStarts(t, b, "after unicode insert")
+		b.Delete(2, 5)
+		checkLineStarts(t, b, "after unicode delete")
+	})
+}
+
+// TestLineStartIndexRandomEdits hammers the patching paths with a deterministic
+// pseudo-random edit stream, cross-checking the index after every mutation.
+func TestLineStartIndexRandomEdits(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	b := NewWithContent("test", "alpha\nbeta\ngamma\ndelta\n")
+	_ = b.LineStart(2) // build the index (line 1 short-circuits without it)
+	inserts := []string{"x", "\n", "a\nb", "\n\n", "long piece of text", "q\nr\ns\n", "é\n"}
+	for step := range 300 {
+		switch rng.IntN(4) {
+		case 0:
+			b.InsertString(rng.IntN(b.Len()+1), inserts[rng.IntN(len(inserts))])
+		case 1:
+			if b.Len() > 0 {
+				pos := rng.IntN(b.Len())
+				b.Delete(pos, 1+rng.IntN(b.Len()-pos))
+			}
+		case 2:
+			if b.Len() > 0 {
+				pos := rng.IntN(b.Len())
+				b.ReplaceString(pos, 1+rng.IntN(b.Len()-pos), inserts[rng.IntN(len(inserts))])
+			}
+		case 3:
+			if rng.IntN(2) == 0 {
+				b.ApplyUndo()
+			} else {
+				b.ApplyRedo()
+			}
+		}
+		if !b.lineStartsReady {
+			t.Fatalf("step %d: index was dropped", step)
+		}
+		if want := lineStartsRef(b); !slices.Equal(b.lineStarts, want) {
+			t.Fatalf("step %d: lineStarts = %v, want %v (content %q)", step, b.lineStarts, want, b.String())
+		}
+	}
+	checkLineStarts(t, b, "after random edit stream")
+}
+
+// ---- LineCol edge cases -----------------------------------------------------
+
+func TestLineColEdgeCases(t *testing.T) {
+	t.Run("empty buffer", func(t *testing.T) {
+		b := New("test")
+		if line, col := b.LineCol(0); line != 1 || col != 0 {
+			t.Errorf("LineCol(0) on empty buffer = (%d,%d), want (1,0)", line, col)
+		}
+		if line, col := b.LineCol(5); line != 1 || col != 0 {
+			t.Errorf("LineCol(5) on empty buffer = (%d,%d), want (1,0)", line, col)
+		}
+	})
+
+	t.Run("negative pos clamps to start", func(t *testing.T) {
+		b := NewWithContent("test", "ab\ncd")
+		for _, pos := range []int{-1, -100} {
+			if line, col := b.LineCol(pos); line != 1 || col != 0 {
+				t.Errorf("LineCol(%d) = (%d,%d), want (1,0)", pos, line, col)
+			}
+		}
+	})
+
+	t.Run("trailing newline", func(t *testing.T) {
+		b := NewWithContent("test", "ab\ncd\n")
+		// Len() sits on the empty last line.
+		if line, col := b.LineCol(b.Len()); line != 3 || col != 0 {
+			t.Errorf("LineCol(Len) = (%d,%d), want (3,0)", line, col)
+		}
+	})
+
+	t.Run("no trailing newline", func(t *testing.T) {
+		b := NewWithContent("test", "ab\ncd")
+		if line, col := b.LineCol(b.Len()); line != 2 || col != 2 {
+			t.Errorf("LineCol(Len) = (%d,%d), want (2,2)", line, col)
+		}
+	})
+
+	t.Run("position on a newline", func(t *testing.T) {
+		b := NewWithContent("test", "abc\nde")
+		// The '\n' at position 3 belongs to line 1 as its last column.
+		if line, col := b.LineCol(3); line != 1 || col != 3 {
+			t.Errorf("LineCol(3) = (%d,%d), want (1,3)", line, col)
+		}
+		if line, col := b.LineCol(4); line != 2 || col != 0 {
+			t.Errorf("LineCol(4) = (%d,%d), want (2,0)", line, col)
+		}
+	})
+
+	t.Run("consecutive newlines", func(t *testing.T) {
+		b := NewWithContent("test", "a\n\n\nb")
+		for pos, want := range map[int][2]int{0: {1, 0}, 1: {1, 1}, 2: {2, 0}, 3: {3, 0}, 4: {4, 0}, 5: {4, 1}} {
+			if line, col := b.LineCol(pos); line != want[0] || col != want[1] {
+				t.Errorf("LineCol(%d) = (%d,%d), want (%d,%d)", pos, line, col, want[0], want[1])
+			}
+		}
+	})
+
+	t.Run("spanning the gap", func(t *testing.T) {
+		b := NewWithContent("test", "aaa\nbbb\nccc\nddd")
+		b.Insert(5, 'x') // leaves the gap at position 6
+		checkLineStarts(t, b, "gap mid-buffer")
+	})
+}
+
+// TestLineColIgnoresNarrowing documents that LineCol, like LineStart, reports
+// absolute positions unaffected by narrowing.
+func TestLineColIgnoresNarrowing(t *testing.T) {
+	b := NewWithContent("test", "abc\nde\nfghi")
+	wantLine, wantCol := b.LineCol(8)
+	if wantLine != 3 || wantCol != 1 {
+		t.Fatalf("LineCol(8) = (%d,%d), want (3,1)", wantLine, wantCol)
+	}
+	b.Narrow(4, 6)
+	if line, col := b.LineCol(8); line != wantLine || col != wantCol {
+		t.Errorf("LineCol(8) while narrowed = (%d,%d), want (%d,%d)", line, col, wantLine, wantCol)
+	}
+	b.Widen()
+	if line, col := b.LineCol(8); line != wantLine || col != wantCol {
+		t.Errorf("LineCol(8) after widen = (%d,%d), want (%d,%d)", line, col, wantLine, wantCol)
+	}
+}
+
+// TestLineColCacheInvalidatedByEdit makes sure the memo keys off changeGen, so
+// an edit is never served a stale line/column.
+func TestLineColCacheInvalidatedByEdit(t *testing.T) {
+	b := NewWithContent("test", "ab\ncd")
+	if line, col := b.LineCol(4); line != 2 || col != 1 {
+		t.Fatalf("LineCol(4) = (%d,%d), want (2,1)", line, col)
+	}
+	b.InsertString(0, "\n") // pushes everything down one line
+	if line, col := b.LineCol(4); line != 3 || col != 0 {
+		t.Errorf("LineCol(4) after insert = (%d,%d), want (3,0)", line, col)
+	}
+}
+
+// TestLineColSeedsLineStarts verifies LineCol builds the shared index, so the
+// first modeline draw pays for it once and LineStart() is free afterwards.
+func TestLineColSeedsLineStarts(t *testing.T) {
+	b := NewWithContent("test", "a\nb\nc")
+	if b.lineStartsReady {
+		t.Fatal("index should start invalid")
+	}
+	_, _ = b.LineCol(2)
+	if !b.lineStartsReady {
+		t.Error("LineCol should build the line-start index")
+	}
+	if got := b.LineCount(); got != 3 {
+		t.Errorf("LineCount = %d, want 3", got)
+	}
+}
+
+// ---- PosForLineCol edge cases ----------------------------------------------
+
+func TestPosForLineColEdgeCases(t *testing.T) {
+	b := NewWithContent("test", "hello\nworld\nfoo")
+	tests := []struct {
+		line, col, want int
+		what            string
+	}{
+		{0, 2, 2, "line 0 clamps to line 1"},
+		{-5, 0, 0, "negative line clamps to line 1"},
+		{4, 0, b.Len(), "line past EOF collapses to Len"},
+		{99, 7, b.Len(), "far past EOF collapses to Len"},
+		{3, 99, b.Len(), "col past end of last line clamps to Len"},
+		{2, 5, 11, "col at the newline of its line"},
+		{2, 6, 11, "col past the newline clamps to it"},
+	}
+	for _, tc := range tests {
+		if got := b.PosForLineCol(tc.line, tc.col); got != tc.want {
+			t.Errorf("%s: PosForLineCol(%d,%d) = %d, want %d", tc.what, tc.line, tc.col, got, tc.want)
+		}
+	}
+
+	t.Run("empty buffer", func(t *testing.T) {
+		e := New("test")
+		for _, tc := range []struct{ line, col int }{{1, 0}, {1, 5}, {2, 0}, {0, 0}} {
+			if got := e.PosForLineCol(tc.line, tc.col); got != 0 {
+				t.Errorf("PosForLineCol(%d,%d) on empty buffer = %d, want 0", tc.line, tc.col, got)
+			}
+		}
+	})
+
+	t.Run("empty line between newlines", func(t *testing.T) {
+		e := NewWithContent("test", "a\n\nb")
+		if got := e.PosForLineCol(2, 3); got != 2 {
+			t.Errorf("PosForLineCol(2,3) on empty line = %d, want 2", got)
+		}
+	})
+}
+
+// TestPosForLineColRoundTripsLineCol checks the two directions agree for every
+// position in a buffer with mixed line shapes.
+func TestPosForLineColRoundTripsLineCol(t *testing.T) {
+	b := NewWithContent("test", "abc\n\ndefgh\n\n\nij")
+	for pos := 0; pos <= b.Len(); pos++ {
+		line, col := b.LineCol(pos)
+		if got := b.PosForLineCol(line, col); got != pos {
+			t.Errorf("round trip pos %d → (%d,%d) → %d", pos, line, col, got)
+		}
+	}
+}
+
+// ---- AppendRunes ------------------------------------------------------------
+
+func TestAppendRunes(t *testing.T) {
+	t.Run("empty buffer", func(t *testing.T) {
+		b := New("test")
+		if got := b.AppendRunes(nil); len(got) != 0 {
+			t.Errorf("AppendRunes(nil) on empty buffer = %v, want empty", got)
+		}
+	})
+
+	t.Run("nil destination", func(t *testing.T) {
+		b := NewWithContent("test", "hello\nworld")
+		if got := string(b.AppendRunes(nil)); got != "hello\nworld" {
+			t.Errorf("AppendRunes(nil) = %q, want %q", got, "hello\nworld")
+		}
+	})
+
+	t.Run("appends to existing content", func(t *testing.T) {
+		b := NewWithContent("test", "world")
+		got := string(b.AppendRunes([]rune("hello ")))
+		if got != "hello world" {
+			t.Errorf("AppendRunes = %q, want %q", got, "hello world")
+		}
+	})
+
+	t.Run("spans the gap", func(t *testing.T) {
+		b := NewWithContent("test", "Hello World")
+		b.Insert(5, ',') // leaves the gap mid-buffer
+		if got := string(b.AppendRunes(nil)); got != "Hello, World" {
+			t.Errorf("AppendRunes across gap = %q, want %q", got, "Hello, World")
+		}
+	})
+
+	t.Run("gap at the start", func(t *testing.T) {
+		b := NewWithContent("test", "abcdef")
+		b.Delete(0, 1) // gap sits at position 0
+		if got := string(b.AppendRunes(nil)); got != "bcdef" {
+			t.Errorf("AppendRunes with leading gap = %q, want %q", got, "bcdef")
+		}
+	})
+
+	t.Run("unicode", func(t *testing.T) {
+		const content = "héllo\n日本語\næøå"
+		b := NewWithContent("test", content)
+		got := b.AppendRunes(nil)
+		if want := []rune(content); !slices.Equal(got, want) {
+			t.Errorf("AppendRunes unicode = %v, want %v", got, want)
+		}
+		if len(got) != len([]rune(content)) {
+			t.Errorf("AppendRunes returned %d runes, want %d", len(got), len([]rune(content)))
+		}
+	})
+
+	t.Run("matches String", func(t *testing.T) {
+		b := NewWithContent("test", "one\ntwo\nthree")
+		b.InsertString(4, "X\nY")
+		b.Delete(1, 2)
+		if got, want := string(b.AppendRunes(nil)), b.String(); got != want {
+			t.Errorf("AppendRunes = %q, String = %q", got, want)
+		}
+	})
+
+	t.Run("ignores narrowing like String", func(t *testing.T) {
+		b := NewWithContent("test", "0123456789")
+		b.Narrow(3, 7)
+		if got, want := string(b.AppendRunes(nil)), b.String(); got != want {
+			t.Errorf("AppendRunes while narrowed = %q, want %q (same as String)", got, want)
+		}
+	})
+
+	t.Run("reuses spare capacity", func(t *testing.T) {
+		b := NewWithContent("test", "hello world")
+		scratch := make([]rune, 0, 64)
+		got := b.AppendRunes(scratch)
+		if &got[:1][0] != &scratch[:1:1][0] {
+			t.Error("AppendRunes reallocated despite sufficient capacity")
+		}
+		// A second pass over the reset slice must produce the same content.
+		again := b.AppendRunes(got[:0])
+		if string(again) != b.String() {
+			t.Errorf("reused AppendRunes = %q, want %q", string(again), b.String())
+		}
+	})
+
+	t.Run("grows an undersized destination", func(t *testing.T) {
+		b := NewWithContent("test", strings.Repeat("ab\n", 50))
+		dst := make([]rune, 0, 1)
+		got := b.AppendRunes(dst)
+		if string(got) != b.String() {
+			t.Errorf("AppendRunes into small slice = %q, want %q", string(got), b.String())
+		}
+	})
+}
+
+// ---- AppendRunes benchmark --------------------------------------------------
+
+// BenchmarkAppendRunes measures the direct rune copy that replaces the
+// String()+[]rune() round trip, reusing a scratch slice across iterations.
+func BenchmarkAppendRunes(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		b.Run(sizeName(lines), func(b *testing.B) {
+			b.ReportAllocs()
+			scratch := make([]rune, 0, buf.Len())
+			for b.Loop() {
+				scratch = buf.AppendRunes(scratch[:0])
+			}
+			_ = scratch
+		})
+	}
+}
+
+// BenchmarkLineStartsPatch isolates the cost of keeping the line-start index in
+// step with a mid-buffer edit: a binary search plus a tail shift, with no
+// allocation and no rebuild.  The insert/delete pair is self-cancelling, so the
+// index stays correct across iterations.
+func BenchmarkLineStartsPatch(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		buf.ensureLineStarts()
+		mid := buf.Len() / 2
+		one := []rune{'x'}
+		b.Run(sizeName(lines), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				buf.insertLineStarts(mid, one)
+				buf.deleteLineStarts(mid, 1)
+			}
+		})
+		if want := lineStartsRef(buf); !slices.Equal(buf.lineStarts, want) {
+			b.Fatalf("index drifted during benchmark at %d lines", lines)
+		}
 	}
 }

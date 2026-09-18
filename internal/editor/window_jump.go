@@ -39,6 +39,13 @@ func (e *Editor) cmdWindowJump() {
 	for _, r := range keys[:k] {
 		labels = append(labels, string(r))
 	}
+	// With more windows than home-row letters some windows get no badge; say so
+	// rather than silently leaving them unreachable.
+	if len(e.windows) > len(keys) {
+		e.Message("Jump to window: [%s]  (first %d of %d windows)  C-g cancels",
+			strings.Join(labels, "/"), k, len(e.windows))
+		return
+	}
 	e.Message("Jump to window: [%s]  C-g cancels", strings.Join(labels, "/"))
 }
 

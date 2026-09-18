@@ -252,6 +252,48 @@ func fakeJdtlsServer(t *testing.T, replies map[string]any) (*lspConn, func()) {
 	return conn, func() { conn.client.Close(); _ = r1.Close(); _ = w2.Close() }
 }
 
+// TestJdtlsConnError checks that each way of not having a usable java language
+// server produces its own actionable message, rather than all of them collapsing
+// into jdtlsExecuteCommand's generic "no ready jdtls language server".
+func TestJdtlsConnError(t *testing.T) {
+	info := *langModeByName("java")
+
+	noCmd := info
+	noCmd.lspCmd = nil
+	err := jdtlsConnError(nil, &noCmd)
+	if err == nil || !strings.Contains(err.Error(), "java-lsp-command") {
+		t.Errorf("unconfigured server: err = %v, want it to name java-lsp-command", err)
+	}
+
+	err = jdtlsConnError(nil, &info)
+	switch {
+	case err == nil:
+		t.Error("no connection: want an error")
+	case !strings.Contains(err.Error(), "not running"):
+		t.Errorf("no connection: err = %v, want it to say the server is not running", err)
+	case !strings.Contains(err.Error(), "jdtls"):
+		t.Errorf("no connection: err = %v, want it to name the configured command", err)
+	}
+
+	if err = jdtlsConnError(&lspConn{}, &info); err == nil ||
+		!strings.Contains(err.Error(), "not running") {
+		t.Errorf("connection without a client: err = %v, want it to say the server is not running", err)
+	}
+
+	notReady, cleanup := fakeJdtlsServer(t, nil)
+	defer cleanup()
+	notReady.isReady = false
+	if err = jdtlsConnError(notReady, &info); err == nil ||
+		!strings.Contains(err.Error(), "initialising") {
+		t.Errorf("not-ready connection: err = %v, want it to say the server is initialising", err)
+	}
+
+	notReady.isReady = true
+	if err = jdtlsConnError(notReady, &info); err != nil {
+		t.Errorf("ready connection: err = %v, want nil", err)
+	}
+}
+
 func TestJdtlsExecuteCommand_NoConnection(t *testing.T) {
 	if _, err := jdtlsExecuteCommand(nil, jdtlsStartDebugSession); err == nil {
 		t.Fatal("expected an error without a connection")

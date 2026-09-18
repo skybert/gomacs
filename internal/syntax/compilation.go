@@ -16,7 +16,7 @@ type CompilationHighlighter struct{}
 
 // Highlight scans compilation output line by line.  Each line is independent,
 // so scanning stops as soon as a line begins at or past end.
-func (CompilationHighlighter) Highlight(text string, start, end int) []Span {
+func (h CompilationHighlighter) Highlight(text string, start, end int) []Span {
 	var spans []Span
 	pos := 0
 	for line := range strings.SplitSeq(text, "\n") {
@@ -38,4 +38,12 @@ func (CompilationHighlighter) Highlight(text string, start, end int) []Span {
 		pos += len([]rune(line)) + 1 // +1 for newline
 	}
 	return spans
+}
+
+// HighlightRunes implements RuneHighlighter.  The line matcher is a regexp over
+// strings, so the runes have to be re-encoded; compilation output is read-only
+// and never on the keystroke path, so CompilationHighlighter does not implement
+// Resumable either.
+func (h CompilationHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.Highlight(string(runes), start, end)
 }

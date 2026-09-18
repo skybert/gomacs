@@ -34,7 +34,24 @@ var bashBuiltins = map[string]bool{
 // the top of the file, but it stops as soon as the next token starts at or
 // past end.
 func (h BashHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h BashHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.scan(runes, ScanState{}, start, end, nil)
+}
+
+// HighlightResume implements Resumable.  Bash carries no state between tokens —
+// here-doc bodies are deliberately scanned as ordinary shell text — so the top
+// of the token loop is always a safe restart point.  The one position-sensitive
+// rule, the shebang, only fires at offset 0, which a resumed scan never revisits.
+func (h BashHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return h.scan(runes, st, st.Pos, end, cp)
+}
+
+func (h BashHighlighter) scan(runes []rune, st ScanState, start, end int, cp *Checkpoints) []Span {
 	n := len(runes)
 	var spans []Span
 
@@ -48,8 +65,9 @@ func (h BashHighlighter) Highlight(text string, start, end int) []Span {
 	// so a token beginning just before end is emitted in full.
 	scanLimit := min(n, end)
 
-	i := 0
+	i := st.Pos
 	for i < scanLimit {
+		cp.mark(ScanState{Pos: i}, len(spans))
 		r := runes[i]
 
 		// Shebang: #! at position 0

@@ -17,8 +17,14 @@ var (
 	FaceVcGrepLine = Face{Fg: "yellow"}
 )
 
-func (VcGrepHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h VcGrepHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.  VcGrepHighlighter does not
+// implement Resumable: git grep output is never typed into, so the cost of a
+// rescan from the top is never on the keystroke path.
+func (h VcGrepHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
 	n := len(runes)
 	end = min(end, n)
 	var spans []Span
@@ -55,7 +61,7 @@ func (VcGrepHighlighter) Highlight(text string, start, end int) []Span {
 		// Highlight source content with BashHighlighter.
 		contentStart := lineNumEnd + 1
 		if contentStart < lineEnd {
-			spans = append(spans, src.Highlight(text, contentStart, lineEnd)...)
+			spans = append(spans, src.HighlightRunes(runes, contentStart, lineEnd)...)
 		}
 	}
 	return spans
@@ -68,8 +74,14 @@ func (VcGrepHighlighter) Highlight(text string, start, end int) []Span {
 // delegated to DiffHighlighter.
 type VcShowHighlighter struct{}
 
-func (VcShowHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h VcShowHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.  VcShowHighlighter does not
+// implement Resumable: finding where the diff portion begins needs a pre-pass
+// over the whole range, so there is no state a single offset could capture.
+func (h VcShowHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
 	n := len(runes)
 	end = min(end, n)
 
@@ -129,7 +141,7 @@ func (VcShowHighlighter) Highlight(text string, start, end int) []Span {
 
 	// Delegate diff portion to DiffHighlighter.
 	if diffStart < end {
-		spans = append(spans, DiffHighlighter{}.Highlight(text, diffStart, end)...)
+		spans = append(spans, DiffHighlighter{}.HighlightRunes(runes, diffStart, end)...)
 	}
 
 	return spans
@@ -141,8 +153,14 @@ type VcLogHighlighter struct{}
 
 var FaceVcLogSHA = Face{Fg: "yellow"}
 
-func (VcLogHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h VcLogHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.  VcLogHighlighter does not
+// implement Resumable: a log listing is read-only, so a rescan from the top is
+// never on the keystroke path.
+func (h VcLogHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
 	n := len(runes)
 	end = min(end, n)
 	var spans []Span
@@ -188,7 +206,14 @@ type vcAnnotateSrcPortion struct {
 }
 
 func (h VcAnnotateHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.  VcAnnotateHighlighter does not
+// implement Resumable: the source-code spans are collected across all lines and
+// appended at the end, so the spans it returns are not in offset order and
+// cannot be split at a checkpoint.
+func (h VcAnnotateHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
 	n := len(runes)
 	end = min(end, n)
 	var spans []Span
@@ -308,13 +333,30 @@ func (h VcAnnotateHighlighter) highlightSource(runes []rune, portions []vcAnnota
 // Lines starting with '#' are coloured as comments.
 type VcCommitHighlighter struct{}
 
-func (VcCommitHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h VcCommitHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h VcCommitHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.scan(runes, start, end, nil)
+}
+
+// HighlightResume implements Resumable.  A commit buffer is typed into, and its
+// lines are independent, so a line start is a safe restart point and
+// ScanState.Pos alone describes where the scan is.
+func (h VcCommitHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return h.scan(runes, st.Pos, end, cp)
+}
+
+func (h VcCommitHighlighter) scan(runes []rune, start, end int, cp *Checkpoints) []Span {
 	n := len(runes)
 	end = min(end, n)
 	var spans []Span
 	i := start
 	for i < end {
+		cp.mark(ScanState{Pos: i}, len(spans))
 		lineStart := i
 		for i < n && runes[i] != '\n' {
 			i++
@@ -337,8 +379,14 @@ func (VcCommitHighlighter) Highlight(text string, start, end int) []Span {
 // The first line "On branch …" is shown as a bold header.
 type VcStatusHighlighter struct{}
 
-func (VcStatusHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h VcStatusHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.  VcStatusHighlighter does not
+// implement Resumable: a status listing is read-only, so a rescan from the top
+// is never on the keystroke path.
+func (h VcStatusHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
 	n := len(runes)
 	end = min(end, n)
 	var spans []Span
@@ -430,6 +478,8 @@ func LangToHighlighter(lang string) Highlighter {
 		return YAMLHighlighter{}
 	case "makefile":
 		return MakefileHighlighter{}
+	case "conf":
+		return ConfHighlighter{}
 	default:
 		return nil
 	}

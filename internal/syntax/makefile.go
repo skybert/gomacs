@@ -34,14 +34,31 @@ var makefileDirectives = map[string]bool{
 // Highlight colours one Makefile line at a time.  Lines are independent, so the
 // scan stops as soon as a line begins at or past end; the line it is already on
 // is still measured to its real end so its spans are not truncated.
-func (MakefileHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+func (h MakefileHighlighter) Highlight(text string, start, end int) []Span {
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h MakefileHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.scan(runes, start, end, nil)
+}
+
+// HighlightResume implements Resumable.  Makefile lines are independent — even
+// `define` blocks are coloured line by line — so a line start is a safe restart
+// point and ScanState.Pos alone describes where the scan is.
+func (h MakefileHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return h.scan(runes, st.Pos, end, cp)
+}
+
+func (h MakefileHighlighter) scan(runes []rune, start, end int, cp *Checkpoints) []Span {
 	n := len(runes)
 	end = min(end, n)
 	var spans []Span
 	i := start
 
 	for i < end {
+		cp.mark(ScanState{Pos: i}, len(spans))
 		lineStart := i
 		for i < n && runes[i] != '\n' {
 			i++

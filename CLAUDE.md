@@ -7,10 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make              # fmt → lint → test → vulncheck → build (default)
 make build        # gofmt + go build -o build/gomacs
-make build/shotgen  # build the screenshot generator tool
 make test         # go test ./...
 make lint         # golangci-lint run ./...
 make fmt          # gofmt -w -s .
+make man          # render build/gomacs.1 from doc/gomacs.1.in
+make doc          # regenerate doc/gomacs-user-guide.md from doc/gomacs.1.in
 
 # Run a single test
 go test ./internal/editor/ -run TestSplitWindowRight
@@ -25,8 +26,8 @@ go tool cover -func=build/coverage.out
 ```
 
 **Important:** Always use `make` targets rather than bare `go build` commands.
-Running `go build ./cmd/shotgen` without `-o` drops a stray `./shotgen` binary
-in the repo root. Use `make build/shotgen` instead.
+Running `go build ./some/pkg` without `-o` drops a stray binary in the repo
+root. Use `make build` instead.
 
 ## Architecture
 
@@ -76,21 +77,56 @@ tcell event → terminal.ParseKey → keymap.Lookup → execCommand(name) → cm
 | `auto-revert` | bool/nil | `t` | Auto-reload unmodified buffers when their file changes on disk |
 | `fill-column` | integer | `70` | Column target for `fill-paragraph` (M-q) |
 | `isearch-case-insensitive` | bool/nil | `t` | Case-insensitive isearch; set to `nil` for case-sensitive |
+| `subword-mode` | bool/nil | `t` | Word motion stops at CamelCase sub-words |
+| `visual-lines` | bool/nil | `t` | Wrap long lines visually |
+| `completion-menu-trigger-chars` | integer | `3` | Chars typed before the completion menu appears (alias: `lsp-completion-min-chars`) |
 | `python-indent` | integer or string | `"  "` | Per-level indent for Python |
 | `go-indent` | string | `"\t"` | Per-level indent for Go |
 | `java-indent` | integer or string | `"  "` | Per-level indent for Java |
+| `perl-indent` | integer or string | `"  "` | Per-level indent for Perl |
 | `sh-indent` | integer or string | `"  "` | Per-level indent for Bash (`bash-indent` is not the name; use `sh-indent`) |
 | `json-indent` | integer or string | `"  "` | Per-level indent for JSON |
-| `markdown-indent` | integer or string | `"  "` | Per-level indent for Markdown |
-| `screenshot-dir` | string | `""` (startup cwd) | Directory for `M-x screenshot` PNG output; created if absent |
+| `<mode>-lsp-command` | string | `"gopls"` (go), `"jdtls"` (java), unset otherwise | Command that starts the language server for `<mode>`; `""` disables it |
 | `debug-locals-auto-expand-depth` | integer | `1` | Depth to auto-expand struct variables in the Debug Locals panel |
+
+**Only the six modes above have a configurable indent unit.** `modeIndentStr`
+builds the variable name as `<mode>-indent` for any mode, so `(setq
+markdown-indent 4)` is accepted — but `calcIndentAt` in `indent_engine.go` only
+consumes the unit for go, java, perl, bash, json and python. Markdown, YAML,
+Makefile, Gherkin, Text and Fundamental copy the previous line's indentation,
+conf-mode does nothing at all, and Emacs Lisp indents relative to the enclosing
+form (hard-coded two columns, `indent.go`). Those variables would be knobs that
+do nothing, so they are deliberately *not* documented; the pairing is enforced by
+`langModeInfo.indentUnitAware` plus `TestModeIndentUnitAwarenessMatchesIndentEngine`
+(measures the real engine) and `TestHelpConfigVarsCoverIndentFamily` (checks the
+help listing both ways). If you give one of those modes a real indent engine, set
+`indentUnitAware` and the tests will tell you to document the variable.
 
 Example `~/.gomacs`:
 ```elisp
 (setq fill-column 80)
 (setq python-indent 4)
 (setq isearch-case-insensitive nil)  ; restore case-sensitive search
+(setq java-lsp-command "jdtls -data /tmp/jdtls-ws")
 ```
+
+**Language servers / `<mode>-lsp-command`** — `langModes` in `internal/editor/langmode.go`
+holds each mode's `lspCmd`, which `lspActivate` spawns. `applyElispLspCommands()`
+overwrites those entries from `(setq <mode>-lsp-command "cmd arg …")` (split on
+whitespace; `""` disables the server), so a mode that ships without a default —
+python, bash, … — can be given one. This is load-bearing for java debugging: the
+java debug adapter is not a process gomacs spawns but a socket that jdtls opens on
+request (`dapStartJdtls`), so `debug-start` in java-mode only works when
+`lspConns["java"]` is a ready connection.
+
+**Debugger source buffers are read-only** — while `e.dap != nil`, every
+file-backed buffer is forced read-only so the single-letter shortcuts
+(`n i o c e q`) drive the debugger instead of being inserted. Route every entry
+point through `debugMarkSourceReadOnly` / `debugAdoptSourceBuffer`
+(`dap_layout.go`): they record the buffer's original flag in
+`dapState.prevReadOnly`, which `debugTeardownLayout` restores on `debug-exit`.
+Never call `SetReadOnly(true)` for the debugger directly — that leaves the user's
+buffer locked after the session ends.
 
 **isearch case folding** — isearch is case-insensitive by default (`isSearchCaseFold = true`).
 Set `(setq isearch-case-insensitive nil)` in `~/.gomacs` to restore case-sensitive search.
@@ -135,11 +171,23 @@ Every non-trivial Go function must have a corresponding unit test.
 
 ### Configuration variables
 
-When adding a new Elisp configuration variable (i.e. a new `GetGlobalVar` call in
-`applyElispConfig()` in `internal/editor/editor.go`), you **must** also:
+When adding a new Elisp configuration variable — a new `GetGlobalVar` call in
+`applyElispConfig()` in `internal/editor/editor.go`, or a new dynamically named
+one like `<mode>-indent` / `<mode>-lsp-command` — you **must** also:
 
-1. Add an entry to the `configVars` slice in `cmdHelp()` in `internal/editor/nav.go`
-   so that `M-x help` lists it with a description and its current value.
-2. Add a row to the configuration table in `doc/gomacs.1.in` (the man page).
+1. Add an entry to the right group in `helpConfigVarGroups` in
+   `internal/editor/nav.go` so that `M-x help` lists it with a description and
+   its current value.
+2. Add a `.TP` entry under `.SS Configurable variables` in `doc/gomacs.1.in`
+   (the man page), then run `make doc` to regenerate
+   `doc/gomacs-user-guide.md`.
 3. Update the `**Mode configuration via Elisp**` table in this file if the variable
    is mode-specific, or add it as a standalone bullet if it is global.
+
+All three are enforced by tests in `internal/editor/nav_test.go`
+(`TestHelpConfigVarsCoverApplyElispConfig`, `TestHelpConfigVarsCoverIndentFamily`,
+`TestHelpConfigVarsCoverLspCommandFamily`, `TestHelpConfigVarsAreDocumentedInManPage`,
+`TestManPageDocumentsNoUnknownConfigVars`). The last one also fails on
+documentation for a variable no code reads, so **do not document a knob that does
+nothing** — that is how the non-existent `screenshot-dir` survived in the man page
+and user guide.

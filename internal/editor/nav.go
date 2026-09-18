@@ -306,13 +306,22 @@ type configVarGroup struct {
 // helpConfigVarGroups documents every Elisp configuration variable exposed
 // via (setq ...) and surfaced by cmdHelp / C-h h.
 //
-// Invariant: every variable read with e.lisp.GetGlobalVar(...) inside
-// applyElispConfig() in editor.go must have a matching entry somewhere in
-// this slice. TestHelpConfigVarsCoverApplyElispConfig in nav_test.go parses
-// applyElispConfig's source and fails if one is missing, so this cannot
-// silently rot. When you add a new GetGlobalVar call there, add a matching
-// entry here (plus a row in doc/gomacs.1.in and, if the variable is global
-// rather than mode-specific, a bullet in CLAUDE.md).
+// Invariants, all guarded by tests in nav_test.go so they cannot silently rot:
+//
+//   - Every variable read with e.lisp.GetGlobalVar(...) inside
+//     applyElispConfig() in editor.go must have an entry here
+//     (TestHelpConfigVarsCoverApplyElispConfig parses that function's source).
+//   - The per-mode families whose names are built at run time from the mode
+//     table — "<mode>-indent" and "<mode>-lsp-command" — must be listed for
+//     exactly the modes that honour them, no more and no less
+//     (TestHelpConfigVarsCoverIndentFamily,
+//     TestHelpConfigVarsCoverLspCommandFamily).  Listing a variable that has no
+//     effect is as much a bug as omitting one that does.
+//   - Every variable here must also appear in doc/gomacs.1.in
+//     (TestHelpConfigVarsAreDocumentedInManPage).
+//
+// When you add a variable, add it here, add a .TP entry to doc/gomacs.1.in and
+// update the table in CLAUDE.md.
 var helpConfigVarGroups = []configVarGroup{
 	{"Editing & Files", []configVar{
 		{"fill-column", "Column target for fill-paragraph (M-q). Default: 70."},
@@ -326,14 +335,16 @@ var helpConfigVarGroups = []configVarGroup{
 		{"isearch-case-insensitive", "When t, isearch ignores case. Default: t."},
 	}},
 	{"Indentation", []configVar{
-		{"go-indent", "Indent string for Go mode. Default: \"\\t\"."},
-		{"java-indent", "Indent string or width for Java mode. Default: 4."},
-		{"json-indent", "Indent string or width for JSON mode. Default: 2."},
-		{"markdown-indent", "Indent string or width for Markdown mode. Default: 2."},
-		{"perl-indent", "Indent string or width for Perl mode. Default: 2."},
-		{"python-indent", "Indent string or width for Python mode. Default: 4."},
-		{"sh-indent", "Indent string or width for Bash mode. Default: 2."},
-		{"yaml-indent", "Indent string or width for YAML mode. Default: 2."},
+		{"go-indent", "Indent unit for Go mode. Default: \"\\t\"."},
+		{"java-indent", "Indent unit for Java mode. Default: 2."},
+		{"json-indent", "Indent unit for JSON mode. Default: 2."},
+		{"perl-indent", "Indent unit for Perl mode. Default: 2."},
+		{"python-indent", "Indent unit for Python mode. Default: 2."},
+		{"sh-indent", "Indent unit for Bash mode. Default: 2."},
+	}},
+	{"Language Servers", []configVar{
+		{"go-lsp-command", "Command that starts the Go language server. Default: \"gopls\"."},
+		{"java-lsp-command", "Command that starts the Java language server, which also provides the debug adapter. Default: \"jdtls\"."},
 	}},
 	{"Spell Checking", []configVar{
 		{"spell-command", "Path to spell-checker executable. Default: \"aspell\"."},

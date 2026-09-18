@@ -1,9 +1,6 @@
 package syntax
 
-import (
-	"strings"
-	"unicode/utf8"
-)
+import "unicode"
 
 // MarkdownHighlighter highlights Markdown text using a line-by-line state machine.
 type MarkdownHighlighter struct{}
@@ -15,29 +12,47 @@ type MarkdownHighlighter struct{}
 // tracked correctly, but it stops as soon as a line begins at or after end —
 // everything past that point would only be discarded.
 func (m MarkdownHighlighter) Highlight(text string, start, end int) []Span {
+	return m.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (m MarkdownHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return m.scan(runes, ScanState{}, start, end, nil)
+}
+
+// HighlightResume implements Resumable.  Markdown's only cross-line state is
+// whether the scan sits inside a fenced code block, which ScanState.Fence
+// carries; a line start with that flag is a safe restart point.
+func (m MarkdownHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return m.scan(runes, st, st.Pos, end, cp)
+}
+
+func (m MarkdownHighlighter) scan(runes []rune, st ScanState, start, end int, cp *Checkpoints) []Span {
 	var spans []Span
 
-	runeOffset := 0  // rune offset of the current line's first rune
-	inFence := false // true while inside a fenced code block
-
-	for rest := text; len(rest) > 0; {
+	n := len(runes)
+	runeOffset := st.Pos // rune offset of the current line's first rune
+	inFence := st.Fence  // true while inside a fenced code block
+	for runeOffset < n {
 		lineStart := runeOffset
 		if lineStart >= end {
 			break
 		}
+		cp.mark(ScanState{Pos: lineStart, Fence: inFence}, len(spans))
 
-		line := rest
-		if idx := strings.IndexByte(rest, '\n'); idx >= 0 {
-			line, rest = rest[:idx+1], rest[idx+1:]
-		} else {
-			rest = ""
+		lineEnd := lineStart
+		for lineEnd < n && runes[lineEnd] != '\n' {
+			lineEnd++
 		}
-		lineEnd := lineStart + utf8.RuneCountInString(line)
+		if lineEnd < n {
+			lineEnd++ // the line includes its terminating newline
+		}
+		line := runes[lineStart:lineEnd]
 		runeOffset = lineEnd
 
 		// --- Fenced code block detection (``` lines) ---
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") {
+		if hasFencePrefix(line) {
 			inFence = !inFence
 			// Highlight the fence line itself as code.
 			addSpan(&spans, lineStart, lineEnd, FaceCode, start, end)
@@ -52,21 +67,21 @@ func (m MarkdownHighlighter) Highlight(text string, start, end int) []Span {
 		// --- Block-level patterns (whole-line) ---
 
 		// Blockquote: lines starting with >
-		if strings.HasPrefix(line, ">") {
+		if hasPrefix(line, ">") {
 			addSpan(&spans, lineStart, lineEnd, FaceBlockquote, start, end)
 			continue
 		}
 
 		// Headers: ###, ##, #
-		if strings.HasPrefix(line, "### ") || line == "###" {
+		if hasPrefix(line, "### ") || equalString(line, "###") {
 			addSpan(&spans, lineStart, lineEnd, FaceHeader3, start, end)
 			continue
 		}
-		if strings.HasPrefix(line, "## ") || line == "##" {
+		if hasPrefix(line, "## ") || equalString(line, "##") {
 			addSpan(&spans, lineStart, lineEnd, FaceHeader2, start, end)
 			continue
 		}
-		if strings.HasPrefix(line, "# ") || line == "#" {
+		if hasPrefix(line, "# ") || equalString(line, "#") {
 			addSpan(&spans, lineStart, lineEnd, FaceHeader1, start, end)
 			continue
 		}
@@ -76,6 +91,37 @@ func (m MarkdownHighlighter) Highlight(text string, start, end int) []Span {
 	}
 
 	return spans
+}
+
+// hasPrefix reports whether the runes in line begin with s.
+func hasPrefix(line []rune, s string) bool {
+	for _, r := range s {
+		if len(line) == 0 || line[0] != r {
+			return false
+		}
+		line = line[1:]
+	}
+	return true
+}
+
+// equalString reports whether line is exactly s.  The line slice keeps its
+// terminating newline, so this only matches an unterminated final line — which
+// is the behaviour the string-based comparisons it replaced had.
+func equalString(line []rune, s string) bool {
+	if len(line) != len(s) {
+		return false
+	}
+	return hasPrefix(line, s)
+}
+
+// hasFencePrefix reports whether line opens or closes a fenced code block, i.e.
+// whether its first non-whitespace runes are three backticks.
+func hasFencePrefix(line []rune) bool {
+	i := 0
+	for i < len(line) && unicode.IsSpace(line[i]) {
+		i++
+	}
+	return len(line)-i >= 3 && line[i] == '`' && line[i+1] == '`' && line[i+2] == '`'
 }
 
 // addSpan appends a span if it overlaps the window [winStart, winEnd).
@@ -89,9 +135,8 @@ func addSpan(spans *[]Span, spanStart, spanEnd int, face Face, winStart, winEnd 
 // inlineSpans scans a single line for inline Markdown patterns and returns spans.
 // lineRuneBase is the rune offset of line[0] within the full text.
 // winStart/winEnd are the overall highlight window (rune offsets in full text).
-func inlineSpans(line string, lineRuneBase, winStart, winEnd int) []Span {
+func inlineSpans(runes []rune, lineRuneBase, winStart, winEnd int) []Span {
 	var spans []Span
-	runes := []rune(line)
 	n := len(runes)
 	i := 0
 

@@ -136,11 +136,17 @@ func (e *Editor) lspClose() {
 // lspMaybeDidChange.  Redraw() calls lspMaybeDidChange after every keystroke;
 // without this, a fast typist (or a keyboard macro) triggers an O(n)
 // buf.String() copy, a JSON marshal, and a full-document write down the LSP
-// pipe on every single character.  Call sites whose result depends on the
-// server having current text right now — completion, hover, definition,
-// references — must call lspFlushDidChange instead, which bypasses the
-// debounce so a coalesced-away edit is never missed.  It is a var (not a
-// const) so tests can shrink it for determinism.
+// pipe on every single character.  User-initiated requests whose result
+// depends on the server having current text right now — find-definition
+// (M-.), find-references (M-?), show-doc (C-c h) — must call
+// lspFlushDidChange instead, which bypasses the debounce so a coalesced-away
+// edit is never missed.  Passive, best-effort paths that also fire on every
+// keystroke — eldoc-style hover (lspMaybeHover) and as-you-type completion
+// (lspMaybeTriggerCompletion) — deliberately stay on the debounced
+// lspMaybeDidChange path instead: a slightly stale result there is
+// acceptable, and forcing a flush would defeat the whole point of this
+// debounce.  It is a var (not a const) so tests can shrink it for
+// determinism.
 var lspDidChangeDebounce = 150 * time.Millisecond
 
 // lspMaybeDidChange sends textDocument/didChange if buf has been modified
@@ -584,9 +590,20 @@ func (e *Editor) lspMaybeHover() {
 	if time.Now().UnixNano()-e.messageTime < 2e9 {
 		return
 	}
-	// Make sure the server has seen any edits made since the last debounced
-	// didChange before asking for hover text at the new cursor position.
-	e.lspFlushDidChange(buf)
+	// Unlike the user-initiated requests below, hover is fired passively from
+	// Run() after every Redraw() — i.e. on every keystroke that moves point,
+	// not just when the user explicitly asks for documentation. Forcing a
+	// flush here would defeat lspDidChangeDebounce entirely: a fast typist
+	// would pay a full buf.String() + json.Marshal + pipe write on every
+	// character (measured ~6 ms for a 50k-line file), which is exactly what
+	// the debounce exists to avoid. Redraw() already called lspMaybeDidChange
+	// for this same keystroke immediately before Run() calls us, so this is
+	// normally a cheap no-op; it stays defensive (mirrors the same pattern in
+	// lspMaybeTriggerCompletion in lsp_completion.go) in case that call order ever
+	// changes. A slightly stale hover result is an acceptable trade-off here
+	// — unlike find-definition/find-references/show-doc, nothing breaks if
+	// eldoc lags a keystroke or two behind.
+	e.lspMaybeDidChange(buf)
 	e.lastHoverFile = buf.Filename()
 	e.lastHoverPoint = buf.Point()
 	e.hoverInflight = true

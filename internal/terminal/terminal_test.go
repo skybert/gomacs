@@ -5,6 +5,7 @@ import (
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/gdamore/tcell/v3/color"
+	"github.com/gdamore/tcell/v3/vt"
 	"github.com/skybert/gomacs/internal/syntax"
 )
 
@@ -357,6 +358,193 @@ func TestDisableCaptureStopsCapture(t *testing.T) {
 func TestInvalidateStyleCacheDoesNotPanic(t *testing.T) {
 	term := NewCapture(10, 5)
 	term.InvalidateStyleCache()
+}
+
+// ---- styleFor: one-entry memo -----------------------------------------------
+
+// realScreenTerminal builds a Terminal backed by a real (headless) tcell
+// screen using tcell/v3's vt mock terminal, so the non-capture SetCell/
+// DrawString path (the one styleFor actually optimizes) can be exercised
+// hermetically, with no real TTY involved.
+func realScreenTerminal(t *testing.T, width, height int) *Terminal {
+	t.Helper()
+	mt := vt.NewMockTerm()
+	mt.Backend().SetSize(vt.Coord{X: vt.Col(width), Y: vt.Row(height)})
+	s, err := tcell.NewTerminfoScreenFromTty(mt)
+	if err != nil {
+		t.Fatalf("NewTerminfoScreenFromTty: %v", err)
+	}
+	if err := s.Init(); err != nil {
+		t.Fatalf("screen.Init: %v", err)
+	}
+	t.Cleanup(s.Fini)
+	return &Terminal{screen: s, styleCache: make(map[syntax.Face]tcell.Style, 32)}
+}
+
+func TestStyleForMemoHitsSameFace(t *testing.T) {
+	term := realScreenTerminal(t, 10, 5)
+	face := syntax.Face{Fg: "red", Bold: true}
+
+	// First call resolves via styleCache (memo miss); record the style.
+	first := term.styleFor(face)
+	if !term.lastFaceValid || term.lastFace != face {
+		t.Fatal("styleFor: memo not populated after first call")
+	}
+
+	// Mutate the underlying cache entry to a distinguishable style and
+	// confirm the second call for the *same* face comes from the memo
+	// rather than re-consulting styleCache.
+	term.styleCache[face] = tcell.StyleDefault.Reverse(true)
+	second := term.styleFor(face)
+	if second != first {
+		t.Errorf("styleFor: second call for identical face = %v, want memoized %v (should not have re-read styleCache)", second, first)
+	}
+}
+
+func TestStyleForMemoMissOnDifferentFace(t *testing.T) {
+	term := realScreenTerminal(t, 10, 5)
+	red := syntax.Face{Fg: "red"}
+	blue := syntax.Face{Fg: "blue"}
+
+	term.styleFor(red)
+	got := term.styleFor(blue)
+	want := faceToStyle(blue)
+	if got != want {
+		t.Errorf("styleFor(blue) after styleFor(red) = %v, want %v", got, want)
+	}
+	if term.lastFace != blue {
+		t.Errorf("styleFor: memo face = %v, want %v", term.lastFace, blue)
+	}
+}
+
+// TestInvalidateStyleCacheClearsMemo is the regression test for the one
+// thing most likely to break the memo: a theme change (which calls
+// InvalidateStyleCache) must take effect on the very next SetCell, even if
+// that SetCell uses the same Face value as the one currently memoized (a
+// theme swap can change what a given Face resolves to via faceToStyle only
+// if faceToStyle's inputs change — here we simulate the more common case of
+// re-registering a Face under the same key with a stale cached Style, which
+// is exactly what a bare `clear(styleCache)` without memo invalidation would
+// have left behind).
+func TestInvalidateStyleCacheClearsMemo(t *testing.T) {
+	term := realScreenTerminal(t, 10, 5)
+	face := syntax.Face{Fg: "red"}
+
+	term.SetCell(0, 0, 'A', face)
+	if !term.lastFaceValid {
+		t.Fatal("SetCell: memo not populated")
+	}
+
+	// Simulate a theme change: the style that this Face should now resolve to
+	// is different (e.g. LoadTheme mutated global Face vars, but the Face
+	// struct value passed to SetCell happens to be unchanged, or simply: the
+	// cache must not be trusted at all after invalidation).
+	term.InvalidateStyleCache()
+	if term.lastFaceValid {
+		t.Fatal("InvalidateStyleCache: one-entry memo still marked valid")
+	}
+	if len(term.styleCache) != 0 {
+		t.Fatalf("InvalidateStyleCache: styleCache not cleared, len=%d", len(term.styleCache))
+	}
+
+	// The very next SetCell for the same face must recompute rather than
+	// reuse anything left over from before invalidation.
+	term.SetCell(0, 0, 'A', face)
+	want := faceToStyle(face)
+	if term.lastStyle != want {
+		t.Errorf("after InvalidateStyleCache: resolved style = %v, want freshly computed %v", term.lastStyle, want)
+	}
+	if len(term.styleCache) != 1 {
+		t.Errorf("after InvalidateStyleCache + SetCell: styleCache len = %d, want 1", len(term.styleCache))
+	}
+}
+
+// TestSetCellRealScreenAppliesFace exercises the non-capture SetCell path
+// end-to-end against a real (headless) tcell screen: the cell content that
+// lands in the screen's buffer must reflect the face passed in.
+func TestSetCellRealScreenAppliesFace(t *testing.T) {
+	term := realScreenTerminal(t, 10, 5)
+	face := syntax.Face{Fg: "red", Bold: true}
+	term.SetCell(2, 1, 'Z', face)
+
+	str, style, _ := term.screen.Get(2, 1)
+	if str != "Z" {
+		t.Errorf("Get rune = %q, want %q", str, "Z")
+	}
+	wantFg := parseColor("red")
+	if fg := style.GetForeground(); fg != wantFg {
+		t.Errorf("Get style fg = %v, want %v", fg, wantFg)
+	}
+	attrs := style.GetAttributes()
+	if attrs&tcell.AttrBold == 0 {
+		t.Error("GetContent style: AttrBold not set")
+	}
+}
+
+// ---- benchmarks -------------------------------------------------------------
+
+// BenchmarkSetCellSameFaceRun measures SetCell for a long run of identical
+// faces against a real (headless) screen — the realistic case of a syntax
+// span, a padded modeline, or a run of spaces, where the one-entry memo
+// should eliminate the styleCache map lookup for every cell after the first.
+func BenchmarkSetCellSameFaceRun(b *testing.B) {
+	mt := vt.NewMockTerm()
+	mt.Backend().SetSize(vt.Coord{X: 200, Y: 50})
+	s, err := tcell.NewTerminfoScreenFromTty(mt)
+	if err != nil {
+		b.Fatalf("NewTerminfoScreenFromTty: %v", err)
+	}
+	if err := s.Init(); err != nil {
+		b.Fatalf("screen.Init: %v", err)
+	}
+	defer s.Fini()
+	term := &Terminal{screen: s, styleCache: make(map[syntax.Face]tcell.Style, 32)}
+	face := syntax.Face{Fg: "#e17df3", Bg: "#1a1a1a", Bold: true}
+
+	for b.Loop() {
+		for col := range 200 {
+			term.SetCell(col, 10, 'x', face)
+		}
+	}
+}
+
+// BenchmarkStyleForMemoHit measures styleFor for a run of identical faces —
+// the case the one-entry memo targets. Compare against
+// BenchmarkStyleForCacheHitNoMemo (the old styleCache-only lookup) for the
+// direct before/after of this change.
+func BenchmarkStyleForMemoHit(b *testing.B) {
+	term := &Terminal{styleCache: make(map[syntax.Face]tcell.Style, 32)}
+	face := syntax.Face{Fg: "#e17df3", Bg: "#1a1a1a", Bold: true}
+	var style tcell.Style
+	for b.Loop() {
+		style = term.styleFor(face)
+	}
+	_ = style
+}
+
+// BenchmarkStyleForCacheHitNoMemo measures a bare styleCache lookup (what
+// SetCell cost before the one-entry memo) for comparison against
+// BenchmarkSetCellSameFaceRun.
+func BenchmarkStyleForCacheHitNoMemo(b *testing.B) {
+	cache := make(map[syntax.Face]tcell.Style, 32)
+	face := syntax.Face{Fg: "#e17df3", Bg: "#1a1a1a", Bold: true}
+	cache[face] = faceToStyle(face)
+	var style tcell.Style
+	for b.Loop() {
+		style = cache[face]
+	}
+	_ = style
+}
+
+// BenchmarkFaceToStyleMiss measures the full faceToStyle conversion (a cache
+// miss), for comparison.
+func BenchmarkFaceToStyleMiss(b *testing.B) {
+	face := syntax.Face{Fg: "#e17df3", Bg: "#1a1a1a", Bold: true}
+	var style tcell.Style
+	for b.Loop() {
+		style = faceToStyle(face)
+	}
+	_ = style
 }
 
 // ---- ParseColorRGB (exported helper) ---------------------------------------

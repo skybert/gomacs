@@ -9,7 +9,26 @@ type JSONHighlighter struct{}
 // tracked from the top of the file, but it stops as soon as the next token
 // starts at or past end.
 func (h JSONHighlighter) Highlight(text string, start, end int) []Span {
-	runes := []rune(text)
+	return h.HighlightRunes([]rune(text), start, end)
+}
+
+// HighlightRunes implements RuneHighlighter.
+func (h JSONHighlighter) HighlightRunes(runes []rune, start, end int) []Span {
+	return h.scan(runes, ScanState{}, end, nil)
+}
+
+// HighlightResume implements Resumable.  A string literal is consumed whole by
+// the token that opens it, so nothing is carried between tokens and the top of
+// the token loop is always a safe restart point.
+func (h JSONHighlighter) HighlightResume(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
+	cp.arm(st.Pos)
+	return h.scan(runes, st, end, cp)
+}
+
+// scan needs no start parameter: JSON emits a span for every token it
+// recognises, so the caller's start only ever filtered spans the resumed scan
+// does not reach in the first place.
+func (h JSONHighlighter) scan(runes []rune, st ScanState, end int, cp *Checkpoints) []Span {
 	n := len(runes)
 	var spans []Span
 
@@ -17,8 +36,9 @@ func (h JSONHighlighter) Highlight(text string, start, end int) []Span {
 	// so a token beginning just before end is emitted in full.
 	scanLimit := min(n, end)
 
-	i := 0
+	i := st.Pos
 	for i < scanLimit {
+		cp.mark(ScanState{Pos: i}, len(spans))
 		r := runes[i]
 		switch {
 		case r == '"':

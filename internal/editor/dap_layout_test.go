@@ -187,6 +187,59 @@ func TestDebugTeardownLayoutNoSession(t *testing.T) {
 	e.debugTeardownLayout() // no-op, no panic
 }
 
+// ---------------------------------------------------------------------------
+// debugAdoptSourceBuffer
+// ---------------------------------------------------------------------------
+
+func TestDebugAdoptSourceBufferForcesReadOnly(t *testing.T) {
+	e, _ := newDAPCapEditor("code\n")
+	opened := buffer.NewWithContent("opened.go", "package p\n")
+	opened.SetFilename("/tmp/opened.go")
+	e.buffers = append(e.buffers, opened)
+
+	e.debugAdoptSourceBuffer(opened)
+	if !opened.ReadOnly() {
+		t.Error("a source file opened mid-session should be read-only")
+	}
+	if ro, tracked := e.dap.prevReadOnly[opened]; !tracked || ro {
+		t.Errorf("prevReadOnly[opened] = (%v, %v), want the original writable flag recorded", ro, tracked)
+	}
+}
+
+func TestDebugAdoptSourceBufferSkipsBuffersWithoutFile(t *testing.T) {
+	// The debug panels, *Help*, *messages* and the VC commit buffer are not source
+	// code and must stay writable/untracked.
+	e, _ := newDAPCapEditor("code\n")
+	e.debugSetupLayout()
+	before := len(e.dap.prevReadOnly)
+
+	for _, b := range []*buffer.Buffer{e.dap.replBuf, e.dap.localsBuf, e.dap.stackBuf} {
+		e.debugAdoptSourceBuffer(b)
+		if _, tracked := e.dap.prevReadOnly[b]; tracked {
+			t.Errorf("panel buffer %q should not be adopted as a source buffer", b.Name())
+		}
+	}
+	if len(e.dap.prevReadOnly) != before {
+		t.Errorf("prevReadOnly grew from %d to %d entries", before, len(e.dap.prevReadOnly))
+	}
+}
+
+func TestDebugAdoptSourceBufferNoSessionOrNilBuf(t *testing.T) {
+	e, _ := newDAPCapEditor("code\n")
+	e.debugAdoptSourceBuffer(nil) // no panic, nothing recorded
+	if len(e.dap.prevReadOnly) != 0 {
+		t.Error("nil buffer should not be recorded")
+	}
+
+	orphan := buffer.New("orphan.go")
+	orphan.SetFilename("/tmp/orphan.go")
+	e.dap = nil
+	e.debugAdoptSourceBuffer(orphan) // no session → no panic, no change
+	if orphan.ReadOnly() {
+		t.Error("a buffer must not be locked when no debug session is active")
+	}
+}
+
 func TestDebugTeardownLayoutUntrackedSourceBuffer(t *testing.T) {
 	// Session state built without debugSetupLayout: teardown still clears the
 	// read-only flag of windows[0] so the user is not left with a locked buffer.

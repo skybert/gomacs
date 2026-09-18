@@ -48,39 +48,54 @@ func (m *mockVCBackend) Unstage(_, filePath string) error {
 	return nil
 }
 
+// newMockStatusEditor installs mock as the only VC backend for the duration of
+// the test and returns an editor whose active buffer is a *vc-status* buffer
+// listing statusLine, rooted at root.
+func newMockStatusEditor(t *testing.T, mock *mockVCBackend, root, statusLine string) *Editor {
+	t.Helper()
+	origBackends := vcBackends
+	vcBackends = []vcBackend{mock}
+	t.Cleanup(func() { vcBackends = origBackends })
+
+	e := newTestEditor("")
+	initVCMaps(e)
+	sb := buffer.NewWithContent("*vc-status*", statusLine)
+	sb.SetMode("vc-status")
+	e.buffers = append(e.buffers, sb)
+	e.activeWin.SetBuf(sb)
+	e.vcLogRoots[sb] = root
+	sb.SetPoint(0)
+	return e
+}
+
 // ---------------------------------------------------------------------------
 // vc-status diff: fallback to staged when no unstaged changes
 // ---------------------------------------------------------------------------
 
-// TestVCStatusDiffFallsBackToStaged: when Diff returns empty, DiffStaged is
-// called and its output is used.
+// TestVCStatusDiffFallsBackToStaged: when Diff returns empty, the `d` handler
+// falls back to DiffStaged and shows its output.
 func TestVCStatusDiffFallsBackToStaged(t *testing.T) {
 	mock := &mockVCBackend{
 		diffResult:       "",
 		diffStagedResult: "diff --git a/file.go\n+added line\n",
 	}
-	origBackends := vcBackends
-	vcBackends = []vcBackend{mock}
-	defer func() { vcBackends = origBackends }()
+	e := newMockStatusEditor(t, mock, "/mock/root", " M file.go\n")
 
-	be, _ := vcFind("/mock/root")
-	if be == nil {
-		t.Fatal("vcFind returned nil for mock backend")
+	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'd'}) {
+		t.Fatal("'d' should be consumed by vcStatusDispatch")
 	}
-
-	text, _ := be.Diff("/mock/root", "file.go")
-	if text == "" {
-		text, _ = be.DiffStaged("/mock/root", "file.go")
-	}
-
 	if !mock.unstagedCalled {
 		t.Error("Diff (unstaged) was not called")
 	}
 	if !mock.stagedCalled {
 		t.Error("DiffStaged was not called as fallback")
 	}
-	if text != mock.diffStagedResult {
-		t.Errorf("diff text = %q, want staged result %q", text, mock.diffStagedResult)
+	db := e.FindBuffer("*vc-diff*")
+	if db == nil {
+		t.Fatal("'d' should create a *vc-diff* buffer")
+	}
+	if db.String() != mock.diffStagedResult {
+		t.Errorf("diff buffer = %q, want staged result %q", db.String(), mock.diffStagedResult)
 	}
 }
 
@@ -91,24 +106,23 @@ func TestVCStatusDiffSkipsStagedWhenUnstagedAvailable(t *testing.T) {
 		diffResult:       "diff --git a/file.go\n-removed\n",
 		diffStagedResult: "should not be used",
 	}
-	origBackends := vcBackends
-	vcBackends = []vcBackend{mock}
-	defer func() { vcBackends = origBackends }()
+	e := newMockStatusEditor(t, mock, "/mock/root", " M file.go\n")
 
-	be, _ := vcFind("/mock/root")
-	text, _ := be.Diff("/mock/root", "file.go")
-	if text == "" {
-		text, _ = be.DiffStaged("/mock/root", "file.go")
+	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'd'}) {
+		t.Fatal("'d' should be consumed by vcStatusDispatch")
 	}
-
 	if !mock.unstagedCalled {
 		t.Error("Diff was not called")
 	}
 	if mock.stagedCalled {
 		t.Error("DiffStaged should not be called when unstaged diff is available")
 	}
-	if text != mock.diffResult {
-		t.Errorf("diff text = %q, want %q", text, mock.diffResult)
+	db := e.FindBuffer("*vc-diff*")
+	if db == nil {
+		t.Fatal("'d' should create a *vc-diff* buffer")
+	}
+	if db.String() != mock.diffResult {
+		t.Errorf("diff buffer = %q, want %q", db.String(), mock.diffResult)
 	}
 }
 
@@ -116,20 +130,29 @@ func TestVCStatusDiffSkipsStagedWhenUnstagedAvailable(t *testing.T) {
 // vc-status unstage
 // ---------------------------------------------------------------------------
 
-// TestVCStatusUnstageCallsBackend: Unstage is invoked with the expected path.
+// TestVCStatusUnstageCallsBackend: `u` hands the file on the current line to
+// the backend's Unstage and refreshes the status buffer afterwards.
 func TestVCStatusUnstageCallsBackend(t *testing.T) {
-	mock := &mockVCBackend{}
-	origBackends := vcBackends
-	vcBackends = []vcBackend{mock}
-	defer func() { vcBackends = origBackends }()
-
-	filePath := "/mock/root/internal/editor/nav.go"
-	be, _ := vcFind("/mock/root")
-	if err := be.Unstage("/mock/root", filePath); err != nil {
-		t.Fatalf("Unstage returned error: %v", err)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "file.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
-	if mock.unstageArg != filePath {
-		t.Errorf("Unstage called with %q, want %q", mock.unstageArg, filePath)
+	mock := &mockVCBackend{}
+	e := newMockStatusEditor(t, mock, root, " M file.go\n")
+
+	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'u'}) {
+		t.Fatal("'u' should be consumed by vcStatusDispatch")
+	}
+	want := filepath.Join(root, "file.go")
+	if mock.unstageArg != want {
+		t.Errorf("Unstage called with %q, want %q", mock.unstageArg, want)
+	}
+	sb := e.FindBuffer("*vc-status*")
+	if sb == nil {
+		t.Fatal("'u' should leave a *vc-status* buffer in place")
+	}
+	if sb.String() != "M  file.go\n" {
+		t.Errorf("'u' should refresh the status buffer from the backend, got %q", sb.String())
 	}
 }
 
@@ -177,6 +200,18 @@ func makeGitRepo(t *testing.T) string {
 	run("git", "-C", dir, "commit", "-m", "initial commit")
 
 	return dir
+}
+
+// commitChange rewrites main.go in root and commits it under subject, giving
+// the log a new entry that a refresh must pick up.
+func commitChange(t *testing.T, root, content, subject string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", root, "commit", "-am", subject).CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
 }
 
 // newTestEditorWithVC creates a test editor whose active buffer's filename is
@@ -596,7 +631,7 @@ func TestVcLogDispatch_Q_QuitsVcLog(t *testing.T) {
 	e.bufferMRU = append(e.bufferMRU, buf(e))
 	e.cmdVcPrintLog()
 	if e.ActiveBuffer().Mode() != "vc-log" {
-		t.Skip("vc-log buffer not active after cmdVcPrintLog")
+		t.Fatal("vc-log buffer should be active after cmdVcPrintLog")
 	}
 	e.vcLogDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'q'})
 	if e.ActiveBuffer().Mode() == "vc-log" {
@@ -609,7 +644,7 @@ func TestVcLogDispatch_N_MovesDown(t *testing.T) {
 	e.cmdVcPrintLog()
 	logBuf := e.ActiveBuffer()
 	if logBuf.Mode() != "vc-log" {
-		t.Skip("vc-log not active")
+		t.Fatal("vc-log buffer should be active after cmdVcPrintLog")
 	}
 	logBuf.SetPoint(0)
 	before := logBuf.Point()
@@ -626,7 +661,7 @@ func TestVcLogDispatch_P_MovesUp(t *testing.T) {
 	e.cmdVcPrintLog()
 	logBuf := e.ActiveBuffer()
 	if logBuf.Mode() != "vc-log" {
-		t.Skip("vc-log not active")
+		t.Fatal("vc-log buffer should be active after cmdVcPrintLog")
 	}
 	logBuf.SetPoint(logBuf.Len())
 	before := logBuf.Point()
@@ -639,14 +674,25 @@ func TestVcLogDispatch_P_MovesUp(t *testing.T) {
 }
 
 func TestVcLogDispatch_G_RefreshesLog(t *testing.T) {
-	e, _ := newTestEditorWithVC(t)
+	e, dir := newTestEditorWithVC(t)
 	e.cmdVcPrintLog()
 	if e.ActiveBuffer().Mode() != "vc-log" {
-		t.Skip("vc-log not active")
+		t.Fatal("vc-log buffer should be active after cmdVcPrintLog")
 	}
+	before := e.ActiveBuffer().String()
+	// A commit made after the log was shown must appear once it is refreshed.
+	commitChange(t, dir, "package main\n\nfunc main() { _ = 1 }\n", "second commit")
+
 	consumed := e.vcLogDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'g'})
 	if !consumed {
 		t.Error("'g' should be consumed by vcLogDispatch")
+	}
+	after := e.ActiveBuffer().String()
+	if after == before {
+		t.Error("'g' should re-run the log; buffer text is unchanged")
+	}
+	if !strings.Contains(after, "second commit") {
+		t.Errorf("refreshed log should list the new commit, got %q", after)
 	}
 }
 
@@ -759,7 +805,7 @@ func TestVcStatusDispatch_Q_QuitsVcStatus(t *testing.T) {
 	e.bufferMRU = append(e.bufferMRU, buf(e))
 	e.cmdVcStatus()
 	if e.ActiveBuffer().Mode() != "vc-status" {
-		t.Skip("vc-status buffer not active")
+		t.Fatal("vc-status buffer should be active after cmdVcStatus")
 	}
 	e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'q'})
 	if e.ActiveBuffer().Mode() == "vc-status" {
@@ -771,7 +817,7 @@ func TestVcStatusDispatch_G_RefreshesStatus(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	e.cmdVcStatus()
 	if e.ActiveBuffer().Mode() != "vc-status" {
-		t.Skip("vc-status buffer not active")
+		t.Fatal("vc-status buffer should be active after cmdVcStatus")
 	}
 	consumed := e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'g'})
 	if !consumed {
@@ -786,7 +832,7 @@ func TestVcStatusDispatch_L_ShowsVcLog(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	e.cmdVcStatus()
 	if e.ActiveBuffer().Mode() != "vc-status" {
-		t.Skip("vc-status buffer not active")
+		t.Fatal("vc-status buffer should be active after cmdVcStatus")
 	}
 	consumed := e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'l'})
 	if !consumed {
@@ -801,7 +847,7 @@ func TestVcStatusDispatch_UnknownKey_NotConsumed(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	e.cmdVcStatus()
 	if e.ActiveBuffer().Mode() != "vc-status" {
-		t.Skip("vc-status not active")
+		t.Fatal("vc-status buffer should be active after cmdVcStatus")
 	}
 	consumed := e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'z'})
 	if consumed {
@@ -813,7 +859,7 @@ func TestVcStatusDispatch_NonRune_NotConsumed(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	e.cmdVcStatus()
 	if e.ActiveBuffer().Mode() != "vc-status" {
-		t.Skip("vc-status not active")
+		t.Fatal("vc-status buffer should be active after cmdVcStatus")
 	}
 	consumed := e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyCtrlG})
 	if consumed {
@@ -1086,6 +1132,25 @@ func TestGitBackend_Unstage(t *testing.T) {
 	}
 }
 
+// An empty file path means "the whole repository"; git refuses a bare
+// "git restore --staged", so the backend has to name the repository root.
+func TestGitBackend_UnstageWholeRepo(t *testing.T) {
+	dir := makeGitRepo(t)
+	be := gitBackend{}
+	if err := os.WriteFile(filepath.Join(dir, "extra.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	if err := be.Unstage(dir, ""); err != nil {
+		t.Fatalf("Unstage(root, \"\"): %v", err)
+	}
+	if staged := gitStagedFiles(t, dir); strings.TrimSpace(staged) != "" {
+		t.Fatalf("whole-repo Unstage should empty the index, staged = %q", staged)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // cmdVcDiff
 // ---------------------------------------------------------------------------
@@ -1351,9 +1416,13 @@ func TestCmdVcAnnotate_NoFile(t *testing.T) {
 func TestVcDiffGotoSource_AddedLine(t *testing.T) {
 	e, dir := newTestEditorWithVC(t)
 	p := filepath.Join(dir, "main.go")
-	if err := os.WriteFile(p, []byte("package main\n\nfunc main() {\n\t_ = 42\n}\n"), 0644); err != nil {
+	content := "package main\n\nfunc main() {\n\t_ = 42\n}\n"
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// Mirror the on-disk content in the buffer visiting the file, so the jump
+	// lands in the buffer the user would actually be looking at.
+	buf(e).InsertString(0, content)
 	e.cmdVcDiff()
 	diff := e.FindBuffer("*vc-diff*")
 	if diff == nil {
@@ -1363,22 +1432,51 @@ func TestVcDiffGotoSource_AddedLine(t *testing.T) {
 	s := diff.String()
 	idx := strings.Index(s, "+\t_ = 42")
 	if idx < 0 {
-		t.Skipf("no added line in diff:\n%s", s)
+		t.Fatalf("diff should contain the added line:\n%s", s)
 	}
 	diff.SetPoint(idx)
 	if !e.vcDiffGotoSource(diff) {
 		t.Fatal("vcDiffGotoSource should return true")
 	}
+	dest := e.activeWin.Buf()
+	if dest.Filename() != p {
+		t.Fatalf("expected a jump into %q, got %q", p, dest.Filename())
+	}
+	bol := dest.BeginningOfLine(dest.Point())
+	eol := dest.EndOfLine(dest.Point())
+	if got := dest.Substring(bol, eol); got != "\t_ = 42" {
+		t.Fatalf("point should land on the added line, got %q", got)
+	}
 }
 
+// A line that is not a +/- change must not navigate, even when the buffer holds
+// a perfectly good file header and hunk header above it.
 func TestVcDiffGotoSource_NonDiffLine(t *testing.T) {
-	e, _ := newTestEditorWithVC(t)
-	b := buf(e)
-	b.InsertString(0, "not a diff line\n")
-	b.SetPoint(0)
-	// Should return true (no-op) without crashing.
+	e, dir := newTestEditorWithVC(t)
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	diffText := "--- a/notes.txt\n" +
+		"+++ b/notes.txt\n" +
+		"@@ -1,2 +1,2 @@\n" +
+		" one\n" +
+		"not a diff line\n"
+	b := buffer.NewWithContent("*vc-diff*", diffText)
+	b.SetMode("diff")
+	e.buffers = append(e.buffers, b)
+	e.activeWin.SetBuf(b)
+	e.vcLogRoots[b] = dir
+	b.SetPoint(strings.Index(diffText, "not a diff line"))
+	pt := b.Point()
+
 	if !e.vcDiffGotoSource(b) {
 		t.Fatal("expected true for a non-diff line")
+	}
+	if e.activeWin.Buf() != b {
+		t.Fatalf("a non-diff line should not navigate, ended up in %q", e.activeWin.Buf().Name())
+	}
+	if b.Point() != pt {
+		t.Errorf("point moved from %d to %d", pt, b.Point())
 	}
 }
 
@@ -1462,12 +1560,22 @@ func TestVcDiffGotoSource_MultiFileChoosesNearestHeader(t *testing.T) {
 func TestVcDiffGotoSource_NoRoot(t *testing.T) {
 	e := newTestEditor("")
 	initVCMaps(e)
-	b := buffer.NewWithContent("*vc-diff*", "+++ b/foo.go\n@@ -1 +1 @@\n+added\n")
+	diffText := "+++ b/foo.go\n@@ -1 +1 @@\n+added\n"
+	b := buffer.NewWithContent("*vc-diff*", diffText)
 	b.SetMode("diff")
-	// vcLogRoots not set for b → no determinable root → early return.
-	b.SetPoint(b.EndOfLine(b.Len()))
+	e.buffers = append(e.buffers, b)
+	e.activeWin.SetBuf(b)
+	// vcLogRoots not set for b → no determinable root → early return. Without
+	// it the relative "foo.go" from the header would be opened as-is.
+	b.SetPoint(strings.Index(diffText, "+added"))
 	if !e.vcDiffGotoSource(b) {
 		t.Fatal("expected true even when no root is known")
+	}
+	if e.activeWin.Buf() != b {
+		t.Fatalf("no root means no navigation, ended up in %q", e.activeWin.Buf().Name())
+	}
+	if fb := e.FindBuffer("foo.go"); fb != nil {
+		t.Error("no buffer should be created for the unresolvable path")
 	}
 }
 
@@ -1497,14 +1605,20 @@ func TestCmdVcRevert_ConfirmReverts(t *testing.T) {
 	e.activeWin.SetBuf(b)
 
 	e.cmdVcRevert()
-	if e.minibufDoneFunc == nil {
-		t.Fatal("cmdVcRevert should prompt for confirmation")
+	if !e.readCharPending {
+		t.Fatal("cmdVcRevert should prompt for a single-character confirmation")
 	}
-	e.minibufDoneFunc("y")
+	if !strings.Contains(e.message, "(y/n)") {
+		t.Errorf("prompt should offer y/n, got %q", e.message)
+	}
+	e.readCharCallback('y')
 
 	data, _ := os.ReadFile(p)
 	if !strings.Contains(string(data), "func main() {}") {
 		t.Fatalf("revert should restore committed content, got %q", data)
+	}
+	if !strings.Contains(b.String(), "func main() {}") {
+		t.Fatalf("revert should reload the buffer from disk, got %q", b.String())
 	}
 }
 
@@ -1517,17 +1631,41 @@ func TestCmdVcRevert_CancelKeepsChanges(t *testing.T) {
 	b, _ := e.loadFile(p)
 	e.activeWin.SetBuf(b)
 	e.cmdVcRevert()
-	e.minibufDoneFunc("n")
+	if !e.readCharPending {
+		t.Fatal("cmdVcRevert should prompt for a single-character confirmation")
+	}
+	// A single 'n' must cancel; no Enter needed.
+	e.readCharCallback('n')
 	data, _ := os.ReadFile(p)
 	if !strings.Contains(string(data), "func broken()") {
 		t.Fatalf("cancel should keep modified content, got %q", data)
+	}
+	if !strings.Contains(e.message, "cancelled") {
+		t.Errorf("expected a cancellation message, got %q", e.message)
+	}
+}
+
+// Any key that is not y cancels the revert.
+func TestCmdVcRevert_OtherKeyCancels(t *testing.T) {
+	e, dir := newTestEditorWithVC(t)
+	p := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(p, []byte("package main\n\nfunc broken() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := e.loadFile(p)
+	e.activeWin.SetBuf(b)
+	e.cmdVcRevert()
+	e.readCharCallback('x')
+	data, _ := os.ReadFile(p)
+	if !strings.Contains(string(data), "func broken()") {
+		t.Fatalf("an unrelated key should keep modified content, got %q", data)
 	}
 }
 
 func TestCmdVcRevert_NoChanges(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	e.cmdVcRevert()
-	if e.minibufDoneFunc != nil {
+	if e.readCharPending {
 		t.Fatal("clean file should not prompt for revert")
 	}
 }
@@ -1536,8 +1674,8 @@ func TestCmdVcRevert_NoFile(t *testing.T) {
 	e, _ := newTestEditorWithVC(t)
 	buf(e).SetFilename("")
 	e.cmdVcRevert()
-	if e.minibufActive {
-		t.Fatal("revert with no file should not activate the minibuffer")
+	if e.readCharPending || e.minibufActive {
+		t.Fatal("revert with no file should not prompt")
 	}
 }
 
@@ -1557,12 +1695,21 @@ func TestVcFixupSelectDispatch_Navigation(t *testing.T) {
 	if !e.vcFixupSelectDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'n'}) {
 		t.Fatal("n should move to next line and be handled")
 	}
+	if got := b.Point(); got != len("abc1234 first\n") {
+		t.Errorf("n should put point on the second commit line, got %d", got)
+	}
 	if !e.vcFixupSelectDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'p'}) {
 		t.Fatal("p should move to previous line and be handled")
 	}
-	// Unhandled rune returns false.
+	if got := b.Point(); got != 0 {
+		t.Errorf("p should put point back on the first commit line, got %d", got)
+	}
+	// Unhandled rune returns false and leaves point alone.
 	if e.vcFixupSelectDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'z'}) {
 		t.Fatal("unhandled rune should return false")
+	}
+	if got := b.Point(); got != 0 {
+		t.Errorf("an unhandled rune should not move point, got %d", got)
 	}
 }
 
@@ -1638,7 +1785,7 @@ func newVCFullEditor(t *testing.T) (*Editor, string) {
 }
 
 func TestVcLogDispatch_Keys(t *testing.T) {
-	e, _ := newVCFullEditor(t)
+	e, dir := newVCFullEditor(t)
 	e.cmdVcPrintLog()
 	logBuf := e.ActiveBuffer()
 	logBuf.SetPoint(0)
@@ -1654,9 +1801,13 @@ func TestVcLogDispatch_Keys(t *testing.T) {
 	if !e.vcLogDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'p'}) {
 		t.Fatal("p should be handled")
 	}
-	// g refresh.
+	// g refresh: a commit made in the meantime must appear.
+	commitChange(t, dir, "package main\n\nfunc main() { _ = 1 }\n", "refreshed commit")
 	if !e.vcLogDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'g'}) {
 		t.Fatal("g should be handled")
+	}
+	if got := e.ActiveBuffer().String(); !strings.Contains(got, "refreshed commit") {
+		t.Errorf("g should re-run the log; buffer = %q", got)
 	}
 	// Re-fetch active log buffer and put point on the commit line.
 	e.ActiveBuffer().SetPoint(0)
@@ -1742,10 +1893,16 @@ func TestVcStatusDispatch_StageAndUnstage(t *testing.T) {
 	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 's'}) {
 		t.Fatal("s should be handled")
 	}
+	if staged := gitStagedFiles(t, dir); !strings.Contains(staged, "main.go") {
+		t.Errorf("s should stage the modification; staged = %q", staged)
+	}
 	// u unstages everything.
 	e.activeWin.SetBuf(e.FindBuffer("*vc-status*"))
 	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'u'}) {
 		t.Fatal("u should be handled")
+	}
+	if staged := gitStagedFiles(t, dir); strings.TrimSpace(staged) != "" {
+		t.Errorf("u should empty the index; staged = %q", staged)
 	}
 }
 
@@ -1862,7 +2019,7 @@ func startVcStatusCov(t *testing.T) (*Editor, string) {
 	}
 	e.cmdVcStatus()
 	if e.ActiveBuffer().Mode() != "vc-status" {
-		t.Skip("vc-status buffer not active")
+		t.Fatal("vc-status buffer should be active after cmdVcStatus")
 	}
 	return e, dir
 }
@@ -1887,7 +2044,7 @@ func pointToFirstFileLine(e *Editor, root string) bool {
 func TestCov_VcStatusDispatch_D_ShowsDiff(t *testing.T) {
 	e, root := startVcStatusCov(t)
 	if !pointToFirstFileLine(e, root) {
-		t.Skip("no file line found in status output")
+		t.Fatal("status output should list a file line")
 	}
 	consumed := e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'd'})
 	if !consumed {
@@ -1901,13 +2058,16 @@ func TestCov_VcStatusDispatch_D_ShowsDiff(t *testing.T) {
 func TestCov_VcStatusDispatch_S_StagesFile(t *testing.T) {
 	e, root := startVcStatusCov(t)
 	if !pointToFirstFileLine(e, root) {
-		t.Skip("no file line found in status output")
+		t.Fatal("status output should list a file line")
 	}
 	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 's'}) {
 		t.Fatal("'s' should be consumed")
 	}
 	if e.ActiveBuffer().Mode() != "vc-status" {
 		t.Fatalf("'s' should refresh into vc-status, got %q", e.ActiveBuffer().Mode())
+	}
+	if staged := gitStagedFiles(t, root); !strings.Contains(staged, "main.go") {
+		t.Errorf("'s' should stage the file at point; staged = %q", staged)
 	}
 }
 
@@ -1917,12 +2077,19 @@ func TestCov_VcStatusDispatch_U_Unstages(t *testing.T) {
 	if out, err := exec.Command("git", "-C", root, "add", "main.go").CombinedOutput(); err != nil {
 		t.Fatalf("git add: %v\n%s", err, out)
 	}
-	e.cmdVcStatus()
+	// Refresh with 'g' rather than cmdVcStatus: the status buffer has no
+	// filename, so a fresh command would re-root somewhere else entirely.
+	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'g'}) {
+		t.Fatal("'g' should be consumed")
+	}
 	if !pointToFirstFileLine(e, root) {
-		t.Skip("no file line found")
+		t.Fatal("status output should list a file line")
 	}
 	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'u'}) {
 		t.Fatal("'u' should be consumed")
+	}
+	if staged := gitStagedFiles(t, root); strings.TrimSpace(staged) != "" {
+		t.Errorf("'u' should unstage the file at point; staged = %q", staged)
 	}
 }
 
@@ -1945,14 +2112,25 @@ func TestCov_VcStatusDispatch_C_OpensCommitBuffer(t *testing.T) {
 	if out, err := exec.Command("git", "-C", root, "add", "main.go").CombinedOutput(); err != nil {
 		t.Fatalf("git add: %v\n%s", err, out)
 	}
-	e.cmdVcStatus()
+	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'g'}) {
+		t.Fatal("'g' should be consumed")
+	}
 	// Point on a file line (a staged file), not a header — opens commit buffer.
-	pointToFirstFileLine(e, root)
+	if !pointToFirstFileLine(e, root) {
+		t.Fatal("status output should list a file line")
+	}
 	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyRune, Rune: 'c'}) {
 		t.Fatal("'c' should be consumed")
 	}
-	if e.FindBuffer("*vc-commit*") == nil {
+	if e.readCharPending {
+		t.Fatal("'c' on a file line should not ask about staging a section")
+	}
+	cb := e.FindBuffer("*vc-commit*")
+	if cb == nil {
 		t.Fatal("'c' should open *vc-commit* buffer")
+	}
+	if !strings.Contains(cb.String(), "main.go") {
+		t.Errorf("commit buffer should list the staged file, got %q", cb.String())
 	}
 }
 
@@ -1966,7 +2144,7 @@ func TestCov_VcStatusDispatch_Enter_OpensFile(t *testing.T) {
 	}
 	e.cmdVcStatus()
 	if e.ActiveBuffer().Mode() != "vc-status" {
-		t.Skip("vc-status buffer not active")
+		t.Fatal("vc-status buffer should be active after cmdVcStatus")
 	}
 	root := dir
 	// Find the notes.txt line specifically.
@@ -1984,7 +2162,7 @@ func TestCov_VcStatusDispatch_Enter_OpensFile(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Skip("notes.txt line not found in status")
+		t.Fatal("status output should list notes.txt")
 	}
 	statusBuf := e.ActiveBuffer()
 	if !e.vcStatusDispatch(terminal.KeyEvent{Key: tcell.KeyEnter}) {
@@ -2027,6 +2205,7 @@ func TestCov_VcDiffGotoSource_AddedLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf(e).SetFilename(p)
+	buf(e).InsertString(0, "one\nCHANGED\nthree\n")
 	e.cmdVcDiff()
 	db := e.FindBuffer("*vc-diff*")
 	if db == nil {
@@ -2035,11 +2214,20 @@ func TestCov_VcDiffGotoSource_AddedLine(t *testing.T) {
 	s := db.String()
 	idx := strings.Index(s, "+CHANGED")
 	if idx < 0 {
-		t.Skipf("no added line in diff:\n%s", s)
+		t.Fatalf("diff should contain the added line:\n%s", s)
 	}
 	db.SetPoint(idx)
 	if !e.vcDiffGotoSource(db) {
 		t.Fatal("vcDiffGotoSource should return true")
+	}
+	dest := e.activeWin.Buf()
+	if dest.Filename() != p {
+		t.Fatalf("expected a jump into %q, got %q", p, dest.Filename())
+	}
+	bol := dest.BeginningOfLine(dest.Point())
+	eol := dest.EndOfLine(dest.Point())
+	if got := dest.Substring(bol, eol); got != "CHANGED" {
+		t.Fatalf("point should land on the changed line, got %q", got)
 	}
 }
 
@@ -2076,25 +2264,95 @@ func TestCov_VcDiffGotoSource_HeaderLine(t *testing.T) {
 	}
 }
 
+// Without a VC backend, project-grep searches the current buffer's own
+// directory — not the process working directory — and reports hits under it.
 func TestCov_CmdProjectGrep_NoVcFallsBackToGrep(t *testing.T) {
 	e := newTestEditor("")
-	e.vcLogRoots = make(map[*buffer.Buffer]string)
+	initVCMaps(e)
+	e.spanCaches = make(map[*buffer.Buffer]*spanCache)
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle here\n"), 0644); err != nil {
+	p := filepath.Join(dir, "a.txt")
+	// A token that exists nowhere in the gomacs tree, so a search of the process
+	// working directory would come up empty.
+	if err := os.WriteFile(p, []byte("first line\nzzprojectgreptokenzz here\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	buf(e).SetFilename(filepath.Join(dir, "a.txt"))
+	buf(e).SetFilename(p)
 	e.cmdProjectGrep()
 	if e.minibufDoneFunc == nil {
 		t.Fatal("cmdProjectGrep should activate the minibuffer")
 	}
-	e.minibufDoneFunc("needle")
-	b := e.FindBuffer("*grep*")
+	e.minibufDoneFunc("zzprojectgreptokenzz")
+
+	b := e.FindBuffer(grepBufferName)
 	if b == nil {
 		t.Fatal("project grep should create *grep* buffer")
 	}
-	if !strings.Contains(b.String(), "needle") {
-		t.Fatalf("grep output should contain match, got %q", b.String())
+	if !strings.Contains(b.String(), "a.txt") {
+		t.Fatalf("grep output should name the matching file, got %q", b.String())
+	}
+	// The hit must resolve against the directory that was searched, so that
+	// next-error opens the right file.
+	if len(e.compilationErrors) != 1 {
+		t.Fatalf("expected 1 next-error entry, got %+v", e.compilationErrors)
+	}
+	if e.compilationErrors[0].File != p || e.compilationErrors[0].Line != 2 {
+		t.Fatalf("hit = %+v, want %s:2", e.compilationErrors[0], p)
+	}
+	e.cmdNextError()
+	if got := e.ActiveBuffer().Filename(); got != p {
+		t.Errorf("next-error should open %q, got %q", p, got)
+	}
+}
+
+// Enter in the *grep* buffer follows the hit that project-grep produced.
+func TestCmdProjectGrep_NoVcEnterOpensHit(t *testing.T) {
+	e := newTestEditor("")
+	initVCMaps(e)
+	e.spanCaches = make(map[*buffer.Buffer]*spanCache)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("zzentertokenzz\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	buf(e).SetFilename(p)
+	e.cmdProjectGrep()
+	e.minibufDoneFunc("zzentertokenzz")
+
+	gb := e.FindBuffer(grepBufferName)
+	if gb == nil {
+		t.Fatal("project grep should create *grep* buffer")
+	}
+	gb.SetPoint(0)
+	if !e.vcGrepDispatch(terminal.KeyEvent{Key: tcell.KeyEnter}) {
+		t.Fatal("Enter should be consumed in the grep buffer")
+	}
+	if got := e.ActiveBuffer().Filename(); got != p {
+		t.Errorf("Enter should open %q, got %q", p, got)
+	}
+}
+
+// Hits reported with an absolute path are opened as they are, not appended to
+// the recorded root.
+func TestVcGrepDispatch_AbsolutePathHit(t *testing.T) {
+	e, _ := newVCFullEditor(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "abs.txt")
+	if err := os.WriteFile(p, []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gb := buffer.NewWithContent(grepBufferName, p+":2:two\n")
+	gb.SetMode("vc-grep")
+	e.buffers = append(e.buffers, gb)
+	e.activeWin.SetBuf(gb)
+	e.vcLogRoots[gb] = "/some/other/root"
+	gb.SetPoint(0)
+
+	if !e.vcGrepDispatch(terminal.KeyEvent{Key: tcell.KeyEnter}) {
+		t.Fatal("Enter should be consumed in the grep buffer")
+	}
+	if got := e.ActiveBuffer().Filename(); got != p {
+		t.Errorf("Enter should open %q, got %q", p, got)
 	}
 }
 

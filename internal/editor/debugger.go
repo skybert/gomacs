@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/skybert/gomacs/internal/dap"
 )
@@ -122,10 +123,13 @@ const (
 
 	// jdtlsSetupHint is appended to every java debug failure: none of the
 	// commands above exist unless the java-debug plugin jar was handed to jdtls
-	// in initializationOptions.bundles when the server was started.
+	// in initializationOptions.bundles when the server was started.  gomacs
+	// starts jdtls itself (see the java entry in langModes), so the hint also
+	// names the variable that points it at the right launcher.
 	jdtlsSetupHint = "java-mode debugging needs a running jdtls started with the " +
 		"java-debug plugin (com.microsoft.java.debug.plugin-*.jar) in " +
-		"initializationOptions.bundles"
+		"initializationOptions.bundles; set the launcher with " +
+		`(setq java-lsp-command "…")`
 )
 
 // dapStartJdtls asks the jdtls server behind conn to start a java-debug adapter
@@ -163,6 +167,30 @@ func jdtlsExecuteCommand(conn *lspConn, command string, args ...any) (json.RawMe
 		return nil, fmt.Errorf("%s: %w (%s)", command, err, jdtlsSetupHint)
 	}
 	return raw, nil
+}
+
+// jdtlsConnError explains why conn cannot be asked to start a debug session, or
+// returns nil when it can.  cmdDebugStart checks this before the handshake so
+// that the three things the user has to get right — a language-server command,
+// that server actually running, and it having finished initialising — each
+// produce their own message.  Without it every one of them surfaces as
+// jdtlsExecuteCommand's single "no ready jdtls language server", which does not
+// say what to do about it.
+func jdtlsConnError(conn *lspConn, info *langModeInfo) error {
+	varName := lspCommandVarName(info.modeName)
+	switch {
+	case len(info.lspCmd) == 0:
+		return fmt.Errorf("no language server configured for %s-mode; set one with "+
+			`(setq %s "jdtls"). %s`, info.modeName, varName, jdtlsSetupHint)
+	case conn == nil || conn.client == nil:
+		return fmt.Errorf("the %s-mode language server (%s) is not running; check it is "+
+			`on PATH, or change it with (setq %s "…"). %s`,
+			info.modeName, strings.Join(info.lspCmd, " "), varName, jdtlsSetupHint)
+	case !conn.isReady:
+		return fmt.Errorf("the %s-mode language server (%s) is still initialising; "+
+			"try again in a moment", info.modeName, info.lspCmd[0])
+	}
+	return nil
 }
 
 // jdtlsParsePort reads the TCP port out of a vscode.java.startDebugSession

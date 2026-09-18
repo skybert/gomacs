@@ -308,12 +308,26 @@ func (w *Window) VisualRowForPoint() int {
 	// walking forward from the cached first-visible-line position the way
 	// ViewLines() does.  This costs O(text between the two lines) rather than
 	// one O(scrollLine) line-start lookup per line.
+	//
+	// After a long jump (goto-line, isearch landing far away, M-.) scrollLine
+	// can be thousands of lines from pointLine, which would otherwise make
+	// this walk O(lines jumped).  Both callers only care about the exact
+	// value up to w.textRows(): EnsurePointVisible just tests
+	// visualRow >= textRows(), and placeCursor clamps to textRows()-1.  Once
+	// the running total exceeds textRows() it can only grow further (each
+	// visualRowsForSpan call adds >= 1), so returning early here can never
+	// change either caller's decision — bound the walk to O(window height)
+	// instead of O(lines jumped).
+	limit := w.textRows()
 	visualRow := 0
 	pos := w.firstScrollPos()
 	length := w.buf.Len()
 	for bufLine := w.scrollLine; bufLine < pointLine; bufLine++ {
 		endPos := w.buf.EndOfLine(pos)
 		visualRow += w.visualRowsForSpan(pos, endPos)
+		if visualRow > limit {
+			return visualRow
+		}
 		pos = min(endPos+1, length)
 	}
 	// Add the visual segment offset within the cursor's own line.

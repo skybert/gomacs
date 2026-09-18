@@ -79,10 +79,20 @@ type dapThread struct {
 // dapHasBreakpoint reports whether there is a breakpoint on the given 1-based
 // line of the file.  Returns false when no debug session is active or the file
 // has no breakpoints.  Must be called from the main goroutine (no lock needed).
+//
+// The breakpoint map is keyed by canonical path, so file is canonicalised here:
+// a caller passing a relative name or an unresolved /var path would otherwise
+// never match.  renderWindow does not use this helper — it resolves the path
+// once per frame and indexes the map directly, since canonPath hits the disk.
 func (e *Editor) dapHasBreakpoint(file string, line int) bool {
 	lines, ok := e.dapBreakpoints[file]
 	if !ok {
-		return false
+		if file == "" {
+			return false
+		}
+		if lines, ok = e.dapBreakpoints[canonPath(file)]; !ok {
+			return false
+		}
 	}
 	_, has := lines[line]
 	return has

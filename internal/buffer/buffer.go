@@ -1,6 +1,9 @@
 package buffer
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 const (
 	initialGapSize  = 64
@@ -62,11 +65,11 @@ type Buffer struct {
 
 	// Line-start index: lineStarts[i] is the buffer position of the first rune
 	// on 1-based line i+1 (so lineStarts[0] is always 0).  It is built lazily
-	// by ensureLineStarts() and kept in step by insertRunes/deleteRunes, which
-	// extend or truncate it for edits at the end of the buffer and otherwise
-	// drop it so the next LineStart() rebuilds.  Like lineCountDelta, this
-	// makes LineStart() O(1) after the first call instead of O(buffer_size).
-	// The index is absolute: it ignores narrowing, matching LineStart().
+	// by ensureLineStarts() and patched in place by insertRunes/deleteRunes for
+	// every edit, wherever it lands, so a rebuild only ever happens once per
+	// buffer.  Like lineCountDelta, this makes LineStart() O(1) after the first
+	// call instead of O(buffer_size); LineCol() and PosForLineCol() binary-search
+	// it.  The index is absolute: it ignores narrowing, matching LineStart().
 	lineStarts      []int
 	lineStartsReady bool
 }
@@ -389,6 +392,27 @@ func (b *Buffer) String() string {
 	return string(result)
 }
 
+// AppendRunes appends the buffer's runes to dst and returns the extended slice.
+// The two gap-buffer segments are copied in bulk, so callers that want runes
+// avoid the UTF-8 encode/decode round trip of String() followed by []rune(...),
+// and can reuse a scratch slice across calls.  Like String(), the whole buffer
+// is returned: narrowing is not taken into account.
+func (b *Buffer) AppendRunes(dst []rune) []rune {
+	pre := b.data[:b.gapStart]
+	post := b.data[b.gapEnd:]
+	start := len(dst)
+	need := start + len(pre) + len(post)
+	if cap(dst) < need {
+		grown := make([]rune, start, need)
+		copy(grown, dst)
+		dst = grown
+	}
+	dst = dst[:need]
+	n := copy(dst[start:], pre)
+	copy(dst[start+n:], post)
+	return dst
+}
+
 // ---- cursor / mark ---------------------------------------------------------
 
 func (b *Buffer) Point() int { return b.point }
@@ -516,42 +540,68 @@ func (b *Buffer) ensureLineStarts() {
 }
 
 // insertLineStarts keeps the line-start index in step with an insertion of
-// `runes` at pos.  Appending at the end of the buffer — the common case for
-// output buffers and for typing at end of file — only ever adds entries, so it
-// is handled in O(len(runes)).  Any other insertion shifts existing entries and
-// is handled by dropping the index for a lazy rebuild.
+// `runes` at pos.  Entries recording a position after pos shift right by the
+// number of runes inserted, and one new entry is spliced in for each newline
+// inside the inserted text.  The cost is O(log lines + entries after pos),
+// which beats dropping the index and paying an O(buffer_size) rebuild on the
+// next LineStart().
 func (b *Buffer) insertLineStarts(pos int, runes []rune) {
-	if !b.lineStartsReady {
+	if !b.lineStartsReady || len(runes) == 0 {
 		return
 	}
-	if pos != b.Len() {
-		b.invalidateLineStarts()
-		return
+	n := len(runes)
+	// First entry lying strictly after the insertion point; everything from
+	// here on moves right.  Entry 0 (position 0) is never in this range.
+	at := sort.SearchInts(b.lineStarts, pos+1)
+	newlines := 0
+	for _, r := range runes {
+		if r == '\n' {
+			newlines++
+		}
 	}
+	if newlines > 0 {
+		// Open a gap of `newlines` entries at `at` by extending the slice and
+		// sliding the tail up.
+		old := len(b.lineStarts)
+		for range newlines {
+			b.lineStarts = append(b.lineStarts, 0)
+		}
+		copy(b.lineStarts[at+newlines:], b.lineStarts[at:old])
+	}
+	for i := at + newlines; i < len(b.lineStarts); i++ {
+		b.lineStarts[i] += n
+	}
+	// A newline at offset i starts a new line at pos+i+1.  These positions all
+	// fall in (pos, pos+n], i.e. before every shifted entry, so they land in
+	// the gap in ascending order.
+	next := at
 	for i, r := range runes {
 		if r == '\n' {
-			b.lineStarts = append(b.lineStarts, pos+i+1)
+			b.lineStarts[next] = pos + i + 1
+			next++
 		}
 	}
 	b.lineCountDelta = len(b.lineStarts) - 1
 }
 
 // deleteLineStarts keeps the line-start index in step with a deletion of count
-// runes at pos.  A deletion that reaches the end of the buffer only ever
-// removes trailing entries, so it is handled by truncation; anything else drops
-// the index for a lazy rebuild.
+// runes at pos.  An entry at position v records a newline at v-1, so entries in
+// (pos, pos+count] vanish with the removed range; entries beyond it shift left
+// by count.  Like insertLineStarts this patches the index in place rather than
+// dropping it.
 func (b *Buffer) deleteLineStarts(pos, count int) {
-	if !b.lineStartsReady {
+	if !b.lineStartsReady || count <= 0 {
 		return
 	}
-	if pos+count != b.Len() {
-		b.invalidateLineStarts()
-		return
+	// [first, past) is the half-open range of entries the deletion swallows.
+	// Entry 0 (position 0) is never in it.
+	first := sort.SearchInts(b.lineStarts, pos+1)
+	past := sort.SearchInts(b.lineStarts, pos+count+1)
+	for i := past; i < len(b.lineStarts); i++ {
+		b.lineStarts[i] -= count
 	}
-	// Entries are ascending, so drop from the tail while they lie past pos.
-	// Line 1 always starts at 0 and is never dropped.
-	for len(b.lineStarts) > 1 && b.lineStarts[len(b.lineStarts)-1] > pos {
-		b.lineStarts = b.lineStarts[:len(b.lineStarts)-1]
+	if past > first {
+		b.lineStarts = append(b.lineStarts[:first], b.lineStarts[past:]...)
 	}
 	b.lineCountDelta = len(b.lineStarts) - 1
 }
@@ -579,25 +629,27 @@ func (b *Buffer) LineCount() int {
 }
 
 // LineCol returns the 1-based line number and 0-based column for pos.
-// The result is cached by (changeGen, pos) so repeated calls with the same
-// cursor position cost O(1) instead of O(pos).
+// The position is absolute: narrowing is not taken into account, matching
+// LineStart().  pos is clamped into [0, Len()].
+//
+// The lookup binary-searches the lazily built line-start index, so it is
+// O(log lines) rather than an O(pos) scan.  The result is additionally cached by
+// (changeGen, pos) so a repeated call with an unchanged cursor costs nothing.
 func (b *Buffer) LineCol(pos int) (line, col int) {
 	if pos > b.Len() {
 		pos = b.Len()
 	}
+	if pos < 0 {
+		pos = 0
+	}
 	if b.lcacheValid && b.lcacheGen == b.changeGen && b.lcachePos == pos {
 		return b.lcacheLine, b.lcacheCol
 	}
-	line = 1
-	col = 0
-	for i := range pos {
-		if b.RuneAt(i) == '\n' {
-			line++
-			col = 0
-		} else {
-			col++
-		}
-	}
+	b.ensureLineStarts()
+	// lineStarts[0] is 0 and pos >= 0, so the search never lands on index 0.
+	idx := sort.SearchInts(b.lineStarts, pos+1) - 1
+	line = idx + 1
+	col = pos - b.lineStarts[idx]
 	b.lcacheValid = true
 	b.lcachePos = pos
 	b.lcacheLine = line
@@ -704,14 +756,27 @@ func (b *Buffer) LineStartsFromPos(from int, bufPos int, count int) []int {
 	return out
 }
 
-// 0-based column.  The column is clamped to the line length.
+// PosForLineCol returns the logical position of the given 1-based line and
+// 0-based column.  The column is clamped to the line length.  Like LineCol it
+// reads the line-start index, so both directions cost O(1) and stay mutually
+// consistent.
 func (b *Buffer) PosForLineCol(line, col int) int {
-	pos := b.LineStart(line)
-	end := b.EndOfLine(pos)
-	if pos+col < end {
-		return pos + col
+	b.ensureLineStarts()
+	if line < 1 {
+		line = 1
 	}
-	return end
+	// Positions past the last line collapse onto the end of the buffer.
+	pos := b.Len()
+	if line-1 < len(b.lineStarts) {
+		pos = b.lineStarts[line-1]
+	}
+	// The line ends just before the newline that starts the next one, or at the
+	// end of the buffer for the last line.
+	end := b.Len()
+	if line < len(b.lineStarts) {
+		end = b.lineStarts[line] - 1
+	}
+	return min(pos+col, end)
 }
 
 // BeginningOfLine returns the logical position of the first rune on the line

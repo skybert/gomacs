@@ -683,6 +683,234 @@ func TestVisualRowForPointPastEndOfBuffer(t *testing.T) {
 	}
 }
 
+// ---- VisualRowForPoint long-jump early exit --------------------------------
+//
+// VisualRowForPoint bails out of its forward walk once the running visual-row
+// count exceeds w.textRows(), since both callers (EnsurePointVisible, which
+// only tests visualRow >= textRows(), and editor.placeCursor, which clamps to
+// textRows()-1) treat every value at or beyond that point identically. The
+// tests below prove that early exit can never change either caller's
+// observable behaviour by comparing against a reference implementation with
+// no early exit, across a range of jump distances, line lengths, wrap
+// columns, and window heights.
+
+// visualRowForPointUnbounded reimplements VisualRowForPoint's wrapped branch
+// exactly as it was before the long-jump early exit was added: it always
+// walks every line between scrollLine and pointLine. It is the oracle the
+// tests below check the optimized VisualRowForPoint against.
+func visualRowForPointUnbounded(w *Window) int {
+	pointLine, cursorCol := w.buf.LineCol(w.point)
+	if w.wrapCol <= 0 {
+		return pointLine - w.scrollLine
+	}
+	visualRow := 0
+	pos := w.firstScrollPos()
+	length := w.buf.Len()
+	for bufLine := w.scrollLine; bufLine < pointLine; bufLine++ {
+		endPos := w.buf.EndOfLine(pos)
+		visualRow += w.visualRowsForSpan(pos, endPos)
+		pos = min(endPos+1, length)
+	}
+	visualRow += cursorCol / w.wrapCol
+	return visualRow
+}
+
+// ensurePointVisibleUnbounded reimplements EnsurePointVisible exactly, except
+// it calls visualRowForPointUnbounded instead of VisualRowForPoint. It is the
+// oracle for the resulting scroll position after a long jump.
+func ensurePointVisibleUnbounded(w *Window) {
+	pointLine, _ := w.buf.LineCol(w.point)
+	textH := w.textRows()
+
+	if pointLine < w.scrollLine {
+		w.scrollTo(pointLine)
+		return
+	}
+	if w.wrapCol <= 0 {
+		if pointLine >= w.scrollLine+textH {
+			w.scrollTo(pointLine - textH + 1)
+		}
+		return
+	}
+	if visualRowForPointUnbounded(w) >= textH {
+		w.scrollTo(pointLine)
+	}
+}
+
+// varyingLineBuffer builds a buffer of totalLines lines whose lengths cycle
+// through a fixed pattern, so visualRowsForSpan sees a mix of short and long
+// (multi-visual-row) lines rather than a uniform length.
+func varyingLineBuffer(totalLines int) *buffer.Buffer {
+	lens := []int{1, 3, 7, 15, 40, 8, 0, 22}
+	var sb strings.Builder
+	for i := range totalLines {
+		sb.WriteString(strings.Repeat("x", lens[i%len(lens)]))
+		sb.WriteByte('\n')
+	}
+	return buffer.NewWithContent("jumptest", sb.String())
+}
+
+// TestVisualRowForPointLongJumpMatchesUnboundedDecision verifies that the
+// bounded VisualRowForPoint agrees exactly with the unbounded reference
+// whenever the true value is within what a caller can act on (<=
+// textRows()), and otherwise both sides land in the same "past the window"
+// bucket (> textRows()) — the only distinction EnsurePointVisible and
+// placeCursor ever make.
+func TestVisualRowForPointLongJumpMatchesUnboundedDecision(t *testing.T) {
+	const totalLines = 6000
+	buf := varyingLineBuffer(totalLines)
+	jumps := []int{0, 1, 2, 5, 39, 40, 41, 100, 999, 1000, 5000, totalLines - 1}
+	for _, wrapCol := range []int{1, 4, 8, 20, 78} {
+		for _, height := range []int{2, 4, 10, 40} {
+			for _, scrollLine := range []int{1, 2500} {
+				for _, jump := range jumps {
+					pointLine := min(scrollLine+jump, totalLines)
+					pos := buf.LineStart(pointLine)
+
+					w := New(buf, 0, 0, 80, height)
+					w.SetWrapCol(wrapCol)
+					w.SetScrollLine(scrollLine)
+					w.SetPoint(pos)
+
+					gotBounded := w.VisualRowForPoint()
+					gotUnbounded := visualRowForPointUnbounded(w)
+					limit := w.textRows()
+
+					switch {
+					case gotUnbounded <= limit && gotBounded != gotUnbounded:
+						t.Errorf("wrapCol=%d height=%d scrollLine=%d jump=%d: bounded=%d, unbounded=%d (want equal, unbounded <= limit %d)",
+							wrapCol, height, scrollLine, jump, gotBounded, gotUnbounded, limit)
+					case gotUnbounded > limit && gotBounded <= limit:
+						t.Errorf("wrapCol=%d height=%d scrollLine=%d jump=%d: bounded=%d should also exceed limit %d (unbounded=%d)",
+							wrapCol, height, scrollLine, jump, gotBounded, limit, gotUnbounded)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestEnsurePointVisibleLongJumpScrollPositionMatchesUnoptimized is the
+// direct behavioural guarantee requested for this optimization: after a long
+// jump with wrapping enabled, the resulting scroll position must be
+// byte-for-byte identical to what the unoptimized (no early exit)
+// implementation would have produced, across a range of jump distances and
+// line lengths.
+func TestEnsurePointVisibleLongJumpScrollPositionMatchesUnoptimized(t *testing.T) {
+	const totalLines = 6000
+	buf := varyingLineBuffer(totalLines)
+	jumps := []int{0, 1, 2, 5, 39, 40, 41, 100, 999, 1000, 5000, totalLines - 1}
+	for _, wrapCol := range []int{1, 4, 8, 20, 78} {
+		for _, height := range []int{2, 4, 10, 40} {
+			for _, scrollLine := range []int{1, 2500} {
+				for _, jump := range jumps {
+					pointLine := min(scrollLine+jump, totalLines)
+					pos := buf.LineStart(pointLine)
+
+					wNew := New(buf, 0, 0, 80, height)
+					wNew.SetWrapCol(wrapCol)
+					wNew.SetScrollLine(scrollLine)
+					wNew.SetPoint(pos)
+					wNew.EnsurePointVisible()
+
+					wOld := New(buf, 0, 0, 80, height)
+					wOld.SetWrapCol(wrapCol)
+					wOld.SetScrollLine(scrollLine)
+					wOld.SetPoint(pos)
+					ensurePointVisibleUnbounded(wOld)
+
+					if wNew.ScrollLine() != wOld.ScrollLine() {
+						t.Errorf("wrapCol=%d height=%d scrollLine=%d jump=%d: optimized ScrollLine=%d, unoptimized ScrollLine=%d",
+							wrapCol, height, scrollLine, jump, wNew.ScrollLine(), wOld.ScrollLine())
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestEnsurePointVisibleLongJumpBackwardScrollPositionMatchesUnoptimized
+// covers backward long jumps (pointLine < scrollLine): the early exit lives
+// only in the forward walk, so this path should be trivially unaffected, but
+// it is checked explicitly for completeness.
+func TestEnsurePointVisibleLongJumpBackwardScrollPositionMatchesUnoptimized(t *testing.T) {
+	const totalLines = 6000
+	buf := varyingLineBuffer(totalLines)
+	jumps := []int{1, 39, 100, 5999}
+	for _, wrapCol := range []int{4, 78} {
+		for _, height := range []int{4, 40} {
+			for _, jump := range jumps {
+				scrollLine := totalLines
+				pointLine := max(scrollLine-jump, 1)
+				pos := buf.LineStart(pointLine)
+
+				wNew := New(buf, 0, 0, 80, height)
+				wNew.SetWrapCol(wrapCol)
+				wNew.SetScrollLine(scrollLine)
+				wNew.SetPoint(pos)
+				wNew.EnsurePointVisible()
+
+				wOld := New(buf, 0, 0, 80, height)
+				wOld.SetWrapCol(wrapCol)
+				wOld.SetScrollLine(scrollLine)
+				wOld.SetPoint(pos)
+				ensurePointVisibleUnbounded(wOld)
+
+				if wNew.ScrollLine() != wOld.ScrollLine() {
+					t.Errorf("backward jump wrapCol=%d height=%d jump=%d: optimized ScrollLine=%d, unoptimized ScrollLine=%d",
+						wrapCol, height, jump, wNew.ScrollLine(), wOld.ScrollLine())
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkVisualRowForPointLongJump measures VisualRowForPoint right after a
+// long jump (goto-line to near the end of a huge buffer) with wrapping on and
+// before any scrolling has happened — the case the early exit targets.
+func BenchmarkVisualRowForPointLongJump(b *testing.B) {
+	buf := benchBuffer(200000)
+	w := New(buf, 0, 0, 80, 40)
+	w.SetWrapCol(78)
+	w.SetScrollLine(1)
+	pos := buf.LineStart(190000)
+	w.SetPoint(pos)
+	for b.Loop() {
+		_ = w.VisualRowForPoint()
+	}
+}
+
+// BenchmarkVisualRowForPointLongJumpUnbounded is the "before" baseline for
+// BenchmarkVisualRowForPointLongJump: the same long jump computed with no
+// early exit.
+func BenchmarkVisualRowForPointLongJumpUnbounded(b *testing.B) {
+	buf := benchBuffer(200000)
+	w := New(buf, 0, 0, 80, 40)
+	w.SetWrapCol(78)
+	w.SetScrollLine(1)
+	pos := buf.LineStart(190000)
+	w.SetPoint(pos)
+	for b.Loop() {
+		_ = visualRowForPointUnbounded(w)
+	}
+}
+
+// BenchmarkEnsurePointVisibleLongJumpWrapped measures the full
+// EnsurePointVisible call for a long jump with wrapping on, resetting
+// scrollLine each iteration so every call repeats the long jump (the
+// SetScrollLine reset itself is O(1), so it does not distort the result).
+func BenchmarkEnsurePointVisibleLongJumpWrapped(b *testing.B) {
+	buf := benchBuffer(200000)
+	w := New(buf, 0, 0, 80, 40)
+	w.SetWrapCol(78)
+	pos := buf.LineStart(190000)
+	w.SetPoint(pos)
+	for b.Loop() {
+		w.SetScrollLine(1)
+		w.EnsurePointVisible()
+	}
+}
+
 // ---- ScrollLine getter/setter ----------------------------------------------
 
 func TestScrollLineGetterSetter(t *testing.T) {
