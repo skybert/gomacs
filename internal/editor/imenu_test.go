@@ -377,6 +377,21 @@ func TestCmdImenu_BashWithEntries(t *testing.T) {
 	}
 }
 
+// TestCmdImenu_NoEntries verifies that cmdImenu on a mode with no imenu
+// entries (fundamental) reports a message instead of activating the
+// minibuffer.
+func TestCmdImenu_NoEntries(t *testing.T) {
+	e := newTestEditor("hello world")
+	// fundamental mode has no imenu entries.
+	e.cmdImenu()
+	if e.minibufActive {
+		t.Error("cmdImenu with no entries: minibuf should not be active")
+	}
+	if e.message == "" {
+		t.Error("cmdImenu with no entries: expected a message")
+	}
+}
+
 // ============================================================================
 // clipboardCmd
 // ============================================================================

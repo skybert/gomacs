@@ -1,15 +1,78 @@
 package dap
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 )
+
+// fakeAdapterEnv, when set to "1" in the environment, tells this test binary
+// (when re-exec'd as a subprocess) to act as a minimal DAP adapter instead of
+// running the test suite. See TestMain and TestStart_HappyPath: they let
+// TestStart_HappyPath exercise Start's real "spawn a process, listen, wait
+// for it to dial us back on --client-addr" path without depending on any
+// real debug adapter binary being installed.
+const fakeAdapterEnv = "GOMACS_DAP_TEST_FAKE_ADAPTER"
+
+// TestMain intercepts the fake-adapter re-exec before testing.M ever parses
+// flags, since the re-exec passes "--client-addr HOST:PORT" (Start's own
+// argument convention), not any go test flag.
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeAdapterEnv) == "1" {
+		runFakeAdapter()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// runFakeAdapter dials back the --client-addr passed on the command line,
+// answers exactly one request with a success response, and then blocks
+// (simulating a running adapter) until the connection is closed by the
+// client under test.
+func runFakeAdapter() {
+	addr := ""
+	for i, a := range os.Args {
+		if a == "--client-addr" && i+1 < len(os.Args) {
+			addr = os.Args[i+1]
+			break
+		}
+	}
+	if addr == "" {
+		os.Exit(1)
+	}
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	if req, err := readDAP(conn); err == nil {
+		resp := map[string]any{
+			"seq":         1,
+			"type":        "response",
+			"request_seq": req.Seq,
+			"command":     req.Command,
+			"success":     true,
+			"body":        map[string]any{"supportsConfigurationDoneRequest": true},
+		}
+		_ = writeDAP(conn, resp)
+	}
+
+	// Keep the connection open until the real Client closes it, so Close's
+	// cmd.Wait() path (this process exiting) is only reached once the test
+	// is actually done with us.
+	buf := make([]byte, 1)
+	for {
+		if _, err := conn.Read(buf); err != nil {
+			return
+		}
+	}
+}
 
 // newPipeClient starts a Client connected to an in-process mock adapter driven
 // by serverFn. serverFn receives the adapter's read side (to read requests)
@@ -29,16 +92,7 @@ func newPipeClient(t *testing.T, serverFn func(r io.Reader, w io.Writer)) *Clien
 		serverFn(serverConn, serverConn)
 	}()
 
-	c := &Client{
-		cmd:     nil,
-		rw:      clientConn,
-		reader:  bufio.NewReaderSize(clientConn, 1<<16),
-		pending: make(map[int]chan callResult),
-		closed:  make(chan struct{}),
-		nextSeq: 1,
-	}
-	go c.readLoop()
-	return c
+	return NewConnClient(clientConn)
 }
 
 // makePipeConn returns a connected in-process net.Conn pair.
@@ -233,6 +287,41 @@ func TestClientClose(t *testing.T) {
 func TestStart_BadCommandReturnsError(t *testing.T) {
 	if _, err := Start("", "/nonexistent/dap-adapter-xyz"); err == nil {
 		t.Fatal("Start with a non-existent command should return an error")
+	}
+}
+
+// TestStart_HappyPath exercises Start's reverse-connect accept path end to
+// end: re-exec this test binary with fakeAdapterEnv set so it dials back
+// the --client-addr Start listens on, then does one real request/response
+// round trip over the resulting connection.
+func TestStart_HappyPath(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("os.Executable: %v", err)
+	}
+
+	t.Setenv(fakeAdapterEnv, "1")
+
+	c, err := Start("", exe)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer c.Close()
+
+	raw, err := c.Request("initialize", InitializeArgs{
+		AdapterID:       "gomacs",
+		LinesStartAt1:   true,
+		ColumnsStartAt1: true,
+	})
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	var caps InitializeResponse
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !caps.SupportsConfigurationDoneRequest {
+		t.Error("expected supportsConfigurationDoneRequest=true")
 	}
 }
 

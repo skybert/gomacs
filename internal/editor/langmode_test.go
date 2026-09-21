@@ -250,11 +250,35 @@ func TestCmdJsonModeIndent(t *testing.T) {
 	}
 }
 
+func TestCmdJsonMode(t *testing.T) {
+	e := newTestEditor("{ \"key\": 1 }")
+	e.cmdJsonMode()
+	if got := buf(e).Mode(); got != "json" {
+		t.Errorf("json-mode: want mode=%q, got %q", "json", got)
+	}
+}
+
 func TestCmdYamlModeIndent(t *testing.T) {
 	e := newTestEditor("key: value")
 	e.cmdYamlMode()
 	if buf(e).Mode() != "yaml" {
 		t.Errorf("mode = %q, want \"yaml\"", buf(e).Mode())
+	}
+}
+
+func TestCmdYamlMode(t *testing.T) {
+	e := newTestEditor("key: value\nlist:\n  - item\n")
+	e.cmdYamlMode()
+	if got := buf(e).Mode(); got != "yaml" {
+		t.Errorf("yaml-mode: want mode=%q, got %q", "yaml", got)
+	}
+	// Verify highlighter dispatch works and returns spans.
+	cache := e.getSpanCache(buf(e))
+	if cache == nil {
+		t.Fatal("yaml-mode: span cache should not be nil")
+	}
+	if len(cache.spans) == 0 {
+		t.Error("yaml-mode: expected syntax spans, got none")
 	}
 }
 

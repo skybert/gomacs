@@ -724,6 +724,182 @@ func TestLspClose_ClosesConnections(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Document snapshots (lspConn.documentText)
+// ---------------------------------------------------------------------------
+
+// syncCorpus is the document content the text-sync assertions run over: plain
+// ASCII plus content whose UTF-8 encoding is longer than its rune count, so a
+// byte/rune mix-up in the snapshot path cannot pass unnoticed.
+var syncCorpus = []struct {
+	name    string
+	content string
+}{
+	{"ascii", "package main\n\nfunc main() {}\n"},
+	{"multibyte", "package main\n// héllo 日本語テキスト 🎉🚀\nfunc main() {}\n"},
+	{"crlf and no trailing newline", "a\r\nb\r\n\r\nc"},
+	{"emoji only", "🎉🚀👨‍👩‍👧‍👦"},
+	{"long", strings.Repeat("some line of ütf-8 text 日本\n", 500)},
+}
+
+// replaceBufferContent swaps a buffer's whole content, leaving it dirty
+// relative to whatever ModCount the lspConn recorded.
+func replaceBufferContent(b *buffer.Buffer, content string) {
+	b.Delete(0, b.Len())
+	b.InsertString(0, content)
+}
+
+func TestDocumentText_MatchesBufferString(t *testing.T) {
+	for _, tc := range syncCorpus {
+		t.Run(tc.name, func(t *testing.T) {
+			e, conn, _ := newDidChangeTestConn(t, &notifyRecorder{}, time.Now(), nil)
+			b := buf(e)
+			replaceBufferContent(b, tc.content)
+			if got, want := conn.documentText(b), b.String(); got != want {
+				t.Errorf("documentText = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestDocumentText_ResultSurvivesLaterSnapshots(t *testing.T) {
+	// The scratch slice is reused across calls, so documentText must hand out a
+	// string that is independent of it: the LSP client keeps the params
+	// unmarshalled and json.Marshal's them later on its writer goroutine, which
+	// would otherwise read bytes a subsequent snapshot has overwritten.
+	e, conn, _ := newDidChangeTestConn(t, &notifyRecorder{}, time.Now(), nil)
+	b := buf(e)
+
+	replaceBufferContent(b, "first snapshot, deliberately the longest one\n")
+	first := conn.documentText(b)
+
+	replaceBufferContent(b, "second\n")
+	second := conn.documentText(b)
+
+	replaceBufferContent(b, "third 日本語\n")
+	third := conn.documentText(b)
+
+	if first != "first snapshot, deliberately the longest one\n" {
+		t.Errorf("first snapshot was corrupted by later ones: %q", first)
+	}
+	if second != "second\n" {
+		t.Errorf("second snapshot = %q", second)
+	}
+	if third != "third 日本語\n" {
+		t.Errorf("third snapshot = %q", third)
+	}
+}
+
+func TestDocumentText_ReusesScratchAcrossCalls(t *testing.T) {
+	e, conn, _ := newDidChangeTestConn(t, &notifyRecorder{}, time.Now(), nil)
+	b := buf(e)
+	replaceBufferContent(b, strings.Repeat("some line of text\n", 200))
+
+	conn.documentText(b) // warm the scratch slice up to its steady-state size
+	cap0 := cap(conn.textScratch)
+	if cap0 == 0 {
+		t.Fatal("expected documentText to populate the scratch slice")
+	}
+	// Steady state: the only allocation left is the one string copy that buys
+	// exclusive ownership of the scratch buffer back from the client.
+	if allocs := testing.AllocsPerRun(20, func() { conn.documentText(b) }); allocs > 1 {
+		t.Errorf("documentText allocated %v times per run, want at most 1", allocs)
+	}
+	if cap(conn.textScratch) != cap0 {
+		t.Errorf("scratch slice regrew: cap %d → %d", cap0, cap(conn.textScratch))
+	}
+}
+
+func TestLspSendDidChange_SyncsByteIdenticalText(t *testing.T) {
+	for _, tc := range syncCorpus {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &notifyRecorder{}
+			e, _, _ := newDidChangeTestConn(t, rec, time.Now().Add(-time.Hour), nil)
+			b := buf(e)
+			replaceBufferContent(b, tc.content)
+
+			e.lspFlushDidChange(b)
+			waitForNotifyCount(t, rec, "textDocument/didChange", 1, time.Second)
+
+			texts := rec.textsFor("textDocument/didChange")
+			if len(texts) != 1 {
+				t.Fatalf("got %d didChange payloads, want 1", len(texts))
+			}
+			if want := b.String(); texts[0] != want {
+				t.Errorf("synced text = %q, want %q (buf.String())", texts[0], want)
+			}
+		})
+	}
+}
+
+func TestLspSendDidChange_RepeatedFlushesDoNotAliasText(t *testing.T) {
+	rec := &notifyRecorder{}
+	e, _, _ := newDidChangeTestConn(t, rec, time.Now().Add(-time.Hour), nil)
+	b := buf(e)
+
+	// Deliberately shrink as well as grow: a reused scratch slice that leaked
+	// into the client would leave stale tail bytes behind on a shrink.
+	contents := []string{
+		strings.Repeat("long first document 日本語\n", 50),
+		"tiny\n",
+		strings.Repeat("medium 🎉\n", 10),
+		"x",
+		strings.Repeat("final ütf-8 document\n", 30),
+	}
+	for i, content := range contents {
+		replaceBufferContent(b, content)
+		e.lspFlushDidChange(b)
+		waitForNotifyCount(t, rec, "textDocument/didChange", i+1, 2*time.Second)
+
+		texts := rec.textsFor("textDocument/didChange")
+		if len(texts) != i+1 {
+			t.Fatalf("flush %d: got %d payloads, want %d", i, len(texts), i+1)
+		}
+		if texts[i] != content {
+			t.Fatalf("flush %d: synced text = %q, want %q", i, texts[i], content)
+		}
+		// Every earlier payload must still read back exactly as it was sent.
+		for j := 0; j <= i; j++ {
+			if texts[j] != contents[j] {
+				t.Fatalf("payload %d was corrupted by a later flush: %q, want %q", j, texts[j], contents[j])
+			}
+		}
+	}
+}
+
+func TestLspDidOpen_SyncsByteIdenticalText(t *testing.T) {
+	rec := &notifyRecorder{}
+	e, conn, uri := newDidChangeTestConn(t, rec, time.Now(), nil)
+	b := buf(e)
+	replaceBufferContent(b, "package main\n// héllo 日本語 🎉\n")
+	// newDidChangeTestConn pretends didOpen already ran; forget the file so the
+	// real lspDidOpen sends.
+	delete(conn.openFiles, uri)
+
+	lspDidOpen(conn, b)
+	waitForNotifyCount(t, rec, "textDocument/didOpen", 1, time.Second)
+
+	texts := rec.textsFor("textDocument/didOpen")
+	if len(texts) != 1 || texts[0] != b.String() {
+		t.Fatalf("didOpen text = %q, want %q", texts, b.String())
+	}
+}
+
+func TestLspDidSave_SyncsByteIdenticalText(t *testing.T) {
+	rec := &notifyRecorder{}
+	e, _, _ := newDidChangeTestConn(t, rec, time.Now(), nil)
+	b := buf(e)
+	replaceBufferContent(b, "package main\n// æøå 中文字 🚀\n")
+
+	e.lspDidSave(b)
+	waitForNotifyCount(t, rec, "textDocument/didSave", 1, time.Second)
+
+	texts := rec.textsFor("textDocument/didSave")
+	if len(texts) != 1 || texts[0] != b.String() {
+		t.Fatalf("didSave text = %q, want %q", texts, b.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
 
@@ -1110,16 +1286,57 @@ func fakeLSPServerWithNotify(t testing.TB, responder func(method string) any, on
 
 // notifyRecorder collects the JSON-RPC notification methods a fake LSP server
 // received, for assertions about debounced textDocument/didChange traffic.
+// The raw bodies are kept too so tests can assert on the synced document text
+// (see textsFor).
 type notifyRecorder struct {
 	mu      sync.Mutex
 	methods []string
+	bodies  [][]byte
 }
 
 // record is passed as the onNotify callback to fakeLSPServerWithNotify.
-func (r *notifyRecorder) record(method string, _ []byte) {
+func (r *notifyRecorder) record(method string, body []byte) {
 	r.mu.Lock()
 	r.methods = append(r.methods, method)
+	r.bodies = append(r.bodies, body)
 	r.mu.Unlock()
+}
+
+// textsFor returns the full-document text carried by every recorded
+// notification of method, in arrival order.  didOpen, didChange and didSave
+// each nest the text somewhere different, so all three shapes are decoded.
+func (r *notifyRecorder) textsFor(method string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for i, m := range r.methods {
+		if m != method {
+			continue
+		}
+		var msg struct {
+			Params struct {
+				Text         string `json:"text"` // didSave
+				TextDocument struct {
+					Text string `json:"text"` // didOpen
+				} `json:"textDocument"`
+				ContentChanges []struct {
+					Text string `json:"text"` // didChange
+				} `json:"contentChanges"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(r.bodies[i], &msg); err != nil {
+			continue
+		}
+		switch {
+		case len(msg.Params.ContentChanges) > 0:
+			out = append(out, msg.Params.ContentChanges[0].Text)
+		case msg.Params.TextDocument.Text != "":
+			out = append(out, msg.Params.TextDocument.Text)
+		default:
+			out = append(out, msg.Params.Text)
+		}
+	}
+	return out
 }
 
 // count returns how many notifications matching method have been recorded.
@@ -1361,4 +1578,201 @@ func TestRenderLSPDocPopup_HighlightsCode(t *testing.T) {
 	if len(fgs) < 2 {
 		t.Errorf("expected more than one foreground colour across the doc line, got %v", fgs)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// A wedged language server must not freeze the event loop
+//
+// lspMaybeDidChange runs on the main goroutine (Redraw calls it after every
+// keystroke).  It used to write the full document straight down the server's
+// stdin pipe, so a server that stopped reading — GC pause, heavy indexing, hung
+// process — blocked the editor indefinitely.  lsp.Client now queues outbound
+// messages for a writer goroutine, so these calls return immediately no matter
+// what the server does.
+// ---------------------------------------------------------------------------
+
+// wedgedWriter is an io.WriteCloser that blocks every Write until Close, the
+// way a language server that has stopped reading its stdin does.
+type wedgedWriter struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newWedgedWriter() *wedgedWriter {
+	return &wedgedWriter{closed: make(chan struct{})}
+}
+
+func (w *wedgedWriter) Write(p []byte) (int, error) {
+	<-w.closed
+	return len(p), io.ErrClosedPipe
+}
+
+func (w *wedgedWriter) Close() error {
+	w.once.Do(func() { close(w.closed) })
+	return nil
+}
+
+// newWedgedLSPEditor returns an editor whose Go buffer is attached to an LSP
+// connection that can never be written to (and never answers).
+func newWedgedLSPEditor(t *testing.T) (*Editor, *buffer.Buffer, *lspConn, string) {
+	t.Helper()
+	e := newLSPTestEditor(strings.Repeat("x", 2048))
+	b := buf(e)
+	path := filepath.Join(t.TempDir(), "wedged.go")
+	b.SetFilename(path)
+	b.SetMode("go")
+
+	w := newWedgedWriter()
+	pr, pw := io.Pipe()
+	c := lsp.NewConnClient(w, pr)
+	t.Cleanup(func() {
+		_ = w.Close()
+		c.Close()
+		_ = pw.Close()
+		_ = pr.Close()
+	})
+
+	uri := string(lsp.FileURI(path))
+	conn := &lspConn{
+		client:      c,
+		isReady:     true,
+		openFiles:   map[string]int{uri: b.ModCount()},
+		lastSent:    map[string]time.Time{uri: time.Now().Add(-time.Hour)},
+		diagnostics: map[string][]lsp.Diagnostic{},
+	}
+	e.lspConns["go"] = conn
+	return e, b, conn, uri
+}
+
+func TestLspMaybeDidChange_DoesNotBlockOnWedgedServer(t *testing.T) {
+	e, b, _, _ := newWedgedLSPEditor(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Many "keystrokes"; the first send is stuck in the writer goroutine's
+		// pipe write and the rest coalesce behind it.
+		for range 200 {
+			b.InsertString(b.Len(), "x")
+			e.lspFlushDidChange(b)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("lspFlushDidChange blocked on a language server that never reads its stdin")
+	}
+}
+
+func TestLspDidSave_DoesNotBlockOnWedgedServer(t *testing.T) {
+	e, b, _, _ := newWedgedLSPEditor(t)
+	b.InsertString(b.Len(), "!")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.lspDidSave(b)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("lspDidSave blocked on a wedged language server")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bookkeeping rollback when a notification cannot be queued
+//
+// The client drops didChange notifications when the queue is full (each one
+// carries the full text, so a newer one supersedes it).  The editor must then
+// forget that the server has this version, otherwise the dropped edit would
+// never be resent.
+// ---------------------------------------------------------------------------
+
+// newDeadLSPEditor returns an editor attached to a closed LSP client, so every
+// Notify fails immediately.
+func newDeadLSPEditor(t *testing.T) (*Editor, *buffer.Buffer, *lspConn, string) {
+	t.Helper()
+	e, b, conn, uri := newWedgedLSPEditor(t)
+	conn.client.Close() // from here on Notify returns an error
+	return e, b, conn, uri
+}
+
+func TestLspSendDidChange_RollsBackBookkeepingWhenNotifyFails(t *testing.T) {
+	e, b, conn, uri := newDeadLSPEditor(t)
+
+	conn.filesMu.Lock()
+	before := conn.openFiles[uri]
+	conn.filesMu.Unlock()
+
+	b.InsertString(b.Len(), "!")
+	e.lspFlushDidChange(b)
+
+	conn.filesMu.Lock()
+	after := conn.openFiles[uri]
+	_, sent := conn.lastSent[uri]
+	conn.filesMu.Unlock()
+
+	if after != before {
+		t.Errorf("openFiles[uri] = %d after a failed didChange, want the pre-send value %d", after, before)
+	}
+	if sent {
+		t.Error("lastSent must be cleared after a failed didChange so the next call retries")
+	}
+}
+
+func TestLspDidSave_KeepsBookkeepingUnchangedWhenNotifyFails(t *testing.T) {
+	e, b, conn, uri := newDeadLSPEditor(t)
+
+	conn.filesMu.Lock()
+	before := conn.openFiles[uri]
+	conn.filesMu.Unlock()
+
+	b.InsertString(b.Len(), "!")
+	e.lspDidSave(b)
+
+	conn.filesMu.Lock()
+	after := conn.openFiles[uri]
+	conn.filesMu.Unlock()
+	if after != before {
+		t.Errorf("openFiles[uri] = %d after a failed didSave, want %d", after, before)
+	}
+}
+
+func TestLspDidOpen_ForgetsFileWhenNotifyFails(t *testing.T) {
+	_, b, conn, uri := newDeadLSPEditor(t)
+
+	conn.filesMu.Lock()
+	delete(conn.openFiles, uri) // pretend the file was never opened
+	conn.filesMu.Unlock()
+
+	lspDidOpen(conn, b)
+
+	conn.filesMu.Lock()
+	_, tracked := conn.openFiles[uri]
+	conn.filesMu.Unlock()
+	if tracked {
+		t.Error("a file whose didOpen could not be queued must not be tracked as open")
+	}
+}
+
+// TestLspSendDidChange_RetriesAfterAFailedSend proves the rollback is what makes
+// the next attempt resend: with the bookkeeping rolled back, a later forced
+// flush sends again even though ModCount has not changed since the failure.
+func TestLspSendDidChange_RetriesAfterAFailedSend(t *testing.T) {
+	rec := &notifyRecorder{}
+	e, conn, uri := newDidChangeTestConn(t, rec, time.Now().Add(-time.Hour), nil)
+	b := buf(e)
+	b.InsertString(b.Len(), "!")
+
+	// Simulate the state left behind by a failed send: the server does not have
+	// this version, and no send time is recorded.
+	conn.filesMu.Lock()
+	conn.openFiles[uri] = b.ModCount() - 1
+	delete(conn.lastSent, uri)
+	conn.filesMu.Unlock()
+
+	e.lspFlushDidChange(b)
+	waitForNotifyCount(t, rec, "textDocument/didChange", 1, time.Second)
 }

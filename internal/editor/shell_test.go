@@ -263,6 +263,43 @@ func TestCmdShellCommandOnRegion_NoRegion(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// splitManPath
+// ---------------------------------------------------------------------------
+
+// TestSplitManPath covers the GNU MANPATH conventions splitManPath
+// implements: unlike manPathEnvDirs, empty fields (from a leading, trailing,
+// or doubled colon) are simply skipped — splitManPath does not splice in
+// defaultManPageDirs for them. It is used on the output of the `manpath`
+// command, which does not use empty fields to mean "insert the defaults".
+func TestSplitManPath(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"empty string", "", []string{}},
+		{"single entry", "/a/man", []string{"/a/man"}},
+		{"multiple entries", "/a/man:/b/man:/c/man", []string{"/a/man", "/b/man", "/c/man"}},
+		{"leading colon skipped", ":/a/man", []string{"/a/man"}},
+		{"trailing colon skipped", "/a/man:", []string{"/a/man"}},
+		{"doubled colon skipped", "/a/man::/b/man", []string{"/a/man", "/b/man"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitManPath(tc.raw)
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitManPath(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+			for i, w := range tc.want {
+				if got[i] != w {
+					t.Errorf("[%d] = %q, want %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}
+
 func TestCmdMan_CreatesManBuffer(t *testing.T) {
 	if _, err := exec.LookPath("man"); err != nil {
 		t.Skip("man not available")

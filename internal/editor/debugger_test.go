@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -457,7 +458,7 @@ func TestDapJdtlsLaunchArgs(t *testing.T) {
 	})
 	defer cleanup()
 
-	args, err := dapJdtlsLaunchArgs(conn, "/src/Main.java", "/src")
+	args, note, err := dapJdtlsLaunchArgs(conn, "/src/Main.java", "/src")
 	if err != nil {
 		t.Fatalf("dapJdtlsLaunchArgs: %v", err)
 	}
@@ -477,19 +478,258 @@ func TestDapJdtlsLaunchArgs(t *testing.T) {
 	if args["cwd"] != "/src" {
 		t.Errorf("cwd = %v, want the project root", args["cwd"])
 	}
+	if _, hasArgs := args["args"]; hasArgs {
+		t.Errorf("args = %v, want no program arguments for a plain main class", args["args"])
+	}
+	if note != "" {
+		t.Errorf("note = %q, want none when a main class was resolved", note)
+	}
 }
 
-func TestDapJdtlsLaunchArgs_NoMainClass(t *testing.T) {
+// writeJavaFile writes src to <dir>/<rel> and returns the path.
+func writeJavaFile(t *testing.T, dir, rel, src string) string {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestDapJdtlsLaunchArgs_NoMainClassFallsBackToTestClass covers the spec's test
+// and "micro server" contexts for java-mode: a project whose classes have no
+// main() used to dead-end in "found no main class under …", so a test class or a
+// service started by its build plugin could not be debugged at all.  When a JUnit
+// runner is on the classpath jdtls resolved, the test class is run through it,
+// which is what lets breakpoints inside the test hit.
+func TestDapJdtlsLaunchArgs_NoMainClassFallsBackToTestClass(t *testing.T) {
+	dir := t.TempDir()
+	path := writeJavaFile(t, dir, "src/test/java/com/example/FooTest.java",
+		"package com.example;\n\nimport org.junit.jupiter.api.Test;\n\n"+
+			"class FooTest {\n  @Test\n  void works() {}\n}\n")
+
 	conn, cleanup := fakeJdtlsServer(t, map[string]any{
 		jdtlsResolveMainClass: []any{},
+		jdtlsResolveClasspath: []any{[]string{}, []string{
+			"/target/test-classes",
+			"/home/u/.m2/junit-platform-console-standalone-1.10.2.jar",
+		}},
 	})
 	defer cleanup()
-	_, err := dapJdtlsLaunchArgs(conn, "/src/Main.java", "/src")
-	if err == nil {
-		t.Fatal("expected an error when no main class is found")
+
+	args, note, err := dapJdtlsLaunchArgs(conn, path, dir)
+	if err != nil {
+		t.Fatalf("dapJdtlsLaunchArgs should fall back, not fail: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no main class") {
-		t.Errorf("error = %v, want it to say no main class was found", err)
+	if args["mainClass"] != "org.junit.platform.console.ConsoleLauncher" {
+		t.Errorf("mainClass = %v, want the JUnit console launcher", args["mainClass"])
+	}
+	progArgs, ok := args["args"].([]string)
+	if !ok || len(progArgs) != 1 || progArgs[0] != "--select-class=com.example.FooTest" {
+		t.Errorf("args = %v, want the test class selected", args["args"])
+	}
+	if args["request"] != "launch" || args["type"] != "java" {
+		t.Errorf("args = %v, want a java launch request", args)
+	}
+	if args["cwd"] != dir {
+		t.Errorf("cwd = %v, want the project root %q", args["cwd"], dir)
+	}
+	if !strings.Contains(note, "com.example.FooTest") {
+		t.Errorf("note = %q, want it to name the class being debugged", note)
+	}
+}
+
+func TestDapJdtlsLaunchArgs_NoMainClassFallsBackToOwnClass(t *testing.T) {
+	dir := t.TempDir()
+	path := writeJavaFile(t, dir, "src/main/java/com/example/Service.java",
+		"package com.example;\n\nclass Service {\n  void run() {}\n}\n")
+
+	conn, cleanup := fakeJdtlsServer(t, map[string]any{
+		jdtlsResolveMainClass: []any{},
+		jdtlsResolveClasspath: []any{[]string{"/mods/a.jar"}, []string{"/target/classes"}},
+	})
+	defer cleanup()
+
+	args, note, err := dapJdtlsLaunchArgs(conn, path, dir)
+	if err != nil {
+		t.Fatalf("dapJdtlsLaunchArgs should fall back, not fail: %v", err)
+	}
+	if args["mainClass"] != "com.example.Service" {
+		t.Errorf("mainClass = %v, want the buffer's own class", args["mainClass"])
+	}
+	if _, hasArgs := args["args"]; hasArgs {
+		t.Errorf("args = %v, want none for a plain class launch", args["args"])
+	}
+	mods, ok := args["modulePaths"].([]string)
+	if !ok || len(mods) != 1 || mods[0] != "/mods/a.jar" {
+		t.Errorf("modulePaths = %v, want the resolved module path", args["modulePaths"])
+	}
+	if !strings.Contains(note, "main method") {
+		t.Errorf("note = %q, want it to say what to do about a missing main method", note)
+	}
+}
+
+func TestDapJdtlsLaunchArgs_TestWithoutRunnerOnClasspath(t *testing.T) {
+	dir := t.TempDir()
+	path := writeJavaFile(t, dir, "src/test/java/com/example/BareTest.java",
+		"package com.example;\n\nclass BareTest {\n  void works() {}\n}\n")
+
+	conn, cleanup := fakeJdtlsServer(t, map[string]any{
+		jdtlsResolveMainClass: []any{},
+		jdtlsResolveClasspath: []any{[]string{}, []string{"/target/test-classes"}},
+	})
+	defer cleanup()
+
+	args, note, err := dapJdtlsLaunchArgs(conn, path, dir)
+	if err != nil {
+		t.Fatalf("dapJdtlsLaunchArgs should fall back, not fail: %v", err)
+	}
+	if args["mainClass"] != "com.example.BareTest" {
+		t.Errorf("mainClass = %v, want the test class itself when no runner is available", args["mainClass"])
+	}
+	if !strings.Contains(note, "junit-platform-console-standalone") {
+		t.Errorf("note = %q, want it to name the jar the user should add", note)
+	}
+}
+
+func TestDapJdtlsLaunchArgs_FallbackClasspathFailureIsActionable(t *testing.T) {
+	dir := t.TempDir()
+	path := writeJavaFile(t, dir, "Lib.java", "class Lib {}\n")
+
+	// resolveMainClass answers "nothing here" and resolveClasspath is unavailable,
+	// so there is genuinely nothing to launch — but the message has to say what to
+	// do about it instead of dead-ending.
+	conn, cleanup := fakeJdtlsServer(t, map[string]any{jdtlsResolveMainClass: []any{}})
+	defer cleanup()
+
+	_, _, err := dapJdtlsLaunchArgs(conn, path, dir)
+	if err == nil {
+		t.Fatal("expected an error when no classpath can be resolved either")
+	}
+	for _, want := range []string{"no main class", "Lib", "main method", "jdtls"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestDapJdtlsLaunchArgs_FallbackNonJavaFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(path, []byte("not java\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn, cleanup := fakeJdtlsServer(t, map[string]any{jdtlsResolveMainClass: []any{}})
+	defer cleanup()
+
+	_, _, err := dapJdtlsLaunchArgs(conn, path, dir)
+	if err == nil {
+		t.Fatal("expected an error for a buffer that declares no java class")
+	}
+	if !strings.Contains(err.Error(), "notes.txt") {
+		t.Errorf("error = %v, want it to name the file", err)
+	}
+}
+
+func TestJavaReadCompilationUnit(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name      string
+		rel       string
+		src       string
+		wantClass string
+		wantTest  bool
+	}{
+		{"packaged class", "a/Service.java", "package com.example.svc;\n\nclass Service {}\n",
+			"com.example.svc.Service", false},
+		{"default package", "b/Main2.java", "class Main2 {}\n", "Main2", false},
+		{"junit 5 annotation", "c/Checks.java",
+			"package p;\n\nclass Checks {\n  @Test\n  void t() {}\n}\n", "p.Checks", true},
+		{"qualified annotation", "d/Checks2.java",
+			"package p;\n\nclass Checks2 {\n  @org.junit.jupiter.api.Test\n  void t() {}\n}\n", "p.Checks2", true},
+		{"parameterized test", "e/Checks3.java",
+			"package p;\n\nclass Checks3 {\n  @ParameterizedTest\n  void t() {}\n}\n", "p.Checks3", true},
+		{"junit 3 base class", "f/Old.java",
+			"package p;\n\nclass Old extends TestCase {\n}\n", "p.Old", true},
+		{"name convention", "g/ServiceTest.java", "package p;\n\nclass ServiceTest {}\n", "p.ServiceTest", true},
+		{"maven test root", "src/test/java/p/Weird.java", "package p;\n\nclass Weird {}\n", "p.Weird", true},
+		{"annotation in a comment only", "h/Doc.java",
+			"package p;\n\n// see @Test for details\nclass Doc {}\n", "p.Doc", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeJavaFile(t, dir, tt.rel, tt.src)
+			unit, err := javaReadCompilationUnit(path)
+			if err != nil {
+				t.Fatalf("javaReadCompilationUnit: %v", err)
+			}
+			if unit.class != tt.wantClass {
+				t.Errorf("class = %q, want %q", unit.class, tt.wantClass)
+			}
+			if unit.isTest != tt.wantTest {
+				t.Errorf("isTest = %v, want %v", unit.isTest, tt.wantTest)
+			}
+		})
+	}
+}
+
+func TestJavaReadCompilationUnit_Errors(t *testing.T) {
+	if _, err := javaReadCompilationUnit("/tmp/notes.txt"); err == nil {
+		t.Error("a non-java file should not yield a class to launch")
+	}
+	missing := filepath.Join(t.TempDir(), "Gone.java")
+	if _, err := javaReadCompilationUnit(missing); err == nil {
+		t.Error("an unreadable file should be reported")
+	}
+}
+
+func TestJavaTestRunner(t *testing.T) {
+	tests := []struct {
+		name      string
+		classPath []string
+		wantMain  string
+		wantArg   string
+	}{
+		{"junit 5 console standalone",
+			[]string{"/cp/junit-platform-console-standalone-1.10.2.jar"},
+			"org.junit.platform.console.ConsoleLauncher", "--select-class=p.FooTest"},
+		{"junit 5 console",
+			[]string{"/cp/junit-platform-console-1.10.2.jar", "/cp/junit-jupiter-api-5.10.2.jar"},
+			"org.junit.platform.console.ConsoleLauncher", "--select-class=p.FooTest"},
+		{"junit 4 versioned jar",
+			[]string{"/cp/junit-4.13.2.jar", "/cp/hamcrest-core-1.3.jar"},
+			"org.junit.runner.JUnitCore", "p.FooTest"},
+		{"junit 4 plain jar",
+			[]string{"/cp/lib/junit.jar"},
+			"org.junit.runner.JUnitCore", "p.FooTest"},
+		{"console launcher wins over junit 4",
+			[]string{"/cp/junit-4.13.2.jar", "/cp/junit-platform-console-standalone-1.10.2.jar"},
+			"org.junit.platform.console.ConsoleLauncher", "--select-class=p.FooTest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			main, args, ok := javaTestRunner("p.FooTest", tt.classPath)
+			if !ok {
+				t.Fatalf("no runner found on %v", tt.classPath)
+			}
+			if main != tt.wantMain {
+				t.Errorf("mainClass = %q, want %q", main, tt.wantMain)
+			}
+			if len(args) != 1 || args[0] != tt.wantArg {
+				t.Errorf("args = %v, want [%q]", args, tt.wantArg)
+			}
+		})
+	}
+
+	// Only the engine, with nothing that can be launched from a command line.
+	if _, _, ok := javaTestRunner("p.FooTest", []string{"/cp/junit-jupiter-api-5.10.2.jar"}); ok {
+		t.Error("junit-jupiter-api alone provides no launchable runner")
+	}
+	if _, _, ok := javaTestRunner("p.FooTest", nil); ok {
+		t.Error("an empty classpath provides no runner")
 	}
 }
 
@@ -498,7 +738,7 @@ func TestDapJdtlsLaunchArgs_MalformedReply(t *testing.T) {
 		jdtlsResolveMainClass: "not an array",
 	})
 	defer cleanup()
-	if _, err := dapJdtlsLaunchArgs(conn, "/src/Main.java", "/src"); err == nil {
+	if _, _, err := dapJdtlsLaunchArgs(conn, "/src/Main.java", "/src"); err == nil {
 		t.Fatal("expected an error for a malformed resolveMainClass reply")
 	}
 }

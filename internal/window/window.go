@@ -410,8 +410,15 @@ func (w *Window) viewLinesNoWrap() []ViewLine {
 	rows := make([]ViewLine, w.height)
 	// Use the cached first-visible-line position for O(visible_lines) scan
 	// instead of scanning from buffer start each frame.
+	//
+	// Request one extra line-start beyond what's needed for StartPos so each
+	// row's EndPos can be derived as "next row's StartPos minus one" instead
+	// of an O(line_length) EndOfLine scan per row — LineStartsFromPos already
+	// walked past every newline in this range to produce the StartPos values,
+	// so calling EndOfLine again re-scans the same ground.
 	firstPos := w.firstScrollPos()
-	startPositions := w.buf.LineStartsFromPos(w.scrollLine, firstPos, w.height)
+	startPositions := w.buf.LineStartsFromPos(w.scrollLine, firstPos, w.height+1)
+	bufLen := w.buf.Len()
 	for i := range w.height {
 		bufLine := w.scrollLine + i
 		row := w.top + i
@@ -420,7 +427,18 @@ func (w *Window) viewLinesNoWrap() []ViewLine {
 			continue
 		}
 		startPos := startPositions[i]
-		endPos := w.buf.EndOfLine(startPos)
+		var endPos int
+		switch {
+		case bufLine < totalLines && i+1 < len(startPositions):
+			// Not the last buffer line: the next entry is the start of the
+			// following line, so the newline ending this line sits right
+			// before it.
+			endPos = startPositions[i+1] - 1
+		default:
+			// Last buffer line (with or without a trailing newline): there is
+			// no following line, so the line runs to the end of the buffer.
+			endPos = bufLen
+		}
 		rows[i] = ViewLine{
 			Row:      row,
 			Line:     bufLine,
@@ -439,18 +457,37 @@ func (w *Window) viewLinesWrapped() []ViewLine {
 	rowIdx := 0
 	bufLine := w.scrollLine
 	// Use the cached first-visible-line position for O(visible_lines) scan.
+	//
+	// Request one extra line-start beyond what's needed for StartPos so each
+	// buffer line's EndPos can be derived from the next line's StartPos
+	// instead of an O(line_length) EndOfLine scan — LineStartsFromPos already
+	// walked past every newline in this range. At most w.height buffer lines
+	// are consumed (one per outer-loop iteration, since wrapping only ever
+	// adds rows, never removes iterations), so spIdx never exceeds w.height-1
+	// and spIdx+1 never exceeds w.height, both within a w.height+1 slice.
 	firstPos := w.firstScrollPos()
-	startPositions := w.buf.LineStartsFromPos(w.scrollLine, firstPos, w.height)
+	startPositions := w.buf.LineStartsFromPos(w.scrollLine, firstPos, w.height+1)
+	bufLen := w.buf.Len()
 	spIdx := 0
 	for rowIdx < w.height && bufLine <= totalLines {
 		var startPos int
 		if spIdx < len(startPositions) {
 			startPos = startPositions[spIdx]
-			spIdx++
 		} else {
-			startPos = w.buf.Len()
+			startPos = bufLen
 		}
-		endPos := w.buf.EndOfLine(startPos)
+		var endPos int
+		switch {
+		case bufLine < totalLines && spIdx+1 < len(startPositions):
+			endPos = startPositions[spIdx+1] - 1
+		case spIdx < len(startPositions):
+			endPos = bufLen
+		default:
+			// Defensive fallback: should be unreachable given the slice is
+			// sized w.height+1 and the loop runs at most w.height times.
+			endPos = w.buf.EndOfLine(startPos)
+		}
+		spIdx++
 		// Buffer positions are rune indices so the rune count is just the
 		// difference — no string/rune-slice allocation needed.
 		lineLen := endPos - startPos

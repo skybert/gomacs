@@ -519,6 +519,34 @@ func TestVcDir_BufferWithoutFilename(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// vcDirFor helper
+// ---------------------------------------------------------------------------
+
+func TestVcDirFor_UsesRecordedRootWhenSet(t *testing.T) {
+	e := newTestEditor("")
+	initVCMaps(e)
+	b := buf(e)
+	// The buffer has no filename, so vcDir(b) would fall back to os.Getwd() —
+	// an unrelated directory. vcLogRoots records the real repo root for VC
+	// output buffers, and vcDirFor must prefer it without falling through.
+	const root = "/some/recorded/repo/root"
+	e.vcLogRoots[b] = root
+	if got := e.vcDirFor(b); got != root {
+		t.Fatalf("vcDirFor = %q, want recorded root %q", got, root)
+	}
+}
+
+func TestVcDirFor_FallsBackToVcDirWhenNotSet(t *testing.T) {
+	e := newTestEditor("")
+	initVCMaps(e)
+	b := buf(e)
+	// No entry in vcLogRoots for b: vcDirFor should fall through to vcDir.
+	if got, want := e.vcDirFor(b), vcDir(b); got != want {
+		t.Fatalf("vcDirFor = %q, want vcDir fallback %q", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // cmdVcStatus — editor integration
 // ---------------------------------------------------------------------------
 

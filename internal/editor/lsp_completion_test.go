@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
@@ -800,4 +801,127 @@ func TestLspMaybeTriggerCompletion_FallbackBufferWords(t *testing.T) {
 	b.SetPoint(b.Len())
 	e.lspMaybeTriggerCompletion()
 	// Either pops up buffer-word completion or no-ops; must not panic.
+}
+
+// ---------------------------------------------------------------------------
+// lspMaybeTriggerCompletion — prose/comment deferral on the LSP-ready path
+// ---------------------------------------------------------------------------
+
+// lspCompletionResponder answers textDocument/completion with two items that
+// both share the "foob" prefix used by the deferral tests.
+func lspCompletionResponder(method string) any {
+	if method == "textDocument/completion" {
+		return map[string]any{"items": []map[string]any{
+			{"label": "foobar"}, {"label": "foobaz"},
+		}}
+	}
+	return nil
+}
+
+// newLSPCommentTestEditor returns an editor with a ready LSP connection whose
+// active Go buffer has point inside a "//" comment, with the word prefix
+// "foob" before point.
+func newLSPCommentTestEditor(t *testing.T) (*Editor, *buffer.Buffer) {
+	t.Helper()
+	e, _ := newLSPConnEditor(t, lspCompletionResponder)
+	b := e.ActiveBuffer()
+	b.SetReadOnly(false)
+	b.Delete(0, b.Len())
+	b.InsertString(0, "// foob")
+	b.SetPoint(b.Len())
+	if !e.isProseContext(b) {
+		t.Fatalf("test setup: point should be inside a comment (prose context)")
+	}
+	return e, b
+}
+
+func TestLspMaybeTriggerCompletion_CommentDefersRequest(t *testing.T) {
+	e, _ := newLSPCommentTestEditor(t)
+
+	e.lspMaybeTriggerCompletion()
+
+	if e.lspCompInflight {
+		t.Fatal("completion request must not be in flight immediately inside a comment")
+	}
+	select {
+	case <-e.lspCbs:
+		t.Fatal("completion request fired immediately inside a comment; expected it to be deferred")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if e.lspCompActive {
+		t.Fatal("popup must not be shown immediately inside a comment")
+	}
+
+	// After lspCompProseDelay the deferred request goes out (first callback)
+	// and the reply populates the popup (second callback).
+	drainOneLSPCb(t, e)
+	if !e.lspCompInflight {
+		t.Fatal("expected the deferred callback to fire the completion request")
+	}
+	drainOneLSPCb(t, e)
+	if !e.lspCompActive {
+		t.Fatalf("expected popup active after the deferred request, items=%d", len(e.lspCompItems))
+	}
+}
+
+func TestLspMaybeTriggerCompletion_CodeFiresImmediately(t *testing.T) {
+	e, _ := newLSPConnEditor(t, lspCompletionResponder)
+	b := e.ActiveBuffer()
+	b.SetReadOnly(false)
+	b.InsertString(b.Len(), "foob")
+	b.SetPoint(b.Len())
+
+	e.lspMaybeTriggerCompletion()
+
+	if !e.lspCompInflight {
+		t.Fatal("expected the completion request to fire immediately in code context")
+	}
+	drainOneLSPCb(t, e)
+	if !e.lspCompActive {
+		t.Fatalf("expected popup active, items=%d", len(e.lspCompItems))
+	}
+}
+
+func TestLspMaybeTriggerCompletion_DotTriggerFiresImmediately(t *testing.T) {
+	// The dot trigger bypasses the minimum-prefix check and must still fire
+	// straight away in code context.
+	e, _ := newLSPConnEditor(t, lspCompletionResponder)
+	b := e.ActiveBuffer()
+	b.SetReadOnly(false)
+	b.InsertString(b.Len(), "os.")
+	b.SetPoint(b.Len())
+
+	e.lspMaybeTriggerCompletion()
+
+	if !e.lspCompInflight {
+		t.Fatal("expected the dot trigger to fire the completion request immediately")
+	}
+	drainOneLSPCb(t, e)
+	if !e.lspCompActive {
+		t.Fatalf("expected popup active after dot trigger, items=%d", len(e.lspCompItems))
+	}
+}
+
+func TestLspMaybeTriggerCompletion_NewKeystrokeCancelsDeferred(t *testing.T) {
+	e, b := newLSPCommentTestEditor(t)
+
+	e.lspMaybeTriggerCompletion() // schedules a deferred request for "foob"
+
+	// A newer keystroke inside the same comment must cancel the pending
+	// request and schedule its own.
+	b.InsertString(b.Len(), "a")
+	b.SetPoint(b.Len())
+	e.lspMaybeTriggerCompletion()
+
+	// Give both delays time to elapse; only the newest may have posted.
+	time.Sleep(lspCompProseDelay + 250*time.Millisecond)
+	if n := len(e.lspCbs); n != 1 {
+		t.Fatalf("expected exactly 1 deferred completion callback (the newest keystroke's), got %d", n)
+	}
+
+	drainOneLSPCb(t, e)
+	drainOneLSPCb(t, e)
+	if !e.lspCompActive {
+		t.Fatalf("expected popup active for the newest prefix, items=%d", len(e.lspCompItems))
+	}
 }

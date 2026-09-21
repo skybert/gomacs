@@ -53,6 +53,10 @@ func lspCompWordPrefix(buf interface {
 // textDocument/completion request (when an LSP server is ready) or falls back
 // to collecting candidate words from the current buffer.
 // A dot trigger (e.g. "os.") bypasses the length check for LSP connections.
+// In a prose context (prose modes, or inside a comment in a programming
+// buffer) the request is deferred by lspCompProseDelay so the popup does not
+// break the flow of a fast typist; a newer keystroke cancels the pending
+// request.
 func (e *Editor) lspMaybeTriggerCompletion() {
 	if e.lspCompInflight || e.lspCompActive {
 		return
@@ -91,6 +95,59 @@ func (e *Editor) lspMaybeTriggerCompletion() {
 		return
 	}
 
+	// A newer keystroke supersedes any request scheduled by an earlier one:
+	// cancel it, then either fire now (code) or schedule afresh (prose).
+	e.lspCompDelayCancel()
+
+	if !e.isProseContext(buf) {
+		e.lspFireCompletion(buf, conn, wordStart, triggerChar)
+		return
+	}
+
+	// Prose mode or inside a comment: defer the request so the popup does not
+	// interrupt fast typing.  The deferred fire is re-validated against the
+	// buffer, word position and prefix before it goes out.
+	ctx, cancel := context.WithCancel(context.Background())
+	e.lspCompDelayCancel = cancel
+	bufCopy, prefixCopy, wordStartCopy, triggerCopy := buf, prefix, wordStart, triggerChar
+	mode := buf.Mode()
+	go func() {
+		select {
+		case <-time.After(lspCompProseDelay):
+		case <-ctx.Done():
+			return
+		}
+		// The callback runs on the main goroutine, so all Editor state below is
+		// touched without a data race.
+		e.lspAsync(func() func() {
+			return func() {
+				if e.lspCompActive || e.lspCompInflight || ctx.Err() != nil {
+					return
+				}
+				cur := e.ActiveBuffer()
+				if cur != bufCopy {
+					return
+				}
+				prefix2, start2 := lspCompWordPrefix(cur)
+				if start2 != wordStartCopy || prefix2 != prefixCopy {
+					// The user kept typing (or moved); a newer keystroke owns
+					// the next request.
+					return
+				}
+				conn2 := e.lspConns[mode]
+				if conn2 == nil || !conn2.isReady {
+					return
+				}
+				e.lspFireCompletion(cur, conn2, wordStartCopy, triggerCopy)
+			}
+		})
+	}()
+}
+
+// lspFireCompletion sends an async textDocument/completion request for point in
+// buf and, when the reply arrives, populates the completion popup.  Must be
+// called on the main goroutine.
+func (e *Editor) lspFireCompletion(buf *buffer.Buffer, conn *lspConn, wordStart int, triggerChar rune) {
 	// Send didChange synchronously before the goroutine fires the completion
 	// request.  lspMaybeDidChange is normally called from Redraw(), which runs
 	// after selfInsert, so without this the LSP server would receive the

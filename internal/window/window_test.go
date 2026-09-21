@@ -1529,3 +1529,288 @@ func TestScrollDownBelowMin(t *testing.T) {
 		t.Errorf("ScrollDown below min: want scrollLine=1, got %d", w.ScrollLine())
 	}
 }
+
+// ---- ViewLines EndPos derivation: oracle comparison ------------------------
+//
+// ViewLines used to call buf.EndOfLine(startPos) once per row to find each
+// row's EndPos, even though LineStartsFromPos (used to get StartPos) had
+// already walked past every newline in that range. The fix derives EndPos
+// from the next row's StartPos instead. viewLinesNoWrapOracle and
+// viewLinesWrappedOracle below are frozen copies of the pre-fix
+// implementations (one EndOfLine call per row); the tests in this section
+// assert the optimized ViewLines produces byte-for-byte identical output
+// across every edge case the fix must preserve: empty buffer, no trailing
+// newline, trailing newline (blank last line), CRLF, lines longer than the
+// window in both wrap and no-wrap mode, narrowing, and multibyte/wide runes.
+
+// viewLinesNoWrapOracle reimplements the pre-optimization viewLinesNoWrap.
+func viewLinesNoWrapOracle(w *Window) []ViewLine {
+	totalLines := w.buf.LineCount()
+	rows := make([]ViewLine, w.height)
+	firstPos := w.firstScrollPos()
+	startPositions := w.buf.LineStartsFromPos(w.scrollLine, firstPos, w.height)
+	for i := range w.height {
+		bufLine := w.scrollLine + i
+		row := w.top + i
+		if bufLine > totalLines {
+			rows[i] = ViewLine{Row: row, Line: 0}
+			continue
+		}
+		startPos := startPositions[i]
+		endPos := w.buf.EndOfLine(startPos)
+		rows[i] = ViewLine{Row: row, Line: bufLine, StartPos: startPos, EndPos: endPos}
+	}
+	return rows
+}
+
+// viewLinesWrappedOracle reimplements the pre-optimization viewLinesWrapped.
+func viewLinesWrappedOracle(w *Window) []ViewLine {
+	totalLines := w.buf.LineCount()
+	rows := make([]ViewLine, w.height)
+	rowIdx := 0
+	bufLine := w.scrollLine
+	firstPos := w.firstScrollPos()
+	startPositions := w.buf.LineStartsFromPos(w.scrollLine, firstPos, w.height)
+	spIdx := 0
+	for rowIdx < w.height && bufLine <= totalLines {
+		var startPos int
+		if spIdx < len(startPositions) {
+			startPos = startPositions[spIdx]
+			spIdx++
+		} else {
+			startPos = w.buf.Len()
+		}
+		endPos := w.buf.EndOfLine(startPos)
+		lineLen := endPos - startPos
+		if lineLen <= w.wrapCol {
+			rows[rowIdx] = ViewLine{Row: w.top + rowIdx, Line: bufLine, StartPos: startPos, EndPos: endPos}
+			rowIdx++
+		} else {
+			segStart := startPos
+			for rowIdx < w.height && segStart < endPos {
+				segEnd := min(segStart+w.wrapCol, endPos)
+				rows[rowIdx] = ViewLine{Row: w.top + rowIdx, Line: bufLine, StartPos: segStart, EndPos: segEnd}
+				rowIdx++
+				segStart = segEnd
+			}
+		}
+		bufLine++
+	}
+	for ; rowIdx < w.height; rowIdx++ {
+		rows[rowIdx] = ViewLine{Row: w.top + rowIdx, Line: 0}
+	}
+	return rows
+}
+
+// viewLinesOracle dispatches to the wrapped or no-wrap oracle exactly the way
+// ViewLines does.
+func viewLinesOracle(w *Window) []ViewLine {
+	if w.wrapCol > 0 {
+		return viewLinesWrappedOracle(w)
+	}
+	return viewLinesNoWrapOracle(w)
+}
+
+// assertViewLinesMatchesOracle fails the test if w.ViewLines() differs from
+// the frozen pre-fix oracle in any field, for any row.
+func assertViewLinesMatchesOracle(t *testing.T, w *Window, label string) {
+	t.Helper()
+	got := w.ViewLines()
+	want := viewLinesOracle(w)
+	if len(got) != len(want) {
+		t.Fatalf("%s: len(ViewLines) = %d, want %d", label, len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("%s: row %d = %+v, want %+v (oracle)", label, i, got[i], want[i])
+		}
+	}
+}
+
+func TestViewLinesEmptyBufferMatchesOracle(t *testing.T) {
+	buf := buffer.New("t")
+	for _, wrapCol := range []int{0, 5} {
+		w := New(buf, 0, 0, 80, 4)
+		w.SetWrapCol(wrapCol)
+		assertViewLinesMatchesOracle(t, w, "empty buffer")
+	}
+}
+
+func TestViewLinesSingleLineNoTrailingNewlineMatchesOracle(t *testing.T) {
+	buf := buffer.NewWithContent("t", "hello world")
+	for _, wrapCol := range []int{0, 4, 100} {
+		w := New(buf, 0, 0, 80, 4)
+		w.SetWrapCol(wrapCol)
+		assertViewLinesMatchesOracle(t, w, "single line, no trailing newline")
+	}
+	// Sanity: EndPos should reach the very end of the buffer (no off-by-one
+	// from treating the missing "next line" as if it existed).
+	w := New(buf, 0, 0, 80, 2)
+	vl := w.ViewLines()
+	if vl[0].EndPos != buf.Len() {
+		t.Errorf("EndPos = %d, want buf.Len() = %d", vl[0].EndPos, buf.Len())
+	}
+}
+
+func TestViewLinesTrailingNewlineMatchesOracle(t *testing.T) {
+	// "abc\n" has 2 lines per LineCount (newlines+1): "abc" and a blank
+	// trailing line starting (and ending) at Len(). Both must still render.
+	buf := buffer.NewWithContent("t", "abc\n")
+	for _, wrapCol := range []int{0, 2} {
+		w := New(buf, 0, 0, 80, 4)
+		w.SetWrapCol(wrapCol)
+		assertViewLinesMatchesOracle(t, w, "trailing newline")
+	}
+	w := New(buf, 0, 0, 80, 4)
+	vl := w.ViewLines()
+	if vl[0].Line != 1 || vl[0].StartPos != 0 || vl[0].EndPos != 3 {
+		t.Errorf("line1 = %+v, want Line=1 StartPos=0 EndPos=3", vl[0])
+	}
+	if vl[1].Line != 2 || vl[1].StartPos != 4 || vl[1].EndPos != 4 {
+		t.Errorf("blank trailing line = %+v, want Line=2 StartPos=4 EndPos=4", vl[1])
+	}
+	if vl[2].Line != 0 {
+		t.Errorf("row past end = %+v, want Line=0", vl[2])
+	}
+}
+
+func TestViewLinesCRLFMatchesOracle(t *testing.T) {
+	// '\r' is ordinary content to the buffer (only '\n' ends a line), so it
+	// must stay inside EndPos exactly as EndOfLine would have left it.
+	buf := buffer.NewWithContent("t", "one\r\ntwo\r\nthree")
+	for _, wrapCol := range []int{0, 3} {
+		w := New(buf, 0, 0, 80, 5)
+		w.SetWrapCol(wrapCol)
+		assertViewLinesMatchesOracle(t, w, "CRLF")
+	}
+	w := New(buf, 0, 0, 80, 5)
+	vl := w.ViewLines()
+	if got := buf.Substring(vl[0].StartPos, vl[0].EndPos); got != "one\r" {
+		t.Errorf("line1 = %q, want %q (CR retained)", got, "one\r")
+	}
+	if got := buf.Substring(vl[2].StartPos, vl[2].EndPos); got != "three" {
+		t.Errorf("line3 (last, no trailing newline) = %q, want %q", got, "three")
+	}
+}
+
+func TestViewLinesLongLineNoWrapMatchesOracle(t *testing.T) {
+	// Lines far longer than any realistic window width, un-wrapped: EndPos
+	// must reach the true end of the line regardless of window width.
+	long := strings.Repeat("x", 5000)
+	buf := buffer.NewWithContent("t", long+"\n"+long+"\nshort")
+	w := New(buf, 0, 0, 80, 4)
+	assertViewLinesMatchesOracle(t, w, "long lines, no wrap")
+	vl := w.ViewLines()
+	if vl[0].EndPos-vl[0].StartPos != 5000 {
+		t.Errorf("line1 len = %d, want 5000", vl[0].EndPos-vl[0].StartPos)
+	}
+}
+
+func TestViewLinesLongLineWrappedMatchesOracle(t *testing.T) {
+	long := strings.Repeat("y", 777) // not a multiple of any wrapCol below
+	buf := buffer.NewWithContent("t", long+"\nshort\n"+long)
+	for _, wrapCol := range []int{1, 7, 80, 776, 777, 778} {
+		w := New(buf, 0, 0, 80, 40)
+		w.SetWrapCol(wrapCol)
+		assertViewLinesMatchesOracle(t, w, "long line, wrapped")
+	}
+}
+
+func TestViewLinesNarrowedMatchesOracle(t *testing.T) {
+	// LineStartsFromPos/EndOfLine/LineCount/Len are all documented as
+	// narrowing-unaware (absolute positions), so ViewLines' behavior must be
+	// identical whether or not the buffer is narrowed.
+	buf := buffer.NewWithContent("t", fiveLineContent)
+	buf.Narrow(buf.LineStart(2), buf.LineStart(4))
+	for _, wrapCol := range []int{0, 3} {
+		w := New(buf, 0, 0, 80, 6)
+		w.SetWrapCol(wrapCol)
+		assertViewLinesMatchesOracle(t, w, "narrowed buffer")
+	}
+	buf.Widen()
+}
+
+func TestViewLinesMultibyteWideRunesMatchesOracle(t *testing.T) {
+	// Multibyte (é, 日) and wide (日, 本) runes: positions are rune indices,
+	// so line-boundary arithmetic must not shift under non-ASCII content.
+	content := "héllo wörld\n日本語のテキストです\nplain\n"
+	buf := buffer.NewWithContent("t", content)
+	for _, wrapCol := range []int{0, 4, 9} {
+		w := New(buf, 0, 0, 80, 5)
+		w.SetWrapCol(wrapCol)
+		assertViewLinesMatchesOracle(t, w, "multibyte/wide runes")
+	}
+}
+
+// TestViewLinesMatchesOracleAcrossManyConfigurations sweeps a broad matrix of
+// buffer shapes, scroll positions, wrap columns and window heights, catching
+// any off-by-one in the StartPos/EndPos derivation that a handful of targeted
+// cases might miss.
+func TestViewLinesMatchesOracleAcrossManyConfigurations(t *testing.T) {
+	buffers := map[string]*buffer.Buffer{
+		"empty":               buffer.New("t"),
+		"no-trailing-newline": buffer.NewWithContent("t", "a\nbb\nccc\ndddd"),
+		"trailing-newline":    buffer.NewWithContent("t", "a\nbb\nccc\ndddd\n"),
+		"varying":             varyingLineBuffer(50),
+		"single-empty-line":   buffer.NewWithContent("t", "\n"),
+	}
+	for name, buf := range buffers {
+		totalLines := buf.LineCount()
+		for _, scrollLine := range []int{1, 2, totalLines} {
+			for _, height := range []int{1, 2, 5, 12} {
+				for _, wrapCol := range []int{0, 1, 3, 8} {
+					w := New(buf, 0, 0, 80, height)
+					w.SetWrapCol(wrapCol)
+					w.SetScrollLine(scrollLine)
+					label := name
+					assertViewLinesMatchesOracle(t, w, label)
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkViewLinesLongLines measures ViewLines over a buffer of very long
+// lines (minified-JSON-like), the case the EndOfLine-per-row bug degraded
+// most: EndOfLine is an O(line_length) rune scan, so calling it once per row
+// on top of LineStartsFromPos's own newline walk doubled the boundary-scan
+// work every redraw.
+func BenchmarkViewLinesLongLines(b *testing.B) {
+	var sb strings.Builder
+	for range 200 {
+		sb.WriteString(strings.Repeat("x", 4000))
+		sb.WriteByte('\n')
+	}
+	buf := buffer.NewWithContent("bench", sb.String())
+
+	b.Run("NoWrap", func(b *testing.B) {
+		w := New(buf, 0, 0, 80, 40)
+		w.SetScrollLine(50)
+		for b.Loop() {
+			_ = w.ViewLines()
+		}
+	})
+	b.Run("NoWrapOracle", func(b *testing.B) {
+		w := New(buf, 0, 0, 80, 40)
+		w.SetScrollLine(50)
+		for b.Loop() {
+			_ = viewLinesNoWrapOracle(w)
+		}
+	})
+	b.Run("Wrapped", func(b *testing.B) {
+		w := New(buf, 0, 0, 80, 40)
+		w.SetWrapCol(78)
+		w.SetScrollLine(50)
+		for b.Loop() {
+			_ = w.ViewLines()
+		}
+	})
+	b.Run("WrappedOracle", func(b *testing.B) {
+		w := New(buf, 0, 0, 80, 40)
+		w.SetWrapCol(78)
+		w.SetScrollLine(50)
+		for b.Loop() {
+			_ = viewLinesWrappedOracle(w)
+		}
+	})
+}

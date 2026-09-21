@@ -1,9 +1,13 @@
 package editor
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -219,36 +223,190 @@ type jdtlsMainClass struct {
 }
 
 // dapJdtlsLaunchArgs resolves the launch arguments for a java debug session:
-// the main class (preferring the one declared in file) and its classpath.
-func dapJdtlsLaunchArgs(conn *lspConn, file, root string) (dap.LaunchArgs, error) {
+// the main class (preferring the one declared in file) and its classpath.  A
+// project with no main class at all is not an error — see
+// dapJdtlsFallbackLaunchArgs — so that a test class or a file belonging to a
+// server that is started some other way can still be debugged.  note is a
+// message for the user, empty unless that fallback was taken.
+func dapJdtlsLaunchArgs(conn *lspConn, file, root string) (launch dap.LaunchArgs, note string, err error) {
 	raw, err := jdtlsExecuteCommand(conn, jdtlsResolveMainClass, root)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var classes []jdtlsMainClass
 	if err := json.Unmarshal(raw, &classes); err != nil {
-		return nil, fmt.Errorf("%s: %w", jdtlsResolveMainClass, err)
+		return nil, "", fmt.Errorf("%s: %w", jdtlsResolveMainClass, err)
 	}
 	if len(classes) == 0 {
-		return nil, fmt.Errorf("%s found no main class under %s", jdtlsResolveMainClass, root)
+		return dapJdtlsFallbackLaunchArgs(conn, file, root)
 	}
 	main := jdtlsPickMainClass(classes, file)
 
 	modulePaths, classPaths, err := dapJdtlsClasspath(conn, main)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	return dap.LaunchArgs{
+	return jdtlsLaunchArgs(main.MainClass, main.ProjectName, modulePaths, classPaths, root, nil), "", nil
+}
+
+// jdtlsLaunchArgs builds a java-debug "launch" request body.  args are the
+// debuggee's own command-line arguments and are omitted when empty.
+func jdtlsLaunchArgs(mainClass, projectName string, modulePaths, classPaths []string, root string, args []string) dap.LaunchArgs {
+	launch := dap.LaunchArgs{
 		"type":        "java",
 		"request":     "launch",
-		"mainClass":   main.MainClass,
-		"projectName": main.ProjectName,
+		"mainClass":   mainClass,
+		"projectName": projectName,
 		"modulePaths": modulePaths,
 		"classPaths":  classPaths,
 		"cwd":         root,
 		"console":     "internalConsole",
-	}, nil
+	}
+	if len(args) > 0 {
+		launch["args"] = args
+	}
+	return launch
+}
+
+// dapJdtlsFallbackLaunchArgs builds launch arguments for a project in which
+// vscode.java.resolveMainClass found nothing to run — a library, a test module,
+// or a service whose entry point lives elsewhere (Quarkus, Spring Boot started by
+// its plugin, …).  Refusing to start there would leave java-mode without the
+// spec's test and "micro server" contexts, which go-mode already has.
+//
+// The launch target is the class in the current buffer.  java-debug offers no
+// "debug just this file" request and no JUnit support — that lives in the
+// separate vscode-java-test bundle, which gomacs does not ship — but two things
+// make this work anyway:
+//
+//   - vscode.java.resolveClasspath does not require its argument to declare a
+//     main method; it only locates the single project containing the type, so the
+//     project's real runtime classpath comes back regardless.
+//   - a test class can therefore be run through whichever JUnit runner is already
+//     on that classpath (see javaTestRunner), which is what makes breakpoints in
+//     the test itself hit.
+//
+// Anything else is launched as a plain class, and the note says what to do when
+// that class has no main method.
+func dapJdtlsFallbackLaunchArgs(conn *lspConn, file, root string) (dap.LaunchArgs, string, error) {
+	noMain := fmt.Sprintf("%s found no main class under %s", jdtlsResolveMainClass, root)
+
+	unit, err := javaReadCompilationUnit(file)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s, and %w", noMain, err)
+	}
+
+	// projectName is left empty: the language server reported no main class, so
+	// there is no project name to copy from it, and resolveClasspath finds the
+	// project from the type on its own.
+	modulePaths, classPaths, err := dapJdtlsClasspath(conn, jdtlsMainClass{MainClass: unit.class})
+	if err != nil {
+		return nil, "", fmt.Errorf("%s, and no classpath could be resolved for %s: %w; open a "+
+			"class that declares a main method, or check that jdtls has imported the project "+
+			"this file belongs to", noMain, unit.class, err)
+	}
+
+	mainClass, args, why := javaFallbackTarget(unit, classPaths)
+	return jdtlsLaunchArgs(mainClass, "", modulePaths, classPaths, root, args),
+		noMain + "; " + why, nil
+}
+
+// javaFallbackTarget picks what dapJdtlsFallbackLaunchArgs should launch for the
+// buffer's own class, and returns a note explaining the choice.
+func javaFallbackTarget(unit javaCompilationUnit, classPaths []string) (mainClass string, args []string, why string) {
+	if !unit.isTest {
+		return unit.class, nil, fmt.Sprintf("debugging %s itself — if it declares no main method, "+
+			"add one or start the debugger from the class that does", unit.class)
+	}
+	runner, runnerArgs, ok := javaTestRunner(unit.class, classPaths)
+	if !ok {
+		return unit.class, nil, fmt.Sprintf("%s looks like a test but no JUnit runner is on its "+
+			"classpath, so it is launched as a plain class; add junit-platform-console-standalone "+
+			"(JUnit 5) or junit (JUnit 4) to the test classpath to run it as a test", unit.class)
+	}
+	return runner, runnerArgs, fmt.Sprintf("debugging test class %s with %s", unit.class, runner)
+}
+
+// junitRunners maps a jar on the classpath to the JUnit entry point it provides
+// and the argument that selects one test class, most capable runner first.
+// Launching one of these instead of the test class is exactly what an IDE does;
+// the runner only needs to be on the classpath java-debug already resolved.
+var junitRunners = []struct {
+	jar       string // substring of the jar's file name
+	mainClass string
+	selectFmt string // how the runner is told which class to run
+}{
+	// JUnit 5 — and JUnit 4 through the vintage engine.
+	{"junit-platform-console", "org.junit.platform.console.ConsoleLauncher", "--select-class=%s"},
+	// JUnit 4: JUnitCore takes bare class names.
+	{"junit-4", "org.junit.runner.JUnitCore", "%s"},
+	{"junit.jar", "org.junit.runner.JUnitCore", "%s"},
+}
+
+// javaTestRunner returns the JUnit runner to launch for class, given the
+// classpath jdtls resolved.  ok is false when the classpath holds no runner that
+// can be started from the command line.
+func javaTestRunner(class string, classPaths []string) (mainClass string, args []string, ok bool) {
+	for _, r := range junitRunners {
+		for _, cp := range classPaths {
+			if strings.Contains(filepath.Base(cp), r.jar) {
+				return r.mainClass, []string{fmt.Sprintf(r.selectFmt, class)}, true
+			}
+		}
+	}
+	return "", nil, false
+}
+
+// javaCompilationUnit is what the java fallback can learn about a source file
+// from the file alone.
+type javaCompilationUnit struct {
+	class  string // fully qualified class name
+	isTest bool   // the file declares tests rather than a program
+}
+
+var (
+	// javaPackageRe matches a package declaration; the group is the package name.
+	javaPackageRe = regexp.MustCompile(`(?m)^[ \t]*package[ \t]+([\w.]+)[ \t]*;`)
+	// javaTestAnnotationRe matches the JUnit annotations that mark a test method.
+	javaTestAnnotationRe = regexp.MustCompile(
+		`(?m)^[ \t]*@(?:org\.junit\.(?:jupiter\.api\.)?)?` +
+			`(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b`)
+)
+
+// javaReadCompilationUnit derives the fully qualified class name of a .java file
+// and whether it is a test.  It reads the file from disk rather than the buffer
+// because it runs on a worker goroutine, which must not touch editor state; an
+// unsaved package rename is the only thing that can make the two disagree.
+func javaReadCompilationUnit(file string) (javaCompilationUnit, error) {
+	if !strings.EqualFold(filepath.Ext(file), ".java") {
+		return javaCompilationUnit{}, fmt.Errorf("%s is not a java source file, so it declares no "+
+			"class to launch", filepath.Base(file))
+	}
+	src, err := os.ReadFile(file)
+	if err != nil {
+		return javaCompilationUnit{}, fmt.Errorf("reading %s: %w", file, err)
+	}
+	name := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
+	class := name
+	if pkg := javaPackageRe.FindSubmatch(src); pkg != nil {
+		class = string(pkg[1]) + "." + name
+	}
+	return javaCompilationUnit{class: class, isTest: javaLooksLikeTest(file, name, src)}, nil
+}
+
+// javaLooksLikeTest reports whether a java source file holds tests, going by the
+// JUnit annotations it uses, the JUnit 3 base class, the class-name conventions
+// build tools key their test detection off, and the maven/gradle test source root.
+func javaLooksLikeTest(file, class string, src []byte) bool {
+	if javaTestAnnotationRe.Match(src) || bytes.Contains(src, []byte("extends TestCase")) {
+		return true
+	}
+	if strings.HasPrefix(class, "Test") || strings.HasSuffix(class, "Test") ||
+		strings.HasSuffix(class, "Tests") || strings.HasSuffix(class, "TestCase") {
+		return true
+	}
+	return strings.Contains(filepath.ToSlash(file), "/src/test/")
 }
 
 // jdtlsPickMainClass returns the main class declared in file, falling back to

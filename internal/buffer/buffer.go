@@ -3,6 +3,7 @@ package buffer
 import (
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -398,18 +399,131 @@ func (b *Buffer) String() string {
 // and can reuse a scratch slice across calls.  Like String(), the whole buffer
 // is returned: narrowing is not taken into account.
 func (b *Buffer) AppendRunes(dst []rune) []rune {
-	pre := b.data[:b.gapStart]
-	post := b.data[b.gapEnd:]
-	start := len(dst)
-	need := start + len(pre) + len(post)
+	return b.AppendRunesRange(dst, 0, b.Len())
+}
+
+// AppendRunesRange appends the runes in [start, end) to dst and returns the
+// extended slice.  It is the windowed form of AppendRunes: callers that only
+// need a prefix or a window of the buffer (a syntax highlighter that stops at
+// the last visible line, say) pay for the runes they ask for instead of for a
+// full-buffer copy on every edit.
+//
+// Semantics:
+//
+//   - Positions are absolute rune indices and are clamped like Substring():
+//     start below 0 becomes 0, end above Len() becomes Len(), and an empty or
+//     reversed range (start >= end after clamping) returns dst untouched.
+//   - Narrowing is NOT taken into account, matching AppendRunes() and String().
+//     A narrowed buffer still exposes its full contents here; callers that want
+//     the accessible region must pass NarrowMin()/NarrowMax() themselves.
+//   - The gap is never moved and the buffer is not mutated, so this is safe on a
+//     read path and stays cheap no matter where the last edit left the gap.  The
+//     range is copied out of the one or two segments it touches.
+//   - No allocation happens when dst already has capacity for the appended
+//     runes; otherwise a slice of exactly the needed capacity replaces it, so
+//     dst must not alias the buffer's internal storage and callers must use the
+//     returned slice rather than the one they passed in.
+func (b *Buffer) AppendRunesRange(dst []rune, start, end int) []rune {
+	if start < 0 {
+		start = 0
+	}
+	if length := b.Len(); end > length {
+		end = length
+	}
+	if start >= end {
+		return dst
+	}
+	base := len(dst)
+	need := base + (end - start)
 	if cap(dst) < need {
-		grown := make([]rune, start, need)
+		grown := make([]rune, base, need)
 		copy(grown, dst)
 		dst = grown
 	}
 	dst = dst[:need]
-	n := copy(dst[start:], pre)
-	copy(dst[start+n:], post)
+	switch {
+	case end <= b.gapStart:
+		// Entirely before the gap.
+		copy(dst[base:], b.data[start:end])
+	case start >= b.gapStart:
+		// Entirely after the gap: shift both ends past it.
+		gs := b.gapSize()
+		copy(dst[base:], b.data[start+gs:end+gs])
+	default:
+		// Spans the gap: two bulk copies.
+		n := copy(dst[base:], b.data[start:b.gapStart])
+		copy(dst[base+n:], b.data[b.gapEnd:b.gapEnd+(end-b.gapStart)])
+	}
+	return dst
+}
+
+// AppendBytes appends the buffer's contents to dst as UTF-8 and returns the
+// extended slice.  It is the byte-oriented sibling of AppendRunes: callers that
+// ultimately want bytes (a JSON payload, a file write, a hash) skip the
+// intermediate []rune that String() materialises and can reuse a scratch slice
+// across calls, so a steady-state caller allocates nothing at all.  Like
+// String(), the whole buffer is returned: narrowing is not taken into account.
+func (b *Buffer) AppendBytes(dst []byte) []byte {
+	return b.AppendBytesRange(dst, 0, b.Len())
+}
+
+// AppendBytesRange appends the runes in [start, end) to dst as UTF-8 and
+// returns the extended slice.  It is the windowed form of AppendBytes, the same
+// way AppendRunesRange is the windowed form of AppendRunes.
+//
+// Semantics:
+//
+//   - Positions are absolute rune indices (not byte offsets) and are clamped
+//     like Substring(): start below 0 becomes 0, end above Len() becomes Len(),
+//     and an empty or reversed range (start >= end after clamping) returns dst
+//     untouched.
+//   - Narrowing is NOT taken into account, matching AppendBytes(),
+//     AppendRunes() and String().  A narrowed buffer still exposes its full
+//     contents here; callers that want the accessible region must pass
+//     NarrowMin()/NarrowMax() themselves.
+//   - The gap is never moved and the buffer is not mutated (modCount and
+//     changeGen are untouched), so this is safe on a read path and stays cheap
+//     no matter where the last edit left the gap.  The range is encoded out of
+//     the one or two segments it touches.
+//   - The appended bytes are always valid UTF-8: a rune the buffer holds that
+//     is not a valid scalar value (a lone surrogate, say) is encoded as
+//     U+FFFD, exactly as string([]rune{…}) — and therefore String() — does.
+//   - No allocation happens when dst already has capacity for the encoded
+//     bytes; otherwise append grows it, so dst must not alias the buffer's
+//     internal storage and callers must use the returned slice rather than the
+//     one they passed in.
+func (b *Buffer) AppendBytesRange(dst []byte, start, end int) []byte {
+	if start < 0 {
+		start = 0
+	}
+	if length := b.Len(); end > length {
+		end = length
+	}
+	if start >= end {
+		return dst
+	}
+	switch {
+	case end <= b.gapStart:
+		// Entirely before the gap.
+		return appendRunesUTF8(dst, b.data[start:end])
+	case start >= b.gapStart:
+		// Entirely after the gap: shift both ends past it.
+		gs := b.gapSize()
+		return appendRunesUTF8(dst, b.data[start+gs:end+gs])
+	default:
+		// Spans the gap: encode both segments.
+		dst = appendRunesUTF8(dst, b.data[start:b.gapStart])
+		return appendRunesUTF8(dst, b.data[b.gapEnd:b.gapEnd+(end-b.gapStart)])
+	}
+}
+
+// appendRunesUTF8 encodes runes into dst, growing dst only when its capacity is
+// exhausted.  Kept separate so AppendBytesRange can feed it either gap-buffer
+// segment without materialising a combined []rune.
+func appendRunesUTF8(dst []byte, runes []rune) []byte {
+	for _, r := range runes {
+		dst = utf8.AppendRune(dst, r)
+	}
 	return dst
 }
 
@@ -780,30 +894,49 @@ func (b *Buffer) PosForLineCol(line, col int) int {
 }
 
 // BeginningOfLine returns the logical position of the first rune on the line
-// that contains pos.
+// that contains pos.  pos is clamped into [0, Len()] and the position returned
+// is absolute: narrowing is not taken into account, matching LineCol() and
+// LineStart().
+//
+// The answer comes straight out of the line-start index (pos minus the column
+// LineCol() reports), so the cost is O(log lines) instead of a backwards scan to
+// the previous newline.  That matters on pathologically long lines — minified
+// JSON, single-line logs — where this is called once per cursor motion and once
+// per rendered row.
 func (b *Buffer) BeginningOfLine(pos int) int {
 	if pos > b.Len() {
 		pos = b.Len()
 	}
-	for i := pos - 1; i >= 0; i-- {
-		if b.RuneAt(i) == '\n' {
-			return i + 1
-		}
+	if pos < 0 {
+		pos = 0
 	}
-	return 0
+	_, col := b.LineCol(pos)
+	return pos - col
 }
 
 // EndOfLine returns the logical position just before the newline that ends the
-// line containing pos (or Len() if on the last line).
+// line containing pos (or Len() if on the last line).  pos is clamped into
+// [0, Len()] and the position returned is absolute: narrowing is not taken into
+// account, matching LineCol() and LineStart().
+//
+// Like BeginningOfLine this reads the line-start index — the end of line L is
+// one rune before the start of line L+1 — so it costs O(log lines) rather than a
+// forward scan to the next newline.
 func (b *Buffer) EndOfLine(pos int) int {
 	n := b.Len()
 	if pos > n {
 		pos = n
 	}
-	for i := pos; i < n; i++ {
-		if b.RuneAt(i) == '\n' {
-			return i
-		}
+	if pos < 0 {
+		pos = 0
+	}
+	line, _ := b.LineCol(pos)
+	// LineCol() populates the index, but it may have answered from its cache.
+	b.ensureLineStarts()
+	// lineStarts[line] is the start of line line+1; when there is no such entry
+	// pos sits on the last line, which ends at the end of the buffer.
+	if line < len(b.lineStarts) {
+		return b.lineStarts[line] - 1
 	}
 	return n
 }

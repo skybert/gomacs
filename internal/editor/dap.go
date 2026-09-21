@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
@@ -131,7 +132,7 @@ func (e *Editor) cmdDebugStart() {
 	}
 
 	e.dapAsync(func() func() {
-		c, launch, startErr := dapStartAdapter(info, req)
+		c, launch, note, startErr := dapStartAdapter(info, req)
 		if startErr != nil {
 			return func() {
 				e.dap = nil
@@ -194,7 +195,13 @@ func (e *Editor) cmdDebugStart() {
 			e.dap.client = c
 			e.dap.backend = &dapBackend{client: c}
 			e.debugSetupLayout()
-			e.Message("Debug session started")
+			if note != "" {
+				// The adapter is debugging something other than the project's main
+				// class; say so, because which breakpoints can hit depends on it.
+				e.Message("Debug session started: %s", note)
+			} else {
+				e.Message("Debug session started")
+			}
 			// If a stopped event arrived during the handshake (before client was
 			// set), fetch stack/locals now that the client is available.
 			if e.dap.stoppedThread != 0 {
@@ -218,26 +225,28 @@ type dapLaunchRequest struct {
 
 // dapStartAdapter starts the debug adapter for info and returns it together with
 // the launch arguments to send.  It blocks on I/O (spawning a process, or LSP
-// round-trips for jdtls) and so must run on a worker goroutine.
-func dapStartAdapter(info *langModeInfo, req dapLaunchRequest) (*dap.Client, dap.LaunchArgs, error) {
+// round-trips for jdtls) and so must run on a worker goroutine.  note is a
+// message for the user, non-empty when resolving the launch arguments had to fall
+// back to something other than the project's main class.
+func dapStartAdapter(info *langModeInfo, req dapLaunchRequest) (c *dap.Client, launch dap.LaunchArgs, note string, err error) {
 	if info.dapKind == dapAdapterJdtls {
 		// Resolve the launch arguments first: doing so before the adapter exists
 		// means a classpath failure does not leak a debug session.
-		launch, err := dapJdtlsLaunchArgs(req.lspConn, req.file, req.runDir)
+		launch, note, err = dapJdtlsLaunchArgs(req.lspConn, req.file, req.runDir)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
-		c, err := dapStartJdtls(req.lspConn)
+		c, err = dapStartJdtls(req.lspConn)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
-		return c, launch, nil
+		return c, launch, note, nil
 	}
-	c, err := dap.Start(req.runDir, info.dapCmd[0], info.dapCmd[1:]...)
+	c, err = dap.Start(req.runDir, info.dapCmd[0], info.dapCmd[1:]...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot start %s: %w", info.dapCmd[0], err)
+		return nil, nil, "", fmt.Errorf("cannot start %s: %w", info.dapCmd[0], err)
 	}
-	return c, req.launch, nil
+	return c, req.launch, "", nil
 }
 
 // dapLocalsAutoExpandDepth returns the locals auto-expand depth configured with
@@ -321,20 +330,117 @@ func (e *Editor) dapLaunchArgs(buf *buffer.Buffer) (dap.LaunchArgs, string, erro
 	}
 }
 
-// dapTestFuncAtPoint scans backward from buf.Point() for the nearest
-// "func TestXxx(…" declaration and returns the test name.  Falls back to "."
-// (match all) if none is found.
+// goTestFuncRe matches a top-level Go test function declaration.  Nested and
+// indented declarations cannot match, which is deliberate: only a file-level
+// TestXxx is a target delve's -test.run can select.
+var goTestFuncRe = regexp.MustCompile(`(?m)^func (Test\w+)\(`)
+
+// dapTestFuncAtPoint returns the name of the test function whose body contains
+// buf.Point(), for use as delve's -test.run pattern, or "." (run every test in
+// the package) when point is not inside one.
+//
+// Point really has to be inside the function body: the spec says that with the
+// cursor "on a class, or outside any function, the entire file is debugged".  So
+// a cursor on a top-level var between two tests, or inside a helper declared
+// after a test, must not be attributed to the test that happens to precede it.
 func dapTestFuncAtPoint(buf *buffer.Buffer) string {
 	content := buf.Substring(0, buf.Len())
+	runes := []rune(content)
 	pt := buf.Point()
-	// Work backwards through the text to find a Test func declaration.
-	text := string([]rune(content)[:pt])
-	re := regexp.MustCompile(`(?m)^func (Test\w+)\(`)
-	matches := re.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
-		return "."
+	for _, m := range goTestFuncRe.FindAllStringSubmatchIndex(content, -1) {
+		// Regexp offsets are byte indices; buffer positions are rune indices.
+		start := utf8.RuneCountInString(content[:m[0]])
+		if pt < start {
+			// Declarations come in source order, so every later one begins even
+			// further past point.
+			break
+		}
+		end, ok := goBodyEnd(runes, start)
+		if !ok {
+			// Unbalanced braces — a half-finished edit.  Treat the declaration as
+			// running to the end of the buffer rather than dropping it, so that
+			// debugging the test one is in the middle of writing still works.
+			end = len(runes)
+		}
+		if pt <= end {
+			return content[m[2]:m[3]]
+		}
 	}
-	return matches[len(matches)-1][1]
+	return "."
+}
+
+// goBodyEnd returns the rune index of the brace closing the first block opened at
+// or after runes[start], ignoring braces inside interpreted strings, rune
+// literals, raw (backtick) strings and comments.  ok is false when no block is
+// opened, or the one that is opened is never closed.
+func goBodyEnd(runes []rune, start int) (end int, ok bool) {
+	depth := 0
+	for i := start; i < len(runes); i++ {
+		switch runes[i] {
+		case '/':
+			i = goSkipComment(runes, i)
+		case '"', '\'', '`':
+			i = goSkipLiteral(runes, i)
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth <= 0 {
+				return i, depth == 0
+			}
+		}
+	}
+	return 0, false
+}
+
+// goSkipComment returns the index of the last rune of the comment starting at
+// runes[i], which must be a '/'.  When it does not start a comment (ordinary
+// division) i is returned unchanged.  An unterminated comment runs to the end.
+func goSkipComment(runes []rune, i int) int {
+	if i+1 >= len(runes) {
+		return i
+	}
+	switch runes[i+1] {
+	case '/':
+		for j := i + 2; j < len(runes); j++ {
+			if runes[j] == '\n' {
+				return j - 1
+			}
+		}
+	case '*':
+		for j := i + 2; j+1 < len(runes); j++ {
+			if runes[j] == '*' && runes[j+1] == '/' {
+				return j + 1
+			}
+		}
+	default:
+		return i
+	}
+	return len(runes) - 1
+}
+
+// goSkipLiteral returns the index of the rune closing the literal opened by the
+// quote, apostrophe or backtick at runes[i].  Backslash escapes are honoured
+// except in raw strings, and an unterminated interpreted literal ends at the
+// line break, just as it does for the compiler.
+func goSkipLiteral(runes []rune, i int) int {
+	quote := runes[i]
+	raw := quote == '`'
+	for j := i + 1; j < len(runes); j++ {
+		switch runes[j] {
+		case '\\':
+			if !raw {
+				j++ // skip the escaped rune
+			}
+		case '\n':
+			if !raw {
+				return j - 1
+			}
+		case quote:
+			return j
+		}
+	}
+	return len(runes) - 1
 }
 
 // javaMainRe matches a Java entry point declaration.  It deliberately covers the

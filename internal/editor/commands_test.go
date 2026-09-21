@@ -1103,69 +1103,6 @@ func TestReadOnlyBlocksDeleteChar(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// sort-lines
-// ---------------------------------------------------------------------------
-
-func TestSortLinesRegion(t *testing.T) {
-	content := "banana\napple\ncherry\n"
-	e := newTestEditor(content)
-	b := buf(e)
-	b.SetMark(0)
-	b.SetMarkActive(true)
-	b.SetPoint(b.Len())
-	e.cmdSortLines()
-	want := "apple\nbanana\ncherry\n"
-	if got := b.String(); got != want {
-		t.Errorf("sort-lines: want %q, got %q", want, got)
-	}
-}
-
-func TestSortLinesNoRegion(t *testing.T) {
-	content := "c\nb\na\n"
-	e := newTestEditor(content)
-	b := buf(e)
-	b.SetMarkActive(false)
-	b.SetPoint(0)
-	e.cmdSortLines()
-	want := "a\nb\nc\n"
-	if got := b.String(); got != want {
-		t.Errorf("sort-lines no-region: want %q, got %q", want, got)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// delete-duplicate-lines
-// ---------------------------------------------------------------------------
-
-func TestDeleteDuplicateLines(t *testing.T) {
-	content := "foo\nbar\nfoo\nbaz\nbar\n"
-	e := newTestEditor(content)
-	b := buf(e)
-	b.SetMark(0)
-	b.SetMarkActive(true)
-	b.SetPoint(b.Len())
-	e.cmdDeleteDuplicateLines()
-	want := "foo\nbar\nbaz\n"
-	if got := b.String(); got != want {
-		t.Errorf("delete-duplicate-lines: want %q, got %q", want, got)
-	}
-}
-
-func TestDeleteDuplicateLinesNoDups(t *testing.T) {
-	content := "a\nb\nc\n"
-	e := newTestEditor(content)
-	b := buf(e)
-	b.SetMark(0)
-	b.SetMarkActive(true)
-	b.SetPoint(b.Len())
-	e.cmdDeleteDuplicateLines()
-	want := "a\nb\nc\n"
-	if got := b.String(); got != want {
-		t.Errorf("delete-duplicate-lines no-dups: want %q, got %q", want, got)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // runesMatchFold
 // ---------------------------------------------------------------------------
 
@@ -1301,61 +1238,6 @@ func TestApplyElispConfigIsearchCaseFoldOn(t *testing.T) {
 	e.applyElispConfig()
 	if !e.isSearchCaseFold {
 		t.Error("isSearchCaseFold should be true after (setq isearch-case-insensitive t)")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// cmdJsonMode
-// ---------------------------------------------------------------------------
-
-func TestCmdJsonMode(t *testing.T) {
-	e := newTestEditor("{ \"key\": 1 }")
-	e.cmdJsonMode()
-	if got := buf(e).Mode(); got != "json" {
-		t.Errorf("json-mode: want mode=%q, got %q", "json", got)
-	}
-}
-
-func TestCmdYamlMode(t *testing.T) {
-	e := newTestEditor("key: value\nlist:\n  - item\n")
-	e.cmdYamlMode()
-	if got := buf(e).Mode(); got != "yaml" {
-		t.Errorf("yaml-mode: want mode=%q, got %q", "yaml", got)
-	}
-	// Verify highlighter dispatch works and returns spans.
-	cache := e.getSpanCache(buf(e))
-	if cache == nil {
-		t.Fatal("yaml-mode: span cache should not be nil")
-	}
-	if len(cache.spans) == 0 {
-		t.Error("yaml-mode: expected syntax spans, got none")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// delete-trailing-whitespace
-// ---------------------------------------------------------------------------
-
-func TestDeleteTrailingWhitespaceWholeBuf(t *testing.T) {
-	e := newTestEditor("hello   \nworld  \nno-trail\n")
-	e.cmdDeleteTrailingWhitespace()
-	want := "hello\nworld\nno-trail\n"
-	if got := buf(e).String(); got != want {
-		t.Errorf("want %q, got %q", want, got)
-	}
-}
-
-func TestDeleteTrailingWhitespaceRegion(t *testing.T) {
-	// Only the selected region (first line) should have trailing WS removed.
-	e := newTestEditor("hello   \nworld  \n")
-	b := buf(e)
-	b.SetMark(0)
-	b.SetMarkActive(true)
-	b.SetPoint(8) // end of "hello   "
-	e.cmdDeleteTrailingWhitespace()
-	want := "hello\nworld  \n"
-	if got := b.String(); got != want {
-		t.Errorf("want %q, got %q", want, got)
 	}
 }
 

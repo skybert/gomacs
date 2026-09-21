@@ -2,6 +2,7 @@ package editor
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -626,4 +627,41 @@ func TestCmdMessagesBufferIsReadOnly(t *testing.T) {
 	if !msgBuf.ReadOnly() {
 		t.Fatal("messages: *messages* buffer should be read-only")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// cmdNextError / cmdPreviousError / gotoCompilationError
+// ---------------------------------------------------------------------------
+
+func TestGotoCompilationError_OpensFile(t *testing.T) {
+	e := newCompileTestEditor("")
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(p, []byte("line1\nline2\nline3\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	e.compilationErrors = []compilationError{{File: p, Line: 2, Col: 1}}
+	e.compilationErrorIdx = -1
+
+	e.cmdNextError()
+	if e.ActiveBuffer().Filename() != p {
+		t.Fatalf("cmdNextError should open %q, got %q", p, e.ActiveBuffer().Filename())
+	}
+	line, _ := e.ActiveBuffer().LineCol(e.ActiveBuffer().Point())
+	if line != 2 {
+		t.Fatalf("point should be on line 2, got %d", line)
+	}
+
+	// Previous wraps around to the same single error.
+	e.cmdPreviousError()
+	if e.compilationErrorIdx != 0 {
+		t.Fatalf("expected idx 0 after wrap, got %d", e.compilationErrorIdx)
+	}
+}
+
+func TestNextError_NoErrors(t *testing.T) {
+	e := newCompileTestEditor("")
+	e.compilationErrors = nil
+	e.cmdNextError()     // should just message, not crash
+	e.cmdPreviousError() // same
 }

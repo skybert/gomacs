@@ -47,6 +47,67 @@ func TestNewVTScreen_ScrollBotIsLastRow(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// setCell — out-of-range coordinates are a no-op
+// ---------------------------------------------------------------------------
+
+func TestSetCell_NegativeRowIsNoOp(t *testing.T) {
+	s := newVTScreen(5, 10)
+	s.setCell(-1, 0, vtCell{ch: 'x'})
+	for r := range 5 {
+		for c := range 10 {
+			if got := s.cellAt(r, c); got != vtBlank {
+				t.Fatalf("cell(%d,%d) = %+v, want unchanged blank", r, c, got)
+			}
+		}
+	}
+}
+
+func TestSetCell_NegativeColIsNoOp(t *testing.T) {
+	s := newVTScreen(5, 10)
+	s.setCell(0, -1, vtCell{ch: 'x'})
+	for r := range 5 {
+		for c := range 10 {
+			if got := s.cellAt(r, c); got != vtBlank {
+				t.Fatalf("cell(%d,%d) = %+v, want unchanged blank", r, c, got)
+			}
+		}
+	}
+}
+
+func TestSetCell_RowOverRangeIsNoOp(t *testing.T) {
+	s := newVTScreen(5, 10)
+	s.setCell(5, 0, vtCell{ch: 'x'}) // rows are 0..4
+	for r := range 5 {
+		for c := range 10 {
+			if got := s.cellAt(r, c); got != vtBlank {
+				t.Fatalf("cell(%d,%d) = %+v, want unchanged blank", r, c, got)
+			}
+		}
+	}
+}
+
+func TestSetCell_ColOverRangeIsNoOp(t *testing.T) {
+	s := newVTScreen(5, 10)
+	s.setCell(0, 10, vtCell{ch: 'x'}) // cols are 0..9
+	for r := range 5 {
+		for c := range 10 {
+			if got := s.cellAt(r, c); got != vtBlank {
+				t.Fatalf("cell(%d,%d) = %+v, want unchanged blank", r, c, got)
+			}
+		}
+	}
+}
+
+func TestSetCell_InRangeStillWrites(t *testing.T) {
+	// Sanity check that the bounds check above doesn't swallow valid writes.
+	s := newVTScreen(5, 10)
+	s.setCell(2, 3, vtCell{ch: 'x'})
+	if got := s.cellAt(2, 3).ch; got != 'x' {
+		t.Fatalf("cellAt(2,3) = %q, want 'x'", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // resize
 // ---------------------------------------------------------------------------
 

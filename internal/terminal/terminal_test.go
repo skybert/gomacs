@@ -353,6 +353,33 @@ func TestDisableCaptureStopsCapture(t *testing.T) {
 	}
 }
 
+// ---- Close -------------------------------------------------------------------
+
+// TestClose_CaptureNoop verifies that Close on a capture-mode Terminal (whose
+// screen field is nil) does not panic, and that the terminal remains usable
+// (and its capture grid untouched) afterwards — Close is documented as safe
+// to call more than once, and a headless capture terminal is the only way to
+// exercise its nil-screen guard without a real TTY.
+func TestClose_CaptureNoop(t *testing.T) {
+	term := NewCapture(10, 5)
+	term.SetCell(1, 1, 'A', syntax.Face{Fg: "red"})
+
+	term.Close()
+
+	// Terminal is still usable after Close: capture state is untouched...
+	ch, f := term.CaptureCell(1, 1)
+	if ch != 'A' || f.Fg != "red" {
+		t.Errorf("after Close: CaptureCell(1,1) = (%q, %+v), want ('A', Fg=red)", ch, f)
+	}
+	w, h := term.CaptureSize()
+	if w != 10 || h != 5 {
+		t.Errorf("after Close: CaptureSize() = (%d,%d), want (10,5)", w, h)
+	}
+
+	// ...and calling Close again must still not panic.
+	term.Close()
+}
+
 // ---- InvalidateStyleCache --------------------------------------------------
 
 func TestInvalidateStyleCacheDoesNotPanic(t *testing.T) {

@@ -8,6 +8,47 @@ import (
 	"github.com/skybert/gomacs/internal/buffer"
 )
 
+// ---------------------------------------------------------------------------
+// columnOf
+// ---------------------------------------------------------------------------
+
+// TestColumnOf covers columnOf's actual contract: it returns the number of
+// runes between pos and the start of its line (or the start of the slice).
+// It does NOT expand tabs to tabWidth — a tab counts as one column, exactly
+// like any other rune — and it operates on rune indices, so multibyte runes
+// each count as a single column regardless of their on-screen display width.
+func TestColumnOf(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		pos  int
+		want int
+	}{
+		{"start of buffer", "hello", 0, 0},
+		{"mid line", "hello world", 5, 5},
+		{"start of line after newline", "abc\ndef", 4, 0},
+		{"mid second line", "abc\ndef", 6, 2},
+		{"empty line between two newlines", "abc\n\ndef", 4, 0},
+		{"end of empty text", "", 0, 0},
+		// Tabs are counted as one rune each, not expanded to tabWidth (2 in
+		// this project) — columnOf has no notion of display width.
+		{"tabs count as one column each", "\t\tfoo", 2, 2},
+		{"position between two tabs", "\t\tfoo", 1, 1},
+		// Multibyte runes: []rune indexing means each rune — regardless of
+		// its UTF-8 byte length or terminal display width — is one column.
+		{"multibyte rune counts as one column", "héllo", 2, 2},
+		{"position after wide rune", "文x", 2, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runes := []rune(tc.text)
+			if got := columnOf(runes, tc.pos); got != tc.want {
+				t.Errorf("columnOf(%q, %d) = %d, want %d", tc.text, tc.pos, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestElispIndentLevelTopLevel(t *testing.T) {
 	// Empty text: top-level → 0.
 	if got := elispIndentLevel("", 0); got != 0 {

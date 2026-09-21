@@ -48,6 +48,20 @@ func TestDeleteTrailingWhitespace(t *testing.T) {
 	}
 }
 
+func TestDeleteTrailingWhitespaceRegion(t *testing.T) {
+	// Only the selected region (first line) should have trailing WS removed.
+	e := newTestEditor("hello   \nworld  \n")
+	b := buf(e)
+	b.SetMark(0)
+	b.SetMarkActive(true)
+	b.SetPoint(8) // end of "hello   "
+	e.cmdDeleteTrailingWhitespace()
+	want := "hello\nworld  \n"
+	if got := b.String(); got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
 func TestJoinLine(t *testing.T) {
 	e := newTestEditor("hello\nworld")
 	buf(e).SetPoint(6) // start of "world"
@@ -580,6 +594,10 @@ func TestSortLinesMessageReportsCount(t *testing.T) {
 	if !strings.Contains(e.message, "3") {
 		t.Errorf("sort-lines: expected '3' lines in message, got %q", e.message)
 	}
+	want := "a\nb\nc\n"
+	if got := b.String(); got != want {
+		t.Errorf("sort-lines no-region: want %q, got %q", want, got)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +612,10 @@ func TestDeleteDuplicateLinesMessageSet(t *testing.T) {
 	if e.message == "" {
 		t.Fatal("delete-duplicate-lines: expected message to be set")
 	}
+	want := "x\ny\n"
+	if got := b.String(); got != want {
+		t.Errorf("delete-duplicate-lines: want %q, got %q", want, got)
+	}
 }
 
 func TestDeleteDuplicateLinesMessageNoneRemoved(t *testing.T) {
@@ -603,6 +625,10 @@ func TestDeleteDuplicateLinesMessageNoneRemoved(t *testing.T) {
 	e.cmdDeleteDuplicateLines()
 	if !strings.Contains(e.message, "0") {
 		t.Errorf("delete-duplicate-lines no dups: want '0' in message, got %q", e.message)
+	}
+	want := "a\nb\nc\n"
+	if got := b.String(); got != want {
+		t.Errorf("delete-duplicate-lines no-dups: want %q, got %q", want, got)
 	}
 }
 
@@ -934,16 +960,4 @@ func TestWidenSetsMessage(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // cmdGotoLine (via minibuf done-func simulation)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// cmdWhatCursorPosition
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// cmdCountWords — extra cases
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// cmdMessages — extra cases
 // ---------------------------------------------------------------------------

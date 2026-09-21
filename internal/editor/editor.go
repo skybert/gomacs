@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +69,9 @@ type Editor struct {
 	isearchRunesBuf  *buffer.Buffer
 	isearchNeedle    []rune
 	isearchNeedleStr string
+	// isearchMemo lets the next character typed continue the scan from the match
+	// already found instead of restarting at isearchStart.
+	isearchMemo isearchFindMemo
 
 	// prefix key state (non-nil while processing a multi-key sequence)
 	prefixKeymap *keymap.Keymap
@@ -322,8 +326,12 @@ type Editor struct {
 // spanCache holds pre-computed highlighting data for a buffer.  It is
 // invalidated whenever the buffer content or mode changes.
 type spanCache struct {
-	gen   int
-	mode  string
+	gen  int
+	mode string
+	// runes is the buffer's content from offset 0 up to hiEnd — a window, not the
+	// whole buffer, so that a keystroke does not copy the tail of a large file.
+	// len(runes) == hiEnd; positions are absolute rune indices, and narrowing is
+	// not taken into account, exactly as everything else that indexes a buffer.
 	runes []rune
 	// spare is the rune slice of the previous generation.  Keeping it lets the
 	// next scan fill a slice without allocating, and — more importantly — lets
@@ -714,7 +722,7 @@ func (e *Editor) setupKeymaps() {
 	gk.Bind(keymap.MetaKey('t'), "transpose-words")
 	gk.Bind(keymap.MetaKey('^'), "join-line")
 	gk.Bind(keymap.MetaKey('q'), "fill-paragraph")
-	gk.Bind(keymap.MetaKey('$'), "ispell-word") // stub
+	gk.Bind(keymap.MetaKey('$'), "ispell-word")
 
 	// ---- marks / search / misc --------------------------------------------
 	gk.Bind(keymap.CtrlKey(' '), "set-mark-command")
@@ -2276,18 +2284,28 @@ func (e *Editor) execCommand(name string) {
 
 // pushCommandLRU records name as the most recently used command.
 // Duplicates are removed before prepending so each command appears once.
+//
+// This runs for every command the user invokes — every arrow key, every C-n —
+// so it must not allocate.  Repeating the same command is the common case and
+// returns immediately; otherwise the entry is moved to the front in place
+// instead of building a fresh slice.
 func (e *Editor) pushCommandLRU(name string) {
-	// Remove existing occurrence (if any).
-	filtered := e.commandLRU[:0]
-	for _, n := range e.commandLRU {
-		if n != name {
-			filtered = append(filtered, n)
-		}
+	if len(e.commandLRU) > 0 && e.commandLRU[0] == name {
+		return
 	}
-	e.commandLRU = append([]string{name}, filtered...)
-	if len(e.commandLRU) > commandLRUMax {
-		e.commandLRU = e.commandLRU[:commandLRUMax]
+	if i := slices.Index(e.commandLRU, name); i > 0 {
+		// Promote: shift [0, i) one to the right and drop name's old slot.
+		copy(e.commandLRU[1:i+1], e.commandLRU[:i])
+		e.commandLRU[0] = name
+		return
 	}
+	// New command: make room at the front, evicting the oldest entry once the
+	// list is full.
+	if len(e.commandLRU) < commandLRUMax {
+		e.commandLRU = append(e.commandLRU, "")
+	}
+	copy(e.commandLRU[1:], e.commandLRU[:len(e.commandLRU)-1])
+	e.commandLRU[0] = name
 }
 
 // ---------------------------------------------------------------------------
@@ -2300,6 +2318,7 @@ func (e *Editor) startIsearch(forward bool) {
 	e.isearchFwd = forward
 	e.isearchStr = ""
 	e.isearchStart = e.ActiveBuffer().Point()
+	e.isearchMemo = isearchFindMemo{}
 }
 
 // isearchHandleKey processes a key during an isearch session.
@@ -2383,6 +2402,7 @@ func (e *Editor) isearchClearCaches() {
 	e.isearchRunesBuf = nil
 	e.isearchNeedle = nil
 	e.isearchNeedleStr = ""
+	e.isearchMemo = isearchFindMemo{}
 }
 
 // isearch minibuffer messages.  Reaching either end of the buffer is reported
@@ -2395,7 +2415,36 @@ const (
 	isearchBufEndMsg  = "isearch: end of buffer"
 )
 
+// isearchFindMemo records what the last isearchFind was looking for and where it
+// found it, so that typing one more character can pick up where that scan left
+// off instead of starting over at isearchStart.
+//
+// Everything the answer depends on is recorded, because any of it can change
+// mid-search: the user can edit the buffer, switch buffers, reverse direction
+// with C-r, or back up over a character.  A memo only applies when every field
+// still matches and the recorded query is a prefix of the current one.
+type isearchFindMemo struct {
+	valid bool
+	query string
+	buf   *buffer.Buffer
+	gen   int
+	start int
+	fwd   bool
+	fold  bool
+	// pos is the start offset of the match that was found, or -1 if the query
+	// failed.
+	pos int
+}
+
 // isearchFind searches for e.isearchStr from e.isearchStart.
+//
+// Typing a character can resume from the previous match rather than rescanning
+// from isearchStart.  Appending to a query only ever removes matches: wherever
+// the longer query matches, its prefix matches too.  So the first match of the
+// longer query cannot lie before the first match of the prefix (nor after it,
+// scanning backwards), and if the prefix found nothing at all then neither can
+// the longer query.  Anything else — a backspace, an edit, a change of
+// direction — falls back to a full scan from isearchStart.
 func (e *Editor) isearchFind() {
 	buf := e.ActiveBuffer()
 	runes := e.isearchGetRunes(buf)
@@ -2403,6 +2452,7 @@ func (e *Editor) isearchFind() {
 
 	if len(needle) == 0 {
 		buf.SetPoint(e.isearchStart)
+		e.isearchMemo = isearchFindMemo{}
 		return
 	}
 
@@ -2411,23 +2461,61 @@ func (e *Editor) isearchFind() {
 		match = runesMatchFold
 	}
 
+	gen := buf.ChangeGen()
+	memo := isearchFindMemo{
+		valid: true,
+		query: e.isearchStr,
+		buf:   buf,
+		gen:   gen,
+		start: e.isearchStart,
+		fwd:   e.isearchFwd,
+		fold:  e.isSearchCaseFold,
+	}
+
 	start := e.isearchStart
+	if m := e.isearchMemo; m.valid && m.buf == buf && m.gen == gen &&
+		m.start == e.isearchStart && m.fwd == e.isearchFwd &&
+		m.fold == e.isSearchCaseFold && strings.HasPrefix(e.isearchStr, m.query) {
+		if m.pos < 0 {
+			// The shorter query already searched the whole range and found
+			// nothing; a longer one cannot do better.
+			memo.pos = -1
+			e.isearchMemo = memo
+			e.Message(isearchFailMsg, e.isearchStr)
+			return
+		}
+		start = m.pos
+	}
+
+	found := -1
 	if e.isearchFwd {
 		for i := start; i <= len(runes)-len(needle); i++ {
 			if match(runes[i:], needle) {
-				buf.SetPoint(i + len(needle))
-				return
+				found = i
+				break
 			}
 		}
 	} else {
 		for i := start; i >= 0; i-- {
 			if i+len(needle) <= len(runes) && match(runes[i:], needle) {
-				buf.SetPoint(i)
-				return
+				found = i
+				break
 			}
 		}
 	}
-	e.Message(isearchFailMsg, e.isearchStr)
+
+	memo.pos = found
+	e.isearchMemo = memo
+
+	if found < 0 {
+		e.Message(isearchFailMsg, e.isearchStr)
+		return
+	}
+	if e.isearchFwd {
+		buf.SetPoint(found + len(needle))
+	} else {
+		buf.SetPoint(found)
+	}
 }
 
 // isearchYankWord extends the search string with the next word of buffer text
@@ -2764,18 +2852,44 @@ func firstDiffRune(a, b []rune, limit int) int {
 	return limit
 }
 
+// scratchCap is the capacity to give a rune scratch slice that has to hold n
+// runes: a little over, because typing grows the region one rune at a time and
+// buffer.AppendRunesRange allocates exactly what it is asked for.  The headroom
+// is what keeps a keystroke from reallocating the scratch slice every time.
+func scratchCap(n int) int { return n + n/8 + 64 }
+
 // growScratch returns a zero-length slice with room for at least n runes,
 // reusing dst when it is already big enough.
 //
-// buffer.AppendRunes allocates exactly what it needs, so handing it a slice that
-// is one rune too small would copy the whole buffer.  Typing grows the buffer one
-// rune at a time, so the extra headroom here is what keeps a keystroke in a large
-// file from reallocating a megabytes-long rune slice every time.
+// buffer.AppendRunesRange allocates exactly what it needs, so handing it a slice
+// that is one rune too small would copy the whole window again.  Typing grows the
+// buffer one rune at a time, so the extra headroom here is what keeps a keystroke
+// in a large file from reallocating the rune slice every time.
 func growScratch(dst []rune, n int) []rune {
 	if cap(dst) >= n {
 		return dst[:0]
 	}
-	return make([]rune, 0, n+n/8+64)
+	return make([]rune, 0, scratchCap(n))
+}
+
+// extendRunes returns dst with buf's runes up to end appended, keeping the runes
+// dst already holds.  It is the scrolling case of the span cache: the content has
+// not changed, so the prefix already copied is still valid and only the newly
+// needed tail has to be fetched.
+//
+// The over-allocation matters as much as the append does — buffer.AppendRunesRange
+// would otherwise grow the slice to exactly the new length, so every screenful of
+// scrolling would copy everything above it again.
+func extendRunes(buf *buffer.Buffer, dst []rune, end int) []rune {
+	if len(dst) >= end {
+		return dst
+	}
+	if cap(dst) < end {
+		grown := make([]rune, len(dst), scratchCap(end))
+		copy(grown, dst)
+		dst = grown
+	}
+	return buf.AppendRunesRange(dst, len(dst), end)
 }
 
 // getSpanCacheUpTo returns cached syntax spans that are complete for at least
@@ -2794,6 +2908,17 @@ func growScratch(dst []rune, n int) []rune {
 // keystroke costs a few thousand runes of scanning rather than everything from
 // the top of the file.  A highlighter that cannot resume is still rescanned from
 // offset 0.
+//
+// Only [0, hiEnd) of the buffer is copied out, so the highlighter sees a buffer
+// that appears to end at hiEnd.  That is safe because hiEnd is at least
+// spanCacheMargin runes past anything a caller looks at (or is the real end of
+// the buffer): a construct left open at the artificial end — a raw string, a
+// block comment, a fence, even an identifier cut in half — can only mis-colour
+// text within the last token or line before hiEnd, which is thousands of runes
+// off screen.  Extending the cache later throws that tail away rather than
+// trusting it: the scan restarts from the newest checkpoint, and because no span
+// straddles a checkpoint (syntax.ScanState.Pos), the truncated tail always lies
+// after the last one and is recomputed against the longer rune slice.
 func (e *Editor) getSpanCacheUpTo(buf *buffer.Buffer, wantEnd int) *spanCache {
 	if e.spanCaches == nil {
 		e.spanCaches = make(map[*buffer.Buffer]*spanCache)
@@ -2823,21 +2948,27 @@ func (e *Editor) getSpanCacheUpTo(buf *buffer.Buffer, wantEnd int) *spanCache {
 	}
 	hiEnd = min(hiEnd, bufLen)
 
-	// Materialise the buffer's runes.  When the content has not changed the
-	// cached slice is still correct; otherwise fill the previous generation's
-	// slice, which leaves c.runes intact for the comparison below and reuses the
-	// allocation.
+	// Materialise the runes the scan needs — [0, hiEnd), not the whole buffer.
+	// Copying the tail of a large file on every keystroke cost more than the
+	// bounded highlighting it was feeding, and nothing reads past hiEnd: the scan
+	// stops there and the renderer only indexes as far as the cache claims to
+	// cover.
+	//
+	// When the content has not changed the prefix already copied is still
+	// correct and only the new tail is fetched; otherwise fill the previous
+	// generation's slice, which leaves c.runes intact for the comparison below
+	// and reuses the allocation.
 	var runes, spare []rune
 	switch {
 	case unchanged:
-		runes, spare = c.runes, c.spare
+		runes, spare = extendRunes(buf, c.runes, hiEnd), c.spare
 	case c != nil:
-		runes, spare = buf.AppendRunes(growScratch(c.spare, bufLen)), c.runes
+		runes, spare = buf.AppendRunesRange(growScratch(c.spare, hiEnd), 0, hiEnd), c.runes
 	default:
-		runes = buf.AppendRunes(growScratch(nil, bufLen))
+		runes = buf.AppendRunesRange(growScratch(nil, hiEnd), 0, hiEnd)
 	}
-	// buf.Len() counts runes, but guard anyway so a stale length cannot make the
-	// highlighter scan past the text it was handed.
+	// The scan must not be told to read past the text it was handed.  This is a
+	// guard rather than a correction: the copy above is sized to hiEnd exactly.
 	hiEnd = min(hiEnd, len(runes))
 
 	var spans []syntax.Span
@@ -2853,6 +2984,14 @@ func (e *Editor) getSpanCacheUpTo(buf *buffer.Buffer, wantEnd int) *spanCache {
 			// describes the buffer it was taken from.
 			diff := last
 			if !unchanged {
+				// Both slices hold their generation's content from offset 0, so
+				// the comparison is apples to apples.  firstDiffRune clamps the
+				// limit to the shorter of the two: when this scan needs a
+				// narrower window than the cached one covered, the answer is
+				// capped at the new window's end, which keeps fewer checkpoints
+				// than the true first difference would — conservative, and
+				// exactly the checkpoints this scan can use anyway.  It also
+				// bounds the comparison by the window rather than by the file.
 				diff = firstDiffRune(c.runes, runes, last)
 			}
 			keep := 0

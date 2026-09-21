@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -733,22 +734,6 @@ func TestCmdQueryReplace_EmptyFromAborts(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// cmdImenu (no entries)
-// ---------------------------------------------------------------------------
-
-func TestCmdImenu_NoEntries(t *testing.T) {
-	e := newTestEditor("hello world")
-	// fundamental mode has no imenu entries.
-	e.cmdImenu()
-	if e.minibufActive {
-		t.Error("cmdImenu with no entries: minibuf should not be active")
-	}
-	if e.message == "" {
-		t.Error("cmdImenu with no entries: expected a message")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // OpenFile / Close / handleResize
 // ---------------------------------------------------------------------------
 
@@ -783,6 +768,15 @@ func TestClose_NoTerminalSafe(t *testing.T) {
 	e := newTestEditor("")
 	e.lspConns = make(map[string]*lspConn)
 	// term is nil; Close must not panic.
+	e.Close()
+}
+
+func TestClose_WithCaptureTerminalSafe(t *testing.T) {
+	// newCapTestEditor sets e.term to a headless capture terminal (its
+	// underlying tcell.Screen is nil), so this exercises the e.term != nil
+	// branch of Editor.Close() — and, transitively, the nil-screen guard in
+	// terminal.Terminal.Close() — without a real TTY.
+	e := newCapTestEditor("")
 	e.Close()
 }
 
@@ -4803,6 +4797,45 @@ func TestApplyVisualLinesDebugReplSuffixDoesNotWrap(t *testing.T) {
 	}
 }
 
+// TestApplyVisualLinesNoWrapModes pins the spec requirement that vc-grep hits
+// are never wrapped ("visual line mode should not be active in vc-grep
+// buffers"), and covers every other mode whose lines are position-bearing —
+// a wrapped "file.go:12: hit" or stack frame is unreadable, so each of these
+// must keep wrapCol at 0 even while visual-lines is on globally.
+func TestApplyVisualLinesNoWrapModes(t *testing.T) {
+	modes := []string{
+		"vc-grep", "lsp-refs", "vc-status", "vc-log", "vc-show", "diff",
+		"compilation", "vc-fixup-select", "shell", "debug-locals", "debug-stack",
+	}
+	for _, mode := range modes {
+		e := newTestEditor("internal/editor/editor.go:4242: a hit line long enough to wrap\n")
+		e.visualLines = true
+		e.visualLinesSynced = false
+		buf(e).SetMode(mode)
+		if got := buf(e).Mode(); got != mode {
+			t.Fatalf("SetMode(%q) did not stick, got %q", mode, got)
+		}
+		e.applyVisualLines()
+		if got := e.activeWin.WrapCol(); got != 0 {
+			t.Errorf("mode %q: wrapCol = %d, want 0 (no wrapping)", mode, got)
+		}
+	}
+}
+
+// TestApplyVisualLinesWrapsOrdinaryBuffer is the counterpart: a normal code
+// buffer still wraps when visual-lines is on, so the no-wrap list above is not
+// accidentally disabling wrapping everywhere.
+func TestApplyVisualLinesWrapsOrdinaryBuffer(t *testing.T) {
+	e := newTestEditor("package main\n")
+	e.visualLines = true
+	e.visualLinesSynced = false
+	buf(e).SetMode("go")
+	e.applyVisualLines()
+	if got := e.activeWin.WrapCol(); got == 0 {
+		t.Errorf("go-mode wrapCol = 0, want non-zero (wrapping enabled)")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // conf-mode file association
 // ---------------------------------------------------------------------------
@@ -5300,4 +5333,978 @@ func TestAutoRevertShowsNewContentInSameFrame(t *testing.T) {
 	if row := captureRow(t, e, 0); !strings.Contains(row, "changed on disk") {
 		t.Errorf("reverted content not rendered in the same frame, row 0 = %q", row)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// span cache: the rune window
+// ---------------------------------------------------------------------------
+
+// facesUpTo resolves the face of every rune position in [0, limit) the way the
+// renderer does.  Comparing faces rather than spans is what the correctness
+// argument actually needs: a windowed scan is allowed to report a different End
+// for the token it was cut off in, as long as no position a caller can see
+// changes colour.
+func facesUpTo(spans []syntax.Span, limit int) []syntax.Face {
+	out := make([]syntax.Face, max(limit, 0))
+	for i := range out {
+		out[i] = faceAtPos(spans, i)
+	}
+	return out
+}
+
+// visibleFacesBounded renders through the ordinary bounded path and returns the
+// faces of the visible region plus the cache it used.
+func visibleFacesBounded(e *Editor) ([]syntax.Face, *spanCache) {
+	b := buf(e)
+	end := visibleEndOf(e.activeWin)
+	c := e.getSpanCacheUpTo(b, end)
+	return facesUpTo(c.spans, end), c
+}
+
+// visibleFacesFull primes a whole-buffer cache first, so the faces come from a
+// scan that never had to guess what lay beyond its window.
+func visibleFacesFull(e *Editor) []syntax.Face {
+	b := buf(e)
+	end := visibleEndOf(e.activeWin)
+	c := e.getSpanCache(b)
+	return facesUpTo(c.spans, end)
+}
+
+// assertSameFaces compares two face runs and reports the first position that
+// differs.  It also fails when nothing was coloured at all, which would make the
+// comparison vacuous.
+func assertSameFaces(t *testing.T, got, want []syntax.Face, context string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: compared %d positions against %d", context, len(got), len(want))
+	}
+	coloured := 0
+	for _, f := range want {
+		if f != syntax.FaceDefault && f != (syntax.Face{}) {
+			coloured++
+		}
+	}
+	if coloured == 0 {
+		t.Fatalf("%s: the reference produced no colour at all; the comparison proves nothing", context)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("%s: face at rune %d is %+v, want %+v", context, i, got[i], want[i])
+		}
+	}
+}
+
+// TestSpanCacheRunesAreWindowed pins the change itself: the cache holds exactly
+// the runes it claims to have highlighted, not the whole buffer.  Without this
+// every keystroke copies the tail of the file that nobody can see.
+func TestSpanCacheRunesAreWindowed(t *testing.T) {
+	e, b, _ := newSpanCacheTestEditor(t, goSource(4000))
+	c := e.getSpanCacheUpTo(b, 100)
+	if len(c.runes) != c.hiEnd {
+		t.Errorf("cache holds %d runes for a highlighted range of %d; the two must agree",
+			len(c.runes), c.hiEnd)
+	}
+	if len(c.runes) >= b.Len() {
+		t.Errorf("cache copied %d of %d runes; a small request must not materialise the buffer",
+			len(c.runes), b.Len())
+	}
+	// A full-buffer request does need everything.
+	full := e.getSpanCache(b)
+	if len(full.runes) != b.Len() {
+		t.Errorf("full-buffer cache holds %d runes, want %d", len(full.runes), b.Len())
+	}
+}
+
+// TestSpanCacheWindowGrowsByAppending checks the scrolling path: the runes
+// already copied are kept and only the new tail is fetched, so paging down does
+// not re-copy everything above the window.
+func TestSpanCacheWindowGrowsByAppending(t *testing.T) {
+	e, b, _ := newSpanCacheTestEditor(t, goSource(4000))
+	first := e.getSpanCacheUpTo(b, 100)
+	prefix := append([]rune(nil), first.runes...)
+
+	second := e.getSpanCacheUpTo(b, first.hiEnd+1)
+	if second.hiEnd <= first.hiEnd {
+		t.Fatalf("hiEnd did not grow: %d -> %d", first.hiEnd, second.hiEnd)
+	}
+	if len(second.runes) != second.hiEnd {
+		t.Errorf("extended cache holds %d runes for a range of %d", len(second.runes), second.hiEnd)
+	}
+	for i, r := range prefix {
+		if second.runes[i] != r {
+			t.Fatalf("extending the window changed rune %d: %q -> %q", i, r, second.runes[i])
+		}
+	}
+	// The tail really is buffer content, not zero runes left by a resize.
+	want := b.Substring(0, second.hiEnd)
+	if got := string(second.runes); got != want {
+		t.Errorf("extended window does not match the buffer over [0, %d)", second.hiEnd)
+	}
+}
+
+// TestSpanCacheWindowedFacesMatchFullScan is the correctness guard for the
+// windowing: for a buffer where the window covers only part of the file, every
+// visible rune must get the face a whole-buffer highlight would give it.  The
+// cases that matter are the ones where multi-line state is opened far above the
+// window — that is what the checkpoints exist for.
+func TestSpanCacheWindowedFacesMatchFullScan(t *testing.T) {
+	multi := goSourceWithMultiLineState()
+	cases := []struct {
+		name       string
+		src        string
+		mode       string
+		scrollLine int
+		// wantWindowed says the bounded cache must really have stopped short of
+		// the end of the buffer, so the case is not silently comparing two
+		// identical full scans.
+		wantWindowed bool
+	}{
+		{"small buffer", goSource(3), "go", 1, false},
+		{"large buffer at the top", goSource(4000), "go", 1, true},
+		// The window at the very end needs the whole file copied anyway, so
+		// there is nothing to window here; the case is kept as a check that the
+		// degenerate range is handled.
+		{"large buffer near the end", goSource(4000), "go", 4000*8 - 30, false},
+		{"large buffer in the middle", goSource(4000), "go", 4000 * 4, true},
+		{"block comment far above the window", multi, "go", 60, true},
+		{"raw string far above the window", multi, "go", 100, true},
+		{"markdown fence far above the window", markdownSourceWithFences(), "markdown", 400, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bounded := newCapTestEditor(tc.src)
+			buf(bounded).SetMode(tc.mode)
+			bounded.activeWin.SetScrollLine(tc.scrollLine)
+			got, c := visibleFacesBounded(bounded)
+			if tc.wantWindowed && len(c.runes) >= buf(bounded).Len() {
+				t.Fatalf("the bounded path copied all %d runes; the case does not exercise windowing",
+					len(c.runes))
+			}
+
+			reference := newCapTestEditor(tc.src)
+			buf(reference).SetMode(tc.mode)
+			reference.activeWin.SetScrollLine(tc.scrollLine)
+			want := visibleFacesFull(reference)
+
+			assertSameFaces(t, got, want, tc.name)
+		})
+	}
+}
+
+// TestSpanCacheWindowedFacesMatchAfterEditsAroundWindow covers the three places
+// an edit can land relative to the window the cache holds: before it, inside it,
+// and past its end.  Each one exercises a different branch of the resume logic,
+// and each must still draw what a full scan would.
+func TestSpanCacheWindowedFacesMatchAfterEditsAroundWindow(t *testing.T) {
+	src := goSourceWithMultiLineState()
+	e := newCapTestEditor(src)
+	b := buf(e)
+	b.SetMode("go")
+	// Put the window well into the file so there is text on both sides of it.
+	e.activeWin.SetScrollLine(b.LineCount() / 2)
+	_, c := visibleFacesBounded(e)
+	if c.hiEnd >= b.Len() {
+		t.Fatalf("the primed cache covers the whole buffer (%d); nothing lies past the window", b.Len())
+	}
+	winStart := e.activeWin.ViewLines()[0].StartPos
+	hiEnd := c.hiEnd
+
+	edits := []struct {
+		name string
+		pos  int
+	}{
+		{"before the window", winStart / 2},
+		{"just before the window", max(winStart-5, 0)},
+		{"inside the window", winStart + 10},
+		{"past the highlighted end", min(hiEnd+100, b.Len())},
+		{"at the very end", b.Len()},
+	}
+	for _, ed := range edits {
+		t.Run(ed.name, func(t *testing.T) {
+			b.Insert(ed.pos, 'z')
+			defer func() {
+				b.Delete(ed.pos, 1)
+				e.getSpanCacheUpTo(b, visibleEndOf(e.activeWin))
+			}()
+
+			got, _ := visibleFacesBounded(e)
+
+			reference := newCapTestEditor(b.String())
+			buf(reference).SetMode("go")
+			reference.activeWin.SetScrollLine(e.activeWin.ScrollLine())
+			want := visibleFacesFull(reference)
+
+			assertSameFaces(t, got, want, ed.name)
+		})
+	}
+}
+
+// TestSpanCacheWindowedFacesMatchWhenNarrowed checks the case the windowing is
+// least obviously safe for: buffer positions stay absolute under narrowing, and
+// buffer.AppendRunesRange is deliberately not narrowing-aware, so a narrowed
+// region far into a large file must still be coloured from the top of the file.
+func TestSpanCacheWindowedFacesMatchWhenNarrowed(t *testing.T) {
+	src := goSourceWithMultiLineState()
+
+	narrow := func(e *Editor) {
+		b := buf(e)
+		b.SetMode("go")
+		// Narrow to a region well past the multi-line constructs at the top.
+		lo := b.Len() * 3 / 4
+		hi := min(lo+4000, b.Len())
+		b.Narrow(lo, hi)
+		b.SetPoint(lo)
+		line, _ := b.LineCol(lo)
+		e.activeWin.SetScrollLine(line)
+	}
+
+	bounded := newCapTestEditor(src)
+	narrow(bounded)
+	got, c := visibleFacesBounded(bounded)
+	if !buf(bounded).Narrowed() {
+		t.Fatal("the buffer is not narrowed; the case proves nothing")
+	}
+	if len(c.runes) >= buf(bounded).Len() {
+		t.Fatalf("the bounded path copied all %d runes while narrowed", len(c.runes))
+	}
+
+	reference := newCapTestEditor(src)
+	narrow(reference)
+	want := visibleFacesFull(reference)
+
+	assertSameFaces(t, got, want, "narrowed")
+}
+
+// TestSpanCacheWindowedRendersSameCellsNearEnd is the end-to-end version for the
+// case the audit called out: a window sitting far into a large file, with a block
+// comment and a raw string opened near the top.  Both editors draw through
+// Redraw, so the renderer's own indexing of the windowed rune slice is covered
+// too.
+func TestSpanCacheWindowedRendersSameCellsNearEnd(t *testing.T) {
+	// A big file whose top holds the multi-line state, so the window near the
+	// bottom is thousands of runes past anything the highlighter can see in one
+	// windowed scan.
+	src := goSourceWithMultiLineState() + goSource(3000)
+	for _, frac := range []int{50, 75, 90, 99} {
+		t.Run(fmt.Sprintf("at%d%%", frac), func(t *testing.T) {
+			bounded := newCapTestEditor(src)
+			buf(bounded).SetMode("go")
+			line := max(buf(bounded).LineCount()*frac/100, 1)
+			bounded.activeWin.SetScrollLine(line)
+			bounded.Redraw()
+			if c := bounded.spanCaches[buf(bounded)]; c == nil {
+				t.Fatal("no span cache after Redraw")
+			} else if len(c.runes) != c.hiEnd {
+				t.Fatalf("cache holds %d runes for a range of %d", len(c.runes), c.hiEnd)
+			}
+
+			reference := newCapTestEditor(src)
+			buf(reference).SetMode("go")
+			reference.activeWin.SetScrollLine(line)
+			reference.getSpanCache(buf(reference))
+			reference.Redraw()
+
+			got := captureFaces(t, bounded)
+			want := captureFaces(t, reference)
+			assertSameFaces(t, got, want, fmt.Sprintf("scroll to %d%%", frac))
+		})
+	}
+}
+
+// TestSpanCacheTruncatedTailIsNotTrusted is the mutation guard on the windowing
+// argument.  A scan cut off inside a raw string reports that string as running
+// to the cut, which is wrong for the text beyond it.  Extending the cache must
+// throw that span away and rescan, not keep it: the last checkpoint always lies
+// before the truncated token, so spans from it onwards are discarded.
+func TestSpanCacheTruncatedTailIsNotTrusted(t *testing.T) {
+	// A raw string that starts inside the first window and runs far past it, so
+	// the first scan is guaranteed to be cut off in the middle of it.  Ordinary
+	// code follows, which must not end up coloured as string.
+	var sb strings.Builder
+	sb.WriteString("package main\n\nconst big = `")
+	for i := range 4000 {
+		fmt.Fprintf(&sb, "raw line %d with func and return in it\n", i)
+	}
+	sb.WriteString("`\n\n")
+	sb.WriteString(goSource(600))
+	src := sb.String()
+
+	e := newCapTestEditor(src)
+	b := buf(e)
+	b.SetMode("go")
+	// Prime a window that ends inside the raw string.
+	first := e.getSpanCacheUpTo(b, 100)
+	// Confirm the premise: the last span is the raw string, cut off at the
+	// window's end rather than at its real closing backquote.  Without this the
+	// test could pass while proving nothing.
+	if n := len(first.spans); n == 0 {
+		t.Fatal("the primed scan produced no spans")
+	} else if last := first.spans[n-1]; last.End != first.hiEnd || last.Face != syntax.FaceString {
+		t.Fatalf("expected the window to be cut off inside the raw string, got last span %v (hiEnd=%d)",
+			last, first.hiEnd)
+	}
+	// Now ask for the code after the raw string: the truncated span from the
+	// first scan must not survive into this one.
+	got := e.getSpanCache(b)
+
+	ref := newCapTestEditor(src)
+	buf(ref).SetMode("go")
+	want := ref.getSpanCache(buf(ref))
+
+	if len(got.spans) != len(want.spans) {
+		t.Fatalf("extended cache holds %d spans, a scan from scratch gives %d",
+			len(got.spans), len(want.spans))
+	}
+	for i := range got.spans {
+		if got.spans[i] != want.spans[i] {
+			t.Fatalf("span %d is %v, want %v", i, got.spans[i], want.spans[i])
+		}
+	}
+}
+
+// TestScratchCapLeavesHeadroom documents why growScratch over-allocates: a slice
+// sized exactly would be regrown — and the whole window recopied — by the very
+// next keystroke.
+func TestScratchCapLeavesHeadroom(t *testing.T) {
+	for _, n := range []int{0, 1, 100, 100000} {
+		if got := scratchCap(n); got <= n {
+			t.Errorf("scratchCap(%d) = %d, want more than %d", n, got, n)
+		}
+	}
+	s := growScratch(nil, 1000)
+	if len(s) != 0 {
+		t.Errorf("growScratch returned length %d, want 0", len(s))
+	}
+	if cap(s) < 1000 {
+		t.Errorf("growScratch capacity %d, want at least 1000", cap(s))
+	}
+	reused := growScratch(s[:5], 1000)
+	if cap(reused) != cap(s) {
+		t.Error("growScratch reallocated a slice that was already big enough")
+	}
+}
+
+// TestExtendRunesKeepsPrefixAndAppends covers the helper directly, including the
+// no-op case and the case where it has to grow.
+func TestExtendRunesKeepsPrefixAndAppends(t *testing.T) {
+	b := buffer.NewWithContent("*t*", "søen er blå og dyp")
+	n := b.Len()
+
+	got := extendRunes(b, nil, 5)
+	if string(got) != b.Substring(0, 5) {
+		t.Errorf("extendRunes from empty = %q, want %q", string(got), b.Substring(0, 5))
+	}
+	got = extendRunes(b, got, n)
+	if string(got) != b.String() {
+		t.Errorf("extendRunes to the end = %q, want %q", string(got), b.String())
+	}
+	// Already long enough: returned untouched.
+	same := extendRunes(b, got, 3)
+	if len(same) != n {
+		t.Errorf("extendRunes shortened the slice to %d, want %d left alone", len(same), n)
+	}
+}
+
+// BenchmarkSpanCacheWindowMaterialise isolates what the windowing saves: the
+// rune copy a keystroke performs when the window sits at the top of a large
+// file.  Compare against BenchmarkSpanCacheTextMaterialise, which copies the
+// whole buffer as the old code did.
+func BenchmarkSpanCacheWindowMaterialise(bench *testing.B) {
+	src := goSource(benchGoFuncs)
+	e := newTestEditor(src)
+	b := buf(e)
+	scratch := make([]rune, 0, 4096)
+	bench.ReportAllocs()
+	bench.ResetTimer()
+	for range bench.N {
+		b.Insert(0, 'x')
+		b.Delete(0, 1)
+		scratch = b.AppendRunesRange(scratch[:0], 0, 4096)
+		if len(scratch) == 0 {
+			bench.Fatal("empty window")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isearch: incremental scanning
+// ---------------------------------------------------------------------------
+
+// isearchOracleFind is the pre-optimisation isearchFind transcribed as a pure
+// function: a full scan from start, with no memory of any earlier query.  It
+// returns the point isearchFind has to leave the buffer at, or -1 when the
+// search fails — in which case the point is left wherever it was.
+func isearchOracleFind(runes, needle []rune, start int, fwd, fold bool) int {
+	if len(needle) == 0 {
+		return start
+	}
+	match := runesMatch
+	if fold {
+		match = runesMatchFold
+	}
+	if fwd {
+		for i := start; i <= len(runes)-len(needle); i++ {
+			if match(runes[i:], needle) {
+				return i + len(needle)
+			}
+		}
+		return -1
+	}
+	for i := start; i >= 0; i-- {
+		if i+len(needle) <= len(runes) && match(runes[i:], needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+// isearchKey feeds one key to the isearch handler.  With memo == false the
+// resume memo is cleared first, which puts isearchFind back on its
+// pre-optimisation path — a full scan from isearchStart every time — so the two
+// algorithms can be compared key for key.
+func isearchKey(e *Editor, ke terminal.KeyEvent, memo bool) {
+	if !memo {
+		e.isearchMemo = isearchFindMemo{}
+	}
+	e.isearchHandleKey(ke)
+}
+
+// TestIsearchIncrementalMatchesFullScanOracle types each query one rune at a
+// time and checks the point after every prefix against a full scan from
+// isearchStart.  Resuming from the previous match must never change where the
+// search lands, nor whether it fails.
+func TestIsearchIncrementalMatchesFullScanOracle(t *testing.T) {
+	content := "alpha beta ALPHA Beta alphabet\nalpha soup\nbetamax\nsøen er blå, søen er dyp\n" +
+		strings.Repeat("filler line with alpha and beta in it\n", 40) +
+		"tail alphabet\n"
+	cases := []struct {
+		name  string
+		query string
+		start int
+		fwd   bool
+		fold  bool
+	}{
+		{"forward from the top", "alpha", 0, true, true},
+		{"forward case sensitive", "ALPHA", 0, true, false},
+		{"forward case folded finds the first spelling", "alpha", 0, true, true},
+		{"forward from the middle", "beta", 300, true, true},
+		{"forward self-overlapping", "aa", 0, true, true},
+		{"forward failing query", "zzzz-not-here", 0, true, true},
+		{"forward query that fails only at the last rune", "alphabetq", 0, true, true},
+		{"backward from the end", "alpha", len(content) - 1, false, true},
+		{"backward case sensitive", "Beta", len(content) - 1, false, false},
+		{"backward failing query", "qqq", len(content) - 1, false, true},
+		{"multibyte forward", "blå", 0, true, true},
+		{"multibyte backward", "søen", len([]rune(content)) - 1, false, true},
+		{"empty-ish single rune", "a", 0, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEditor(content)
+			b := buf(e)
+			e.isSearchCaseFold = tc.fold
+			start := min(tc.start, b.Len())
+			b.SetPoint(start)
+			e.startIsearch(tc.fwd)
+			runes := []rune(content)
+
+			// The old code left the point untouched on a failed search, so the
+			// expectation has to be carried forward.
+			wantPoint := start
+			for i, r := range []rune(tc.query) {
+				isearchKey(e, keRune(r, 0), true)
+				needle := []rune(tc.query)[:i+1]
+				if got := isearchOracleFind(runes, needle, start, tc.fwd, tc.fold); got >= 0 {
+					wantPoint = got
+				}
+				if b.Point() != wantPoint {
+					t.Fatalf("after typing %q: point = %d, want %d", string(needle), b.Point(), wantPoint)
+				}
+			}
+			// Backspacing all the way out must retrace the same path.
+			for i := len([]rune(tc.query)) - 1; i >= 0; i-- {
+				isearchKey(e, terminal.KeyEvent{Key: tcell.KeyBackspace}, true)
+				needle := []rune(tc.query)[:i]
+				if got := isearchOracleFind(runes, needle, start, tc.fwd, tc.fold); got >= 0 {
+					wantPoint = got
+				}
+				if b.Point() != wantPoint {
+					t.Fatalf("after backspacing to %q: point = %d, want %d",
+						string(needle), b.Point(), wantPoint)
+				}
+			}
+		})
+	}
+}
+
+// isearchScriptResult is everything a test can observe about an isearch session.
+type isearchScriptResult struct {
+	point   int
+	str     string
+	fwd     bool
+	message string
+	active  bool
+}
+
+// runIsearchScript drives a fresh editor over content through the given keys and
+// returns the observable state after each one.  memo selects the incremental
+// isearchFind or the full-rescan behaviour it replaced.
+func runIsearchScript(content string, fold, forward bool, startPos int,
+	keys []terminal.KeyEvent, memo bool) []isearchScriptResult {
+	e := newTestEditor(content)
+	b := buf(e)
+	e.isSearchCaseFold = fold
+	b.SetPoint(min(startPos, b.Len()))
+	e.startIsearch(forward)
+
+	out := make([]isearchScriptResult, 0, len(keys))
+	for _, ke := range keys {
+		isearchKey(e, ke, memo)
+		out = append(out, isearchScriptResult{
+			point:   b.Point(),
+			str:     e.isearchStr,
+			fwd:     e.isearchFwd,
+			message: e.message,
+			active:  e.isearching,
+		})
+	}
+	return out
+}
+
+// TestIsearchScriptsMatchFullRescan is the differential test over whole isearch
+// sessions: repeated C-s, reversing with C-r, C-w word yanks, backspacing and
+// failing queries.  The incremental scan must produce the same point, the same
+// query and the same minibuffer message at every step as the full rescan did.
+func TestIsearchScriptsMatchFullRescan(t *testing.T) {
+	ctrlS := terminal.KeyEvent{Key: tcell.KeyCtrlS}
+	ctrlR := terminal.KeyEvent{Key: tcell.KeyCtrlR}
+	ctrlW := terminal.KeyEvent{Key: tcell.KeyCtrlW}
+	bs := terminal.KeyEvent{Key: tcell.KeyBackspace}
+	typed := func(s string) []terminal.KeyEvent {
+		out := make([]terminal.KeyEvent, 0, len(s))
+		for _, r := range s {
+			out = append(out, keRune(r, 0))
+		}
+		return out
+	}
+	join := func(parts ...[]terminal.KeyEvent) []terminal.KeyEvent {
+		var out []terminal.KeyEvent
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+
+	content := "CamelCase here\nalpha beta gamma\nALPHA BETA\n" +
+		strings.Repeat("alpha beta gamma delta\n", 30) +
+		"alpha at the very end\n"
+	total := len([]rune(content))
+
+	cases := []struct {
+		name    string
+		fold    bool
+		forward bool
+		start   int
+		keys    []terminal.KeyEvent
+	}{
+		{"type then repeat forward", true, true, 0,
+			join(typed("alpha"), []terminal.KeyEvent{ctrlS, ctrlS, ctrlS})},
+		{"repeat past the end wraps", true, true, 0,
+			join(typed("alpha"), func() []terminal.KeyEvent {
+				out := make([]terminal.KeyEvent, 0, 40)
+				for range 40 {
+					out = append(out, ctrlS)
+				}
+				return out
+			}())},
+		{"reverse direction", true, true, 0,
+			join(typed("beta"), []terminal.KeyEvent{ctrlS, ctrlS, ctrlR, ctrlR, ctrlS})},
+		{"backward then wrap to the bottom", true, false, 200,
+			join(typed("alpha"), func() []terminal.KeyEvent {
+				out := make([]terminal.KeyEvent, 0, 20)
+				for range 20 {
+					out = append(out, ctrlR)
+				}
+				return out
+			}())},
+		{"word yank extends the query", true, true, 0,
+			join(typed("Camel"), []terminal.KeyEvent{ctrlW, ctrlW}, typed("x"), []terminal.KeyEvent{bs})},
+		{"word yank then repeat", true, true, 0,
+			join(typed("alpha"), []terminal.KeyEvent{ctrlW, ctrlS, ctrlS})},
+		{"failing query then backspace", true, true, 0,
+			join(typed("alphaQQQ"), []terminal.KeyEvent{bs, bs, bs}, typed(" beta"))},
+		{"case sensitive misses the lower-case spellings", false, true, 0,
+			join(typed("ALPHA"), []terminal.KeyEvent{ctrlS, ctrlS})},
+		{"case sensitive backward", false, false, total - 1,
+			join(typed("ALPHA"), []terminal.KeyEvent{ctrlR, ctrlR})},
+		{"typing after a repeat restarts from isearchStart", true, true, 0,
+			join(typed("alpha"), []terminal.KeyEvent{ctrlS, ctrlS}, typed(" beta"))},
+		{"backspace to empty then retype", true, true, 100,
+			join(typed("beta"), []terminal.KeyEvent{bs, bs, bs, bs}, typed("gamma"))},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runIsearchScript(content, tc.fold, tc.forward, tc.start, tc.keys, true)
+			want := runIsearchScript(content, tc.fold, tc.forward, tc.start, tc.keys, false)
+			if len(got) != len(want) {
+				t.Fatalf("got %d steps, want %d", len(got), len(want))
+			}
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("step %d differs:\n incremental %+v\n full rescan %+v", i, got[i], want[i])
+				}
+			}
+			// Guard against a vacuous pass: something must actually have moved.
+			if len(got) > 0 && got[len(got)-1].point == min(tc.start, len([]rune(content))) &&
+				got[len(got)-1].str == "" {
+				t.Fatal("the script left the search untouched; it proves nothing")
+			}
+		})
+	}
+}
+
+// TestIsearchWrapMessages pins the two wrap messages, which the incremental
+// scan must not disturb: they come from isearchFindNext, not isearchFind, and a
+// stale memo must not suppress them.
+func TestIsearchWrapMessages(t *testing.T) {
+	content := "alpha\nbeta\nalpha\n"
+	e := newTestEditor(content)
+	b := buf(e)
+	b.SetPoint(0)
+	e.startIsearch(true)
+	for _, r := range "alpha" {
+		e.isearchHandleKey(keRune(r, 0))
+	}
+	// Two more matches ahead of us at most, so repeating three times has to wrap.
+	e.isearchHandleKey(terminal.KeyEvent{Key: tcell.KeyCtrlS})
+	e.isearchHandleKey(terminal.KeyEvent{Key: tcell.KeyCtrlS})
+	if want := fmt.Sprintf(isearchWrapBotMsg, "alpha"); e.message != want {
+		t.Errorf("forward wrap message = %q, want %q", e.message, want)
+	}
+
+	e2 := newTestEditor(content)
+	b2 := buf(e2)
+	b2.SetPoint(0)
+	e2.startIsearch(false)
+	for _, r := range "alpha" {
+		e2.isearchHandleKey(keRune(r, 0))
+	}
+	e2.isearchHandleKey(terminal.KeyEvent{Key: tcell.KeyCtrlR})
+	if want := fmt.Sprintf(isearchWrapTopMsg, "alpha"); e2.message != want {
+		t.Errorf("backward wrap message = %q, want %q", e2.message, want)
+	}
+}
+
+// TestIsearchMemoInvalidatedByBufferEdit checks the one case where resuming
+// would be wrong: the buffer changed under the search, so the previous match
+// offset means nothing and the scan has to start over.
+func TestIsearchMemoInvalidatedByBufferEdit(t *testing.T) {
+	e := newTestEditor("xxxx alpha\n")
+	b := buf(e)
+	b.SetPoint(0)
+	e.startIsearch(true)
+	for _, r := range "alph" {
+		e.isearchHandleKey(keRune(r, 0))
+	}
+	if b.Point() != 9 {
+		t.Fatalf("point after typing \"alph\" = %d, want 9", b.Point())
+	}
+	// Insert a fresh, earlier match.  The next character typed must find it
+	// rather than resuming from the old, later offset.
+	b.Insert(0, 'a')
+	b.Insert(1, 'l')
+	b.Insert(2, 'p')
+	b.Insert(3, 'h')
+	b.Insert(4, 'a')
+	e.isearchStart = 0
+	e.isearchHandleKey(keRune('a', 0))
+	if b.Point() != 5 {
+		t.Errorf("point = %d, want 5 (the edit created an earlier match)", b.Point())
+	}
+}
+
+// TestIsearchMemoShortCircuitsAFailedQuery pins the other half of the prefix
+// argument: once a query has failed, every extension of it fails too, and the
+// message must still be shown.
+func TestIsearchMemoShortCircuitsAFailedQuery(t *testing.T) {
+	e := newTestEditor(strings.Repeat("nothing to see here\n", 100))
+	b := buf(e)
+	b.SetPoint(0)
+	e.startIsearch(true)
+	for _, r := range "zzz" {
+		e.isearchHandleKey(keRune(r, 0))
+	}
+	if want := fmt.Sprintf(isearchFailMsg, "zzz"); e.message != want {
+		t.Fatalf("message = %q, want %q", e.message, want)
+	}
+	if e.isearchMemo.pos != -1 {
+		t.Errorf("memo records pos = %d after a failed search, want -1", e.isearchMemo.pos)
+	}
+	e.isearchHandleKey(keRune('q', 0))
+	if want := fmt.Sprintf(isearchFailMsg, "zzzq"); e.message != want {
+		t.Errorf("message after extending a failed query = %q, want %q", e.message, want)
+	}
+	if b.Point() != 0 {
+		t.Errorf("point = %d, want 0 (a failed search must not move point)", b.Point())
+	}
+}
+
+// benchIsearchTyping types query into a fresh isearch over a large buffer, one
+// rune at a time, which is what the user actually does.  memo selects the
+// incremental scan or the full rescan from isearchStart it replaced.
+func benchIsearchTyping(bench *testing.B, memo bool) {
+	// The match sits near the end, so a rescan from the top is expensive and an
+	// incremental one is not.
+	content := strings.Repeat("some line of ordinary prose about nothing\n", 20000) +
+		"the needle we are looking for\n"
+	keys := make([]terminal.KeyEvent, 0, 16)
+	for _, r := range "the needle we" {
+		keys = append(keys, keRune(r, 0))
+	}
+	e := newTestEditor(content)
+	b := buf(e)
+	e.isSearchCaseFold = true
+
+	bench.ReportAllocs()
+	bench.ResetTimer()
+	for range bench.N {
+		b.SetPoint(0)
+		e.startIsearch(true)
+		for _, ke := range keys {
+			isearchKey(e, ke, memo)
+		}
+	}
+}
+
+// BenchmarkIsearchTypingRescan is the pre-optimisation behaviour: every
+// character typed rescans the whole buffer from isearchStart.
+func BenchmarkIsearchTypingRescan(bench *testing.B) { benchIsearchTyping(bench, false) }
+
+// BenchmarkIsearchTypingIncremental is the same session with the scan resumed
+// from the previous match.
+func BenchmarkIsearchTypingIncremental(bench *testing.B) { benchIsearchTyping(bench, true) }
+
+// benchIsearchFailingTyping types a query that matches nothing.  This is the
+// case the memo short-circuits outright: once the first character has failed,
+// every further one used to rescan the whole buffer for nothing.
+func benchIsearchFailingTyping(bench *testing.B, memo bool) {
+	content := strings.Repeat("some line of ordinary prose about nothing\n", 20000)
+	keys := make([]terminal.KeyEvent, 0, 8)
+	for _, r := range "qqqqqqqq" {
+		keys = append(keys, keRune(r, 0))
+	}
+	e := newTestEditor(content)
+	b := buf(e)
+	e.isSearchCaseFold = true
+	bench.ReportAllocs()
+	bench.ResetTimer()
+	for range bench.N {
+		b.SetPoint(0)
+		e.startIsearch(true)
+		for _, ke := range keys {
+			isearchKey(e, ke, memo)
+		}
+	}
+}
+
+// BenchmarkIsearchTypingFailingRescan is a hopeless query with the old
+// behaviour: one full scan of the buffer per character.
+func BenchmarkIsearchTypingFailingRescan(bench *testing.B) {
+	benchIsearchFailingTyping(bench, false)
+}
+
+// BenchmarkIsearchTypingFailing is the same query short-circuited after the
+// first character.
+func BenchmarkIsearchTypingFailing(bench *testing.B) {
+	benchIsearchFailingTyping(bench, true)
+}
+
+// ---------------------------------------------------------------------------
+// command LRU
+// ---------------------------------------------------------------------------
+
+// pushCommandLRUOracle is the pre-optimisation pushCommandLRU transcribed: a
+// fresh slice on every call.  The in-place version must produce byte-identical
+// ordering, because M-x candidate ordering and switch-to-buffer depend on it.
+func pushCommandLRUOracle(lru []string, name string) []string {
+	filtered := make([]string, 0, len(lru))
+	for _, n := range lru {
+		if n != name {
+			filtered = append(filtered, n)
+		}
+	}
+	out := append([]string{name}, filtered...)
+	if len(out) > commandLRUMax {
+		out = out[:commandLRUMax]
+	}
+	return out
+}
+
+// TestPushCommandLRUMatchesOracle is the differential test over long command
+// sequences: repeats, promotions from every depth, and well past the cap.
+func TestPushCommandLRUMatchesOracle(t *testing.T) {
+	e := newTestEditor("")
+	var want []string
+
+	// A deterministic but unfriendly sequence: a widening pool of names with
+	// frequent repeats, run far past commandLRUMax.
+	names := make([]string, 0, 80)
+	for i := range 80 {
+		names = append(names, fmt.Sprintf("command-%02d", i))
+	}
+	seq := make([]string, 0, 600)
+	for i := range 600 {
+		switch {
+		case i%7 == 0 && i > 0:
+			seq = append(seq, seq[i-1]) // repeat the most recent
+		case i%11 == 0 && i > 20:
+			seq = append(seq, seq[i-20]) // promote an older one
+		default:
+			seq = append(seq, names[i%len(names)])
+		}
+	}
+
+	for step, name := range seq {
+		e.pushCommandLRU(name)
+		want = pushCommandLRUOracle(want, name)
+		if len(e.commandLRU) != len(want) {
+			t.Fatalf("step %d (%q): length %d, want %d", step, name, len(e.commandLRU), len(want))
+		}
+		for i := range want {
+			if e.commandLRU[i] != want[i] {
+				t.Fatalf("step %d (%q): entry %d is %q, want %q\n got: %v\nwant: %v",
+					step, name, i, e.commandLRU[i], want[i], e.commandLRU, want)
+			}
+		}
+	}
+	if len(e.commandLRU) != commandLRUMax {
+		t.Errorf("final length %d, want the cap %d", len(e.commandLRU), commandLRUMax)
+	}
+}
+
+// TestPushCommandLRUOrdering spells out the three cases by hand, so a failure
+// says which rule broke rather than just "differs from the oracle".
+func TestPushCommandLRUOrdering(t *testing.T) {
+	e := newTestEditor("")
+	for _, n := range []string{"c", "b", "a"} {
+		e.pushCommandLRU(n)
+	}
+	// Most recent first.
+	if got := strings.Join(e.commandLRU, ","); got != "a,b,c" {
+		t.Fatalf("after pushing c,b,a the list is %q, want \"a,b,c\"", got)
+	}
+	// Repeating the most recent changes nothing.
+	e.pushCommandLRU("a")
+	if got := strings.Join(e.commandLRU, ","); got != "a,b,c" {
+		t.Errorf("repeating the most recent gave %q, want \"a,b,c\"", got)
+	}
+	// Promoting the oldest moves it to the front and keeps the rest in order.
+	e.pushCommandLRU("c")
+	if got := strings.Join(e.commandLRU, ","); got != "c,a,b" {
+		t.Errorf("promoting the oldest gave %q, want \"c,a,b\"", got)
+	}
+	// Promoting the middle one.
+	e.pushCommandLRU("a")
+	if got := strings.Join(e.commandLRU, ","); got != "a,c,b" {
+		t.Errorf("promoting the middle gave %q, want \"a,c,b\"", got)
+	}
+}
+
+// TestPushCommandLRUEvictsTheOldest checks the cap: entry 50 falls off the end
+// and everything else shifts down by one.
+func TestPushCommandLRUEvictsTheOldest(t *testing.T) {
+	e := newTestEditor("")
+	for i := range commandLRUMax {
+		e.pushCommandLRU(fmt.Sprintf("cmd-%02d", i))
+	}
+	if len(e.commandLRU) != commandLRUMax {
+		t.Fatalf("length %d, want %d", len(e.commandLRU), commandLRUMax)
+	}
+	oldest := e.commandLRU[commandLRUMax-1]
+	if oldest != "cmd-00" {
+		t.Fatalf("oldest entry is %q, want \"cmd-00\"", oldest)
+	}
+	e.pushCommandLRU("brand-new")
+	if len(e.commandLRU) != commandLRUMax {
+		t.Errorf("length after overflow = %d, want %d", len(e.commandLRU), commandLRUMax)
+	}
+	if e.commandLRU[0] != "brand-new" {
+		t.Errorf("front = %q, want \"brand-new\"", e.commandLRU[0])
+	}
+	if slices.Contains(e.commandLRU, oldest) {
+		t.Errorf("%q was not evicted: %v", oldest, e.commandLRU)
+	}
+	if e.commandLRU[commandLRUMax-1] != "cmd-01" {
+		t.Errorf("new oldest = %q, want \"cmd-01\"", e.commandLRU[commandLRUMax-1])
+	}
+}
+
+// TestPushCommandLRUDoesNotAllocate is the point of the change: this runs for
+// every arrow key, so neither repeating a command nor promoting one may allocate.
+func TestPushCommandLRUDoesNotAllocate(t *testing.T) {
+	e := newTestEditor("")
+	for i := range commandLRUMax {
+		e.pushCommandLRU(fmt.Sprintf("cmd-%02d", i))
+	}
+
+	// Repeat of the most recent: the fast path.
+	if got := testing.AllocsPerRun(200, func() { e.pushCommandLRU("cmd-49") }); got != 0 {
+		t.Errorf("repeating the most recent command allocated %.1f times per call, want 0", got)
+	}
+	// Promotion of an older entry: moved in place.
+	if got := testing.AllocsPerRun(200, func() {
+		e.pushCommandLRU("cmd-00")
+		e.pushCommandLRU("cmd-01")
+	}); got != 0 {
+		t.Errorf("promoting an older command allocated %.1f times per call, want 0", got)
+	}
+	// A brand-new name at a full list: still no allocation, the oldest is evicted.
+	i := 0
+	if got := testing.AllocsPerRun(200, func() {
+		i++
+		e.pushCommandLRU(fmt.Sprintf("x%d", i))
+	}); got > 1 {
+		// fmt.Sprintf itself allocates the string, hence the tolerance of one.
+		t.Errorf("pushing a new command allocated %.1f times per call, want at most 1", got)
+	}
+}
+
+// benchPushCommandLRU measures the per-keystroke cost of recording a command.
+// The "old" variant reallocates the way the previous implementation did.
+func benchPushCommandLRU(bench *testing.B, name string, old bool) {
+	e := newTestEditor("")
+	for i := range commandLRUMax {
+		e.pushCommandLRU(fmt.Sprintf("cmd-%02d", i))
+	}
+	bench.ReportAllocs()
+	bench.ResetTimer()
+	for range bench.N {
+		if old {
+			e.commandLRU = pushCommandLRUOracle(e.commandLRU, name)
+		} else {
+			e.pushCommandLRU(name)
+		}
+	}
+}
+
+// BenchmarkPushCommandLRURepeatOld is holding down an arrow key with the
+// previous implementation: a fresh 50-element slice per keystroke.
+func BenchmarkPushCommandLRURepeatOld(bench *testing.B) {
+	benchPushCommandLRU(bench, "cmd-49", true)
+}
+
+// BenchmarkPushCommandLRURepeat is the same with the fast path.
+func BenchmarkPushCommandLRURepeat(bench *testing.B) {
+	benchPushCommandLRU(bench, "cmd-49", false)
+}
+
+// BenchmarkPushCommandLRUPromoteOld promotes the oldest entry the old way.
+func BenchmarkPushCommandLRUPromoteOld(bench *testing.B) {
+	benchPushCommandLRU(bench, "cmd-00", true)
+}
+
+// BenchmarkPushCommandLRUPromote promotes the oldest entry in place.
+func BenchmarkPushCommandLRUPromote(bench *testing.B) {
+	benchPushCommandLRU(bench, "cmd-00", false)
 }

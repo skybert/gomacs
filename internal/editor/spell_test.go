@@ -14,6 +14,50 @@ import (
 	"github.com/skybert/gomacs/internal/terminal"
 )
 
+// ---------------------------------------------------------------------------
+// isSpellWordRune
+// ---------------------------------------------------------------------------
+
+// TestIsSpellWordRune pins the actual contract: letters (any Unicode letter,
+// including non-ASCII) and the apostrophe are word runes; digits, hyphens,
+// whitespace and punctuation are not. This is narrower than isWordRune
+// elsewhere in the editor (which treats digits and underscore as word
+// characters) — spell-checking only wants natural-language words, and digits
+// or hyphenated compounds would otherwise confuse aspell. Note hyphen is
+// deliberately NOT included despite contractions like "don't" being handled
+// via apostrophe: a hyphenated word such as "well-known" is split into two
+// separate words "well" and "known" by this scanner.
+func TestIsSpellWordRune(t *testing.T) {
+	tests := []struct {
+		name string
+		r    rune
+		want bool
+	}{
+		{"lowercase letter", 'a', true},
+		{"uppercase letter", 'Z', true},
+		{"digit", '5', false},
+		{"apostrophe", '\'', true},
+		{"hyphen", '-', false},
+		{"space", ' ', false},
+		{"tab", '\t', false},
+		{"newline", '\n', false},
+		{"period", '.', false},
+		{"comma", ',', false},
+		{"underscore", '_', false},
+		{"accented letter", 'é', true},
+		{"non-latin letter", 'ñ', true},
+		{"greek letter", 'Ω', true},
+		{"cjk letter", '中', true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSpellWordRune(tc.r); got != tc.want {
+				t.Errorf("isSpellWordRune(%q) = %v, want %v", tc.r, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetSpellSpans_AsyncNoOpCommand(t *testing.T) {
 	e := newCapTestEditor("hello world")
 	e.lspCbs = make(chan func(), 4)

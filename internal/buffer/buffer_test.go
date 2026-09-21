@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // ---- helpers ---------------------------------------------------------------
@@ -2371,5 +2372,819 @@ func BenchmarkLineStartsPatch(b *testing.B) {
 		if want := lineStartsRef(buf); !slices.Equal(buf.lineStarts, want) {
 			b.Fatalf("index drifted during benchmark at %d lines", lines)
 		}
+	}
+}
+
+// BenchmarkEndOfLineLongLine measures the boundary lookups on a buffer whose
+// lines are pathologically long (minified JSON/JS, long log lines), the worst
+// case for a rune-by-rune scan.  Each iteration probes a different position so
+// the LineCol cache cannot answer every call.
+func BenchmarkEndOfLineLongLine(b *testing.B) {
+	const lineLen = 200000
+	long := strings.Repeat("x", lineLen)
+	buf := NewWithContent("bench", "short\n"+long+"\n"+long)
+	mid := make([]int, 64)
+	for i := range mid {
+		mid[i] = 6 + lineLen/2 + i
+	}
+	last := make([]int, 64)
+	for i := range last {
+		last[i] = buf.Len() - lineLen/2 + i
+	}
+	run := func(name string, probes []int, fn func(int) int) {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			i := 0
+			for b.Loop() {
+				_ = fn(probes[i%len(probes)])
+				i++
+			}
+		})
+	}
+	run("EndOfLine/mid", mid, buf.EndOfLine)
+	run("EndOfLine/lastLine", last, buf.EndOfLine)
+	run("BeginningOfLine/mid", mid, buf.BeginningOfLine)
+	// The scan the index lookups replace, for comparison.
+	run("scan/EndOfLine/mid", mid, func(pos int) int { return endOfLineRef(buf, pos) })
+	run("scan/BeginningOfLine/mid", mid, func(pos int) int { return beginningOfLineRef(buf, pos) })
+}
+
+// ---- line boundaries: equivalence with a brute-force scan -------------------
+
+// beginningOfLineRef is the naive backwards-scan reference implementation that
+// BeginningOfLine's line-start-index lookup has to agree with exactly.
+func beginningOfLineRef(b *Buffer, pos int) int {
+	if pos > b.Len() {
+		pos = b.Len()
+	}
+	for i := pos - 1; i >= 0; i-- {
+		if b.RuneAt(i) == '\n' {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// endOfLineRef is the naive forwards-scan reference implementation for
+// EndOfLine.
+func endOfLineRef(b *Buffer, pos int) int {
+	n := b.Len()
+	if pos > n {
+		pos = n
+	}
+	for i := pos; i < n; i++ {
+		if b.RuneAt(i) == '\n' {
+			return i
+		}
+	}
+	return n
+}
+
+// lineBoundaryCorpus returns buffers covering the line shapes and gap positions
+// the boundary helpers have to cope with.
+func lineBoundaryCorpus() []struct {
+	name string
+	b    *Buffer
+} {
+	huge := strings.Repeat("x", 5000)
+
+	gapMid := NewWithContent("test", "one\ntwo\nthree\nfour")
+	gapMid.InsertString(8, "XY\nZ") // leaves the gap mid-buffer
+
+	gapStart := NewWithContent("test", "alpha\nbeta\ngamma")
+	gapStart.Delete(0, 1) // gap sits at position 0
+
+	gapEnd := NewWithContent("test", "alpha\nbeta\n")
+	gapEnd.InsertString(gapEnd.Len(), "gamma") // gap at the very end
+
+	narrowed := NewWithContent("test", "abc\ndefgh\nij\n\nk")
+	narrowed.Narrow(5, 11)
+
+	narrowedEmpty := NewWithContent("test", "abc\ndef\n")
+	narrowedEmpty.Narrow(4, 4)
+
+	narrowedEdited := NewWithContent("test", "aa\nbb\ncc\ndd\n")
+	narrowedEdited.InsertString(6, "zz\n")
+	narrowedEdited.Narrow(3, 9)
+
+	return []struct {
+		name string
+		b    *Buffer
+	}{
+		{"empty", New("test")},
+		{"single newline", NewWithContent("test", "\n")},
+		{"no trailing newline", NewWithContent("test", "abc\ndef")},
+		{"trailing newline", NewWithContent("test", "abc\ndef\n")},
+		{"leading newline", NewWithContent("test", "\nabc\ndef")},
+		{"consecutive newlines", NewWithContent("test", "a\n\n\nb\n\n")},
+		{"only newlines", NewWithContent("test", "\n\n\n\n")},
+		{"crlf", NewWithContent("test", "a\r\nb\r\n\r\nc")},
+		{"multibyte", NewWithContent("test", "héllo\n日本語テキスト\n\næøå\nend")},
+		{"no newline at all", NewWithContent("test", "just one line")},
+		{"enormous single line", NewWithContent("test", huge)},
+		{"enormous line among others", NewWithContent("test", "head\n"+huge+"\ntail")},
+		{"gap mid-buffer", gapMid},
+		{"gap at start", gapStart},
+		{"gap at end", gapEnd},
+		{"narrowed", narrowed},
+		{"narrowed to empty region", narrowedEmpty},
+		{"narrowed after edits", narrowedEdited},
+	}
+}
+
+// boundaryProbes returns the positions to test: every position for small
+// buffers, a sampled set (plus every line boundary) for large ones, and
+// out-of-range values in both directions.
+func boundaryProbes(b *Buffer) []int {
+	n := b.Len()
+	probes := []int{-100, -1, n, n + 1, n + 100}
+	if n <= 2000 {
+		for pos := 0; pos <= n; pos++ {
+			probes = append(probes, pos)
+		}
+		return probes
+	}
+	for pos := 0; pos <= n; pos += 97 {
+		probes = append(probes, pos)
+	}
+	for i := range b.Len() {
+		if b.RuneAt(i) == '\n' {
+			probes = append(probes, i-1, i, i+1)
+		}
+	}
+	return probes
+}
+
+// TestBeginningOfLineMatchesBruteForce pins the index-based lookup to the naive
+// backwards scan across the whole corpus, including a narrowed buffer (both are
+// absolute: narrowing must not shift the answer).
+func TestBeginningOfLineMatchesBruteForce(t *testing.T) {
+	for _, tc := range lineBoundaryCorpus() {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, pos := range boundaryProbes(tc.b) {
+				want := beginningOfLineRef(tc.b, pos)
+				if got := tc.b.BeginningOfLine(pos); got != want {
+					t.Fatalf("BeginningOfLine(%d) = %d, want %d", pos, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestEndOfLineMatchesBruteForce is TestBeginningOfLineMatchesBruteForce for the
+// forward direction.
+func TestEndOfLineMatchesBruteForce(t *testing.T) {
+	for _, tc := range lineBoundaryCorpus() {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, pos := range boundaryProbes(tc.b) {
+				want := endOfLineRef(tc.b, pos)
+				if got := tc.b.EndOfLine(pos); got != want {
+					t.Fatalf("EndOfLine(%d) = %d, want %d", pos, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestLineBoundariesStayCorrectAcrossEdits checks the boundary helpers still
+// match the brute-force scan after the edits that patch the line-start index in
+// place and move the gap around.
+func TestLineBoundariesStayCorrectAcrossEdits(t *testing.T) {
+	b := NewWithContent("test", "one\ntwo\nthree\nfour\n")
+	edits := []func(){
+		func() { b.InsertString(0, "zero\n") },
+		func() { b.InsertString(b.Len(), "five") },
+		func() { b.InsertString(6, "\n\n") },
+		func() { b.Delete(3, 4) },
+		func() { b.Delete(0, 2) },
+		func() { b.InsertString(b.Len()/2, "mid\nline") },
+		func() { b.Delete(b.Len()-1, 1) },
+	}
+	for i, edit := range edits {
+		edit()
+		for pos := -1; pos <= b.Len()+1; pos++ {
+			if got, want := b.BeginningOfLine(pos), beginningOfLineRef(b, pos); got != want {
+				t.Fatalf("edit %d: BeginningOfLine(%d) = %d, want %d (buffer %q)", i, pos, got, want, b.String())
+			}
+			if got, want := b.EndOfLine(pos), endOfLineRef(b, pos); got != want {
+				t.Fatalf("edit %d: EndOfLine(%d) = %d, want %d (buffer %q)", i, pos, got, want, b.String())
+			}
+		}
+	}
+}
+
+// TestLineBoundariesAgreeWithLineStart checks the helpers stay consistent with
+// the index API they are now built on.
+func TestLineBoundariesAgreeWithLineStart(t *testing.T) {
+	b := NewWithContent("test", "abc\n\ndefgh\nij\n")
+	for pos := 0; pos <= b.Len(); pos++ {
+		line, _ := b.LineCol(pos)
+		if got, want := b.BeginningOfLine(pos), b.LineStart(line); got != want {
+			t.Errorf("BeginningOfLine(%d) = %d, LineStart(%d) = %d", pos, got, line, want)
+		}
+		if eol := b.EndOfLine(pos); eol < b.BeginningOfLine(pos) {
+			t.Errorf("EndOfLine(%d) = %d is before BeginningOfLine = %d", pos, eol, b.BeginningOfLine(pos))
+		}
+	}
+}
+
+// TestLineBoundariesDoNotMoveGap guards the performance property: the boundary
+// lookups are read-only, so they must not shuffle the gap-buffer segments.
+func TestLineBoundariesDoNotMoveGap(t *testing.T) {
+	b := NewWithContent("test", "one\ntwo\nthree\nfour")
+	b.InsertString(8, "XY\n")
+	gapStart, gapEnd := b.gapStart, b.gapEnd
+	for pos := 0; pos <= b.Len(); pos++ {
+		b.BeginningOfLine(pos)
+		b.EndOfLine(pos)
+	}
+	if b.gapStart != gapStart || b.gapEnd != gapEnd {
+		t.Errorf("gap moved from [%d,%d) to [%d,%d)", gapStart, gapEnd, b.gapStart, b.gapEnd)
+	}
+}
+
+// ---- AppendRunesRange -------------------------------------------------------
+
+// appendRunesRangeRef is the naive per-rune reference implementation.
+func appendRunesRangeRef(b *Buffer, start, end int) []rune {
+	start = max(start, 0)
+	end = min(end, b.Len())
+	var out []rune
+	for i := start; i < end; i++ {
+		out = append(out, b.RuneAt(i))
+	}
+	return out
+}
+
+func TestAppendRunesRange(t *testing.T) {
+	t.Run("relative to the gap", func(t *testing.T) {
+		b := NewWithContent("test", "0123456789")
+		b.InsertString(5, "abc") // "01234abc56789", gap sits at 8
+		if b.gapStart != 8 {
+			t.Fatalf("precondition: gapStart = %d, want 8", b.gapStart)
+		}
+		cases := []struct {
+			name             string
+			start, end       int
+			want             string
+			wantAllocsAtMost int
+		}{
+			{"entirely before the gap", 1, 5, "1234", 0},
+			{"ends exactly at the gap", 0, 8, "01234abc", 0},
+			{"entirely after the gap", 9, 13, "6789", 0},
+			{"starts exactly at the gap", 8, 10, "56", 0},
+			{"spans the gap", 3, 11, "34abc567", 0},
+			{"whole buffer", 0, 13, "01234abc56789", 0},
+			{"single rune before the gap", 2, 3, "2", 0},
+			{"single rune after the gap", 12, 13, "9", 0},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := string(b.AppendRunesRange(nil, tc.start, tc.end))
+				if got != tc.want {
+					t.Errorf("AppendRunesRange(nil, %d, %d) = %q, want %q", tc.start, tc.end, got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("matches a per-rune scan for every range", func(t *testing.T) {
+		for _, tc := range lineBoundaryCorpus() {
+			t.Run(tc.name, func(t *testing.T) {
+				n := tc.b.Len()
+				if n > 200 {
+					n = 200 // every (start,end) pair would be quadratic
+				}
+				for start := 0; start <= n; start++ {
+					for end := start; end <= n; end++ {
+						want := appendRunesRangeRef(tc.b, start, end)
+						got := tc.b.AppendRunesRange(nil, start, end)
+						if !slices.Equal(got, want) {
+							t.Fatalf("AppendRunesRange(nil, %d, %d) = %q, want %q", start, end, string(got), string(want))
+						}
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("full range equals AppendRunes", func(t *testing.T) {
+		for _, tc := range lineBoundaryCorpus() {
+			full := string(tc.b.AppendRunesRange(nil, 0, tc.b.Len()))
+			if want := string(tc.b.AppendRunes(nil)); full != want {
+				t.Errorf("%s: full range = %q, AppendRunes = %q", tc.name, full, want)
+			}
+			if want := tc.b.String(); full != want {
+				t.Errorf("%s: full range = %q, String = %q", tc.name, full, want)
+			}
+		}
+	})
+
+	t.Run("survives inserts and deletes that move the gap", func(t *testing.T) {
+		b := NewWithContent("test", "one\ntwo\nthree\nfour\nfive")
+		steps := []func(){
+			func() { b.InsertString(0, "zero\n") },
+			func() { b.Delete(10, 3) },
+			func() { b.InsertString(b.Len(), "\nsix") },
+			func() { b.InsertString(b.Len()/2, "MID") },
+			func() { b.Delete(0, 1) },
+		}
+		for i, step := range steps {
+			step()
+			for start := 0; start <= b.Len(); start += 3 {
+				for _, end := range []int{start, start + 1, start + 7, b.Len()} {
+					want := string(appendRunesRangeRef(b, start, end))
+					got := string(b.AppendRunesRange(nil, start, end))
+					if got != want {
+						t.Fatalf("step %d: range [%d,%d) = %q, want %q", i, start, end, got, want)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("empty and degenerate ranges", func(t *testing.T) {
+		b := NewWithContent("test", "hello world")
+		dst := []rune("keep")
+		cases := []struct {
+			name       string
+			start, end int
+		}{
+			{"start equals end", 4, 4},
+			{"start equals end at zero", 0, 0},
+			{"start equals end at Len", b.Len(), b.Len()},
+			{"reversed", 8, 3},
+			{"both negative", -10, -2},
+			{"end below zero", 0, -1},
+			{"start past Len", b.Len() + 5, b.Len() + 9},
+			{"reversed after clamping", b.Len() + 1, 2},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := b.AppendRunesRange(dst, tc.start, tc.end)
+				if string(got) != "keep" {
+					t.Errorf("AppendRunesRange(dst, %d, %d) = %q, want %q (dst untouched)", tc.start, tc.end, string(got), "keep")
+				}
+			})
+		}
+	})
+
+	t.Run("clamps out-of-range arguments", func(t *testing.T) {
+		b := NewWithContent("test", "abcde")
+		if got := string(b.AppendRunesRange(nil, -7, 3)); got != "abc" {
+			t.Errorf("negative start = %q, want %q", got, "abc")
+		}
+		if got := string(b.AppendRunesRange(nil, 2, 99)); got != "cde" {
+			t.Errorf("over-range end = %q, want %q", got, "cde")
+		}
+		if got := string(b.AppendRunesRange(nil, -99, 99)); got != "abcde" {
+			t.Errorf("both out of range = %q, want %q", got, "abcde")
+		}
+	})
+
+	t.Run("appends to existing content", func(t *testing.T) {
+		b := NewWithContent("test", "world!")
+		got := string(b.AppendRunesRange([]rune("hello "), 0, 5))
+		if got != "hello world" {
+			t.Errorf("AppendRunesRange = %q, want %q", got, "hello world")
+		}
+	})
+
+	t.Run("grows an undersized destination", func(t *testing.T) {
+		b := NewWithContent("test", strings.Repeat("ab\n", 50))
+		dst := make([]rune, 0, 1)
+		got := b.AppendRunesRange(dst, 10, 100)
+		if want := string(appendRunesRangeRef(b, 10, 100)); string(got) != want {
+			t.Errorf("AppendRunesRange into small slice = %q, want %q", string(got), want)
+		}
+	})
+
+	t.Run("reuses spare capacity", func(t *testing.T) {
+		b := NewWithContent("test", "hello world")
+		scratch := make([]rune, 0, 64)
+		got := b.AppendRunesRange(scratch, 0, 5)
+		if &got[:1][0] != &scratch[:1:1][0] {
+			t.Error("AppendRunesRange reallocated despite sufficient capacity")
+		}
+	})
+
+	t.Run("no allocations when capacity suffices", func(t *testing.T) {
+		b := NewWithContent("test", strings.Repeat("some line of text\n", 500))
+		b.InsertString(b.Len()/2, "gap\nhere\n") // gap mid-buffer: spanning copy
+		scratch := make([]rune, 0, b.Len())
+		start, end := b.Len()/2-100, b.Len()/2+100
+		if allocs := testing.AllocsPerRun(50, func() {
+			scratch = b.AppendRunesRange(scratch[:0], start, end)
+		}); allocs != 0 {
+			t.Errorf("AppendRunesRange allocated %v times per run, want 0", allocs)
+		}
+		if want := string(appendRunesRangeRef(b, start, end)); string(scratch) != want {
+			t.Errorf("after reuse = %q, want %q", string(scratch), want)
+		}
+		// The full-buffer wrapper must be allocation-free the same way.
+		if allocs := testing.AllocsPerRun(50, func() {
+			scratch = b.AppendRunes(scratch[:0])
+		}); allocs != 0 {
+			t.Errorf("AppendRunes allocated %v times per run, want 0", allocs)
+		}
+	})
+
+	t.Run("ignores narrowing like AppendRunes", func(t *testing.T) {
+		b := NewWithContent("test", "0123456789")
+		b.Narrow(3, 7)
+		// Absolute positions, so a range outside the accessible region still
+		// yields its runes.
+		if got := string(b.AppendRunesRange(nil, 0, 3)); got != "012" {
+			t.Errorf("range before narrowMin = %q, want %q", got, "012")
+		}
+		if got := string(b.AppendRunesRange(nil, 7, 10)); got != "789" {
+			t.Errorf("range after narrowMax = %q, want %q", got, "789")
+		}
+		if got, want := string(b.AppendRunesRange(nil, 0, b.Len())), b.String(); got != want {
+			t.Errorf("full range while narrowed = %q, want %q", got, want)
+		}
+		if got := string(b.AppendRunesRange(nil, b.NarrowMin(), b.NarrowMax())); got != "3456" {
+			t.Errorf("accessible region = %q, want %q", got, "3456")
+		}
+	})
+
+	t.Run("does not move the gap", func(t *testing.T) {
+		b := NewWithContent("test", "one\ntwo\nthree\nfour")
+		b.InsertString(8, "XY\n")
+		gapStart, gapEnd := b.gapStart, b.gapEnd
+		for start := 0; start <= b.Len(); start++ {
+			b.AppendRunesRange(nil, start, start+5)
+		}
+		if b.gapStart != gapStart || b.gapEnd != gapEnd {
+			t.Errorf("gap moved from [%d,%d) to [%d,%d)", gapStart, gapEnd, b.gapStart, b.gapEnd)
+		}
+	})
+
+	t.Run("leaves the buffer unmodified", func(t *testing.T) {
+		b := NewWithContent("test", "one\ntwo")
+		gen, mods := b.ChangeGen(), b.ModCount()
+		b.AppendRunesRange(nil, 0, 4)
+		if b.Modified() || b.ChangeGen() != gen || b.ModCount() != mods {
+			t.Error("AppendRunesRange marked the buffer as modified")
+		}
+	})
+}
+
+// BenchmarkAppendRunesRange measures the windowed copy a highlighter needs: a
+// screenful-sized prefix out of a large buffer, compared against
+// BenchmarkAppendRunes which copies the whole thing.
+func BenchmarkAppendRunesRange(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		buf.InsertString(buf.Len()/2, "x") // gap mid-buffer
+		window := min(buf.Len(), 50*48)    // ~50 rendered lines
+		b.Run(sizeName(lines)+"/prefix", func(b *testing.B) {
+			b.ReportAllocs()
+			scratch := make([]rune, 0, window)
+			for b.Loop() {
+				scratch = buf.AppendRunesRange(scratch[:0], 0, window)
+			}
+			_ = scratch
+		})
+		b.Run(sizeName(lines)+"/midWindow", func(b *testing.B) {
+			b.ReportAllocs()
+			scratch := make([]rune, 0, window)
+			start := max(buf.Len()/2-window/2, 0)
+			for b.Loop() {
+				scratch = buf.AppendRunesRange(scratch[:0], start, start+window)
+			}
+			_ = scratch
+		})
+	}
+}
+
+// ---- AppendBytes / AppendBytesRange -----------------------------------------
+
+// appendBytesCorpus returns the buffers AppendBytes is checked against: the
+// shared line-boundary corpus (empty, CRLF, multibyte, huge single line, gap at
+// start/middle/end, narrowed, …) plus entries that only matter for UTF-8
+// encoding — wide CJK runes, astral-plane emoji, and runes that are not valid
+// scalar values at all.
+func appendBytesCorpus() []struct {
+	name string
+	b    *Buffer
+} {
+	corpus := lineBoundaryCorpus()
+
+	// A lone surrogate and an out-of-range rune can reach the buffer via
+	// Insert(), which takes a rune with no validity check.  Both must encode as
+	// U+FFFD, exactly as String() does.
+	invalid := New("test")
+	invalid.InsertString(0, "a")
+	invalid.Insert(1, rune(0xD800))   // lone surrogate
+	invalid.Insert(2, rune(0x110000)) // above utf8.MaxRune
+	invalid.Insert(3, rune(-1))       // negative
+	invalid.InsertString(4, "\nb")    //nolint:gocritic // keeps the gap mid-buffer
+
+	edited := NewWithContent("test", "héllo\n日本語\nworld\n")
+	edited.InsertString(6, "🎉🚀")
+	edited.Delete(2, 3)
+	edited.InsertString(edited.Len(), "æøå")
+
+	return append(corpus, []struct {
+		name string
+		b    *Buffer
+	}{
+		{"wide cjk", NewWithContent("test", "日本語テキスト\n中文字\nひらがな")},
+		{"emoji", NewWithContent("test", "a🎉b\n👨‍👩‍👧‍👦\n🚀🚀🚀")},
+		{"combining marks", NewWithContent("test", "éå\nñ")},
+		{"invalid runes", invalid},
+		{"multibyte after edits", edited},
+		{"mixed width huge line", NewWithContent("test", strings.Repeat("aé日🎉", 500))},
+	}...)
+}
+
+func TestAppendBytes(t *testing.T) {
+	t.Run("matches String across the corpus", func(t *testing.T) {
+		for _, tc := range appendBytesCorpus() {
+			got := string(tc.b.AppendBytes(nil))
+			if want := tc.b.String(); got != want {
+				t.Errorf("%s: AppendBytes = %q, String = %q", tc.name, got, want)
+			}
+		}
+	})
+
+	t.Run("result is valid utf-8", func(t *testing.T) {
+		for _, tc := range appendBytesCorpus() {
+			if got := tc.b.AppendBytes(nil); !utf8.Valid(got) {
+				t.Errorf("%s: AppendBytes produced invalid UTF-8: %q", tc.name, got)
+			}
+		}
+	})
+
+	t.Run("empty buffer leaves dst untouched", func(t *testing.T) {
+		b := New("test")
+		if got := b.AppendBytes(nil); got != nil {
+			t.Errorf("AppendBytes(nil) on empty buffer = %v, want nil", got)
+		}
+		if got := string(b.AppendBytes([]byte("keep"))); got != "keep" {
+			t.Errorf("AppendBytes on empty buffer = %q, want %q", got, "keep")
+		}
+	})
+
+	t.Run("appends to existing content", func(t *testing.T) {
+		b := NewWithContent("test", "world")
+		if got := string(b.AppendBytes([]byte("hello "))); got != "hello world" {
+			t.Errorf("AppendBytes = %q, want %q", got, "hello world")
+		}
+	})
+
+	t.Run("ignores narrowing like String", func(t *testing.T) {
+		b := NewWithContent("test", "0123456789")
+		b.Narrow(3, 7)
+		if got, want := string(b.AppendBytes(nil)), b.String(); got != want {
+			t.Errorf("AppendBytes while narrowed = %q, want %q (same as String)", got, want)
+		}
+		if got := string(b.AppendBytes(nil)); got != "0123456789" {
+			t.Errorf("AppendBytes while narrowed = %q, want the whole buffer", got)
+		}
+	})
+
+	t.Run("survives inserts and deletes that move the gap", func(t *testing.T) {
+		b := NewWithContent("test", "one\ntwo\nthree\nfour\nfive")
+		steps := []func(){
+			func() { b.InsertString(0, "zéro\n") },
+			func() { b.Delete(10, 3) },
+			func() { b.InsertString(b.Len(), "\n六") },
+			func() { b.InsertString(b.Len()/2, "🎉MID") },
+			func() { b.Delete(0, 1) },
+			func() { b.InsertString(3, "日本") },
+		}
+		for i, step := range steps {
+			step()
+			if got, want := string(b.AppendBytes(nil)), b.String(); got != want {
+				t.Fatalf("step %d: AppendBytes = %q, String = %q", i, got, want)
+			}
+		}
+	})
+
+	t.Run("reuses spare capacity", func(t *testing.T) {
+		b := NewWithContent("test", "hello world")
+		scratch := make([]byte, 0, 64)
+		got := b.AppendBytes(scratch)
+		if &got[:1][0] != &scratch[:1:1][0] {
+			t.Error("AppendBytes reallocated despite sufficient capacity")
+		}
+		// A second pass over the reset slice must produce the same content.
+		if again := string(b.AppendBytes(got[:0])); again != b.String() {
+			t.Errorf("reused AppendBytes = %q, want %q", again, b.String())
+		}
+	})
+
+	t.Run("grows an undersized destination", func(t *testing.T) {
+		b := NewWithContent("test", strings.Repeat("ab\n", 50))
+		got := b.AppendBytes(make([]byte, 0, 1))
+		if string(got) != b.String() {
+			t.Errorf("AppendBytes into small slice = %q, want %q", string(got), b.String())
+		}
+	})
+
+	t.Run("no allocations when capacity suffices", func(t *testing.T) {
+		b := NewWithContent("test", strings.Repeat("some line of text\n", 500))
+		b.InsertString(b.Len()/2, "gap\nhere\n") // gap mid-buffer: spanning encode
+		scratch := make([]byte, 0, 4*b.Len())
+		if allocs := testing.AllocsPerRun(50, func() {
+			scratch = b.AppendBytes(scratch[:0])
+		}); allocs != 0 {
+			t.Errorf("AppendBytes allocated %v times per run, want 0", allocs)
+		}
+		if string(scratch) != b.String() {
+			t.Errorf("AppendBytes = %q, want %q", string(scratch), b.String())
+		}
+	})
+
+	t.Run("does not move the gap or mutate the buffer", func(t *testing.T) {
+		b := NewWithContent("test", "one\ntwo\nthree")
+		b.InsertString(4, "XY") // park the gap mid-buffer
+		gs, ge := b.gapStart, b.gapEnd
+		gen, mods := b.ChangeGen(), b.ModCount()
+		pt, saved := b.Point(), b.Modified()
+		b.AppendBytes(nil)
+		b.AppendBytesRange(nil, 2, 9)
+		if b.gapStart != gs || b.gapEnd != ge {
+			t.Errorf("gap moved: gapStart %d→%d, gapEnd %d→%d", gs, b.gapStart, ge, b.gapEnd)
+		}
+		if b.ChangeGen() != gen || b.ModCount() != mods || b.Modified() != saved || b.Point() != pt {
+			t.Error("AppendBytes mutated buffer state")
+		}
+	})
+}
+
+func TestAppendBytesRange(t *testing.T) {
+	t.Run("relative to the gap", func(t *testing.T) {
+		b := NewWithContent("test", "0123456789")
+		b.InsertString(5, "abc") // "01234abc56789", gap sits at 8
+		if b.gapStart != 8 {
+			t.Fatalf("precondition: gapStart = %d, want 8", b.gapStart)
+		}
+		cases := []struct {
+			name       string
+			start, end int
+			want       string
+		}{
+			{"entirely before the gap", 1, 5, "1234"},
+			{"ends exactly at the gap", 0, 8, "01234abc"},
+			{"entirely after the gap", 9, 13, "6789"},
+			{"starts exactly at the gap", 8, 10, "56"},
+			{"spans the gap", 3, 11, "34abc567"},
+			{"whole buffer", 0, 13, "01234abc56789"},
+			{"single rune before the gap", 2, 3, "2"},
+			{"single rune after the gap", 12, 13, "9"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := string(b.AppendBytesRange(nil, tc.start, tc.end)); got != tc.want {
+					t.Errorf("AppendBytesRange(nil, %d, %d) = %q, want %q", tc.start, tc.end, got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("matches Substring for every range", func(t *testing.T) {
+		for _, tc := range appendBytesCorpus() {
+			t.Run(tc.name, func(t *testing.T) {
+				n := min(tc.b.Len(), 200) // every (start,end) pair would be quadratic
+				for start := 0; start <= n; start++ {
+					for end := start; end <= n; end++ {
+						got := string(tc.b.AppendBytesRange(nil, start, end))
+						if want := tc.b.Substring(start, end); got != want {
+							t.Fatalf("AppendBytesRange(nil, %d, %d) = %q, want %q", start, end, got, want)
+						}
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("full range equals AppendBytes and String", func(t *testing.T) {
+		for _, tc := range appendBytesCorpus() {
+			full := string(tc.b.AppendBytesRange(nil, 0, tc.b.Len()))
+			if want := string(tc.b.AppendBytes(nil)); full != want {
+				t.Errorf("%s: full range = %q, AppendBytes = %q", tc.name, full, want)
+			}
+			if want := tc.b.String(); full != want {
+				t.Errorf("%s: full range = %q, String = %q", tc.name, full, want)
+			}
+		}
+	})
+
+	t.Run("multibyte range boundaries land on rune edges", func(t *testing.T) {
+		// Rune indices, not byte offsets: [1,3) of "a日本b" is "日本" (6 bytes).
+		b := NewWithContent("test", "a日本b")
+		got := b.AppendBytesRange(nil, 1, 3)
+		if string(got) != "日本" {
+			t.Errorf("AppendBytesRange(nil, 1, 3) = %q, want %q", string(got), "日本")
+		}
+		if len(got) != 6 {
+			t.Errorf("AppendBytesRange produced %d bytes, want 6", len(got))
+		}
+	})
+
+	t.Run("empty and degenerate ranges", func(t *testing.T) {
+		b := NewWithContent("test", "hello world")
+		dst := []byte("keep")
+		cases := []struct {
+			name       string
+			start, end int
+		}{
+			{"start equals end", 4, 4},
+			{"start equals end at zero", 0, 0},
+			{"start equals end at Len", b.Len(), b.Len()},
+			{"reversed", 8, 3},
+			{"both negative", -10, -2},
+			{"end below zero", 0, -1},
+			{"start past Len", b.Len() + 5, b.Len() + 9},
+			{"reversed after clamping", b.Len() + 1, 2},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := b.AppendBytesRange(dst, tc.start, tc.end)
+				if string(got) != "keep" {
+					t.Errorf("AppendBytesRange(dst, %d, %d) = %q, want %q (dst untouched)", tc.start, tc.end, string(got), "keep")
+				}
+			})
+		}
+	})
+
+	t.Run("clamps out-of-range arguments", func(t *testing.T) {
+		b := NewWithContent("test", "abcde")
+		if got := string(b.AppendBytesRange(nil, -7, 3)); got != "abc" {
+			t.Errorf("negative start = %q, want %q", got, "abc")
+		}
+		if got := string(b.AppendBytesRange(nil, 2, 99)); got != "cde" {
+			t.Errorf("over-range end = %q, want %q", got, "cde")
+		}
+		if got := string(b.AppendBytesRange(nil, -99, 99)); got != "abcde" {
+			t.Errorf("both out of range = %q, want %q", got, "abcde")
+		}
+	})
+
+	t.Run("appends to existing content", func(t *testing.T) {
+		b := NewWithContent("test", "world!")
+		if got := string(b.AppendBytesRange([]byte("hello "), 0, 5)); got != "hello world" {
+			t.Errorf("AppendBytesRange = %q, want %q", got, "hello world")
+		}
+	})
+
+	t.Run("grows an undersized destination", func(t *testing.T) {
+		b := NewWithContent("test", strings.Repeat("ab\n", 50))
+		got := b.AppendBytesRange(make([]byte, 0, 1), 10, 100)
+		if want := b.Substring(10, 100); string(got) != want {
+			t.Errorf("AppendBytesRange into small slice = %q, want %q", string(got), want)
+		}
+	})
+
+	t.Run("no allocations when capacity suffices", func(t *testing.T) {
+		b := NewWithContent("test", strings.Repeat("some line of text\n", 500))
+		b.InsertString(b.Len()/2, "gap\nhere\n") // gap mid-buffer: spanning encode
+		scratch := make([]byte, 0, 4*b.Len())
+		start, end := b.Len()/2-100, b.Len()/2+100
+		if allocs := testing.AllocsPerRun(50, func() {
+			scratch = b.AppendBytesRange(scratch[:0], start, end)
+		}); allocs != 0 {
+			t.Errorf("AppendBytesRange allocated %v times per run, want 0", allocs)
+		}
+		if want := b.Substring(start, end); string(scratch) != want {
+			t.Errorf("AppendBytesRange = %q, want %q", string(scratch), want)
+		}
+	})
+}
+
+// BenchmarkAppendBytes measures the single-pass UTF-8 encode straight out of the
+// gap buffer against String(), which materialises a []rune and then encodes it.
+// The reused scratch slice is what makes the AppendBytes case allocation-free.
+func BenchmarkAppendBytes(b *testing.B) {
+	for _, lines := range benchSizes {
+		buf := NewWithContent("bench", benchContent(lines))
+		buf.InsertString(buf.Len()/2, "x") // gap mid-buffer: worst case, two segments
+		b.Run(sizeName(lines)+"/AppendBytes", func(b *testing.B) {
+			b.ReportAllocs()
+			scratch := make([]byte, 0, 4*buf.Len())
+			for b.Loop() {
+				scratch = buf.AppendBytes(scratch[:0])
+			}
+			_ = scratch
+		})
+		b.Run(sizeName(lines)+"/String", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = buf.String()
+			}
+		})
+		// What the LSP text-sync path actually pays: AppendBytes into a reused
+		// scratch slice, then one string copy at the hand-off to the client.
+		b.Run(sizeName(lines)+"/AppendBytesToString", func(b *testing.B) {
+			b.ReportAllocs()
+			scratch := make([]byte, 0, 4*buf.Len())
+			for b.Loop() {
+				scratch = buf.AppendBytes(scratch[:0])
+				_ = string(scratch)
+			}
+		})
 	}
 }

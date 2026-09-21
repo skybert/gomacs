@@ -39,13 +39,29 @@ func (e *Editor) startQueryReplace(from, to string) {
 	}
 }
 
+// queryReplaceNeedle returns the search string as runes, reusing the cached
+// slice as long as queryReplaceFrom has not changed.
+func (e *Editor) queryReplaceNeedle() []rune {
+	if string(e.queryReplaceFromRunes) != e.queryReplaceFrom {
+		e.queryReplaceFromRunes = []rune(e.queryReplaceFrom)
+	}
+	return e.queryReplaceFromRunes
+}
+
 // queryReplaceFindNext locates the next occurrence of queryReplaceFrom
 // starting at queryReplaceCursor.  Returns true if a match is found.
 func (e *Editor) queryReplaceFindNext() bool {
 	buf := e.ActiveBuffer()
-	runes := []rune(buf.String())
-	needle := []rune(e.queryReplaceFrom)
-	pos := e.queryReplaceCursor
+	// Reuse the changeGen-keyed rune cache instead of re-materialising the
+	// whole buffer on every call; without it each keystroke copied the entire
+	// buffer (~8ms for a 50k-line file).
+	runes := e.isearchGetRunes(buf)
+	needle := e.queryReplaceNeedle()
+	if len(needle) == 0 {
+		e.queryReplaceMatch = -1
+		return false
+	}
+	pos := max(e.queryReplaceCursor, 0)
 	for pos <= len(runes)-len(needle) {
 		if runesMatch(runes[pos:], needle) {
 			e.queryReplaceMatch = pos
@@ -88,14 +104,7 @@ func (e *Editor) queryReplaceHandleKey(ke terminal.KeyEvent) {
 
 	case ke.Key == tcell.KeyRune && ke.Rune == '!':
 		// Replace all remaining occurrences without asking.
-		count := 0
-		for e.queryReplaceMatch >= 0 {
-			e.queryReplaceDoReplaceRaw()
-			count++
-			if !e.queryReplaceFindNext() {
-				break
-			}
-		}
+		count := e.queryReplaceAll()
 		e.queryReplaceFinish(fmt.Sprintf("Replaced %d occurrence(s)", count))
 
 	case ke.Key == tcell.KeyRune && ke.Rune == '.':
@@ -132,17 +141,75 @@ func (e *Editor) queryReplaceDoReplace() {
 func (e *Editor) queryReplaceDoReplaceRaw() {
 	buf := e.ActiveBuffer()
 	ms := e.queryReplaceMatch
-	needle := []rune(e.queryReplaceFrom)
+	needle := e.queryReplaceNeedle()
 	to := e.queryReplaceTo
-	buf.Delete(ms, len(needle))
-	buf.InsertString(ms, to)
+	// One gap move and one undo record instead of Delete + InsertString.
+	buf.ReplaceString(ms, len(needle), to)
 	e.queryReplaceCursor = ms + len([]rune(to))
 	e.queryReplaceMatch = -1
+}
+
+// queryReplaceAll replaces the current match and every following one, then
+// returns the number of replacements made.
+//
+// The buffer is scanned once (over the cached rune slice) while the replacement
+// text for the whole affected span is assembled, and the span from the first to
+// the last match is then rewritten with a single buf.ReplaceString call.  That
+// makes replace-all O(buffer) with one undo record and one redraw, instead of
+// the old O(matches x buffer) loop that re-materialised the buffer per match.
+//
+// Searching resumes *after* each match rather than inside the text that was
+// just inserted, so a replacement containing the search string is never
+// re-replaced (and the scan always terminates).
+func (e *Editor) queryReplaceAll() int {
+	buf := e.ActiveBuffer()
+	needle := e.queryReplaceNeedle()
+	if len(needle) == 0 || e.queryReplaceMatch < 0 {
+		return 0
+	}
+	runes := e.isearchGetRunes(buf)
+	toRunes := []rune(e.queryReplaceTo)
+
+	first := e.queryReplaceMatch
+	// out holds the rewritten text for [first, lastEnd): the untouched runes
+	// between matches interleaved with the replacement.
+	out := make([]rune, 0, len(needle)*8)
+	count := 0
+	prev, lastEnd := first, first
+	for pos := first; pos <= len(runes)-len(needle); {
+		if runesMatch(runes[pos:], needle) {
+			out = append(out, runes[prev:pos]...)
+			out = append(out, toRunes...)
+			pos += len(needle)
+			prev, lastEnd = pos, pos
+			count++
+			continue
+		}
+		pos++
+	}
+	if count == 0 {
+		e.queryReplaceMatch = -1
+		return 0
+	}
+
+	buf.ReplaceString(first, lastEnd-first, string(out))
+
+	// Leave point where the incremental version did: just after the last
+	// replacement.
+	end := first + len(out)
+	buf.SetPoint(end)
+	e.queryReplaceCursor = end
+	e.queryReplaceMatch = -1
+	if e.activeWin != nil {
+		e.activeWin.EnsurePointVisible()
+	}
+	return count
 }
 
 // queryReplaceFinish ends query-replace mode.
 func (e *Editor) queryReplaceFinish(msg string) {
 	e.queryReplaceActive = false
 	e.queryReplaceMatch = -1
+	e.isearchClearCaches() // release the cached rune copy of the buffer
 	e.Message("%s", strings.TrimSpace(msg))
 }

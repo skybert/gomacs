@@ -3,6 +3,8 @@ package editor
 import (
 	"strings"
 	"testing"
+
+	"github.com/skybert/gomacs/internal/buffer"
 )
 
 func TestDabbrevWordsInText(t *testing.T) {
@@ -119,6 +121,111 @@ func TestCmdDabbrevExpand_CommandNameFallback(t *testing.T) {
 // (pt == dabbrevLastEnd with an unchanged prefix). The state is seeded as if a
 // prior expansion just completed and the detected word before point equals the
 // recorded prefix, so the branch undoes the previous expansion and cycles.
+// ---------------------------------------------------------------------------
+// buildDabbrevCandidates
+// ---------------------------------------------------------------------------
+
+// TestBuildDabbrevCandidates_NearestFirstCurrentBuffer pins the documented
+// ordering: within the current buffer, candidates come back nearest-to-point
+// first.
+func TestBuildDabbrevCandidates_NearestFirstCurrentBuffer(t *testing.T) {
+	e := newTestEditor("xmas hello world xyz xylophone")
+	buf := e.ActiveBuffer()
+	pt := 21 // just after "xyz "
+	got := e.buildDabbrevCandidates("x", pt, buf)
+	if len(got) < 2 {
+		t.Fatalf("expected at least 2 candidates, got %v", got)
+	}
+	if got[0] != "xylophone" {
+		t.Errorf("nearest candidate should be first: got %v", got)
+	}
+}
+
+// TestBuildDabbrevCandidates_OtherBufferAfterCurrent verifies that matches
+// from the current buffer are all listed before matches from other open
+// buffers, regardless of distance.
+func TestBuildDabbrevCandidates_OtherBufferAfterCurrent(t *testing.T) {
+	e := newTestEditor("foobar")
+	cur := e.ActiveBuffer()
+	other := buffer.NewWithContent("*other*", "foobaz")
+	e.buffers = append(e.buffers, other)
+
+	got := e.buildDabbrevCandidates("foo", cur.Len(), cur)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 candidates, got %v", got)
+	}
+	if got[0] != "foobar" || got[1] != "foobaz" {
+		t.Errorf("expected current-buffer match before other-buffer match, got %v", got)
+	}
+}
+
+// TestBuildDabbrevCandidates_DuplicateSuppressedAcrossBuffers checks that a
+// word appearing (case-insensitively) in both the current and another buffer
+// is only reported once, keeping the first (current-buffer) spelling.
+func TestBuildDabbrevCandidates_DuplicateSuppressedAcrossBuffers(t *testing.T) {
+	e := newTestEditor("Foobar")
+	cur := e.ActiveBuffer()
+	other := buffer.NewWithContent("*other*", "FOOBAR")
+	e.buffers = append(e.buffers, other)
+
+	got := e.buildDabbrevCandidates("foo", cur.Len(), cur)
+	if len(got) != 1 {
+		t.Fatalf("expected duplicate suppressed to 1 candidate, got %v", got)
+	}
+	if got[0] != "Foobar" {
+		t.Errorf("expected original current-buffer spelling %q, got %q", "Foobar", got[0])
+	}
+}
+
+// TestBuildDabbrevCandidates_NoMatch verifies an unmatched prefix (that also
+// matches no command name) yields no candidates.
+func TestBuildDabbrevCandidates_NoMatch(t *testing.T) {
+	e := newTestEditor("nothing matches here")
+	got := e.buildDabbrevCandidates("qzxjk", 0, e.ActiveBuffer())
+	if len(got) != 0 {
+		t.Errorf("expected no candidates, got %v", got)
+	}
+}
+
+// TestBuildDabbrevCandidates_PrefixMatchSemantics checks that matching is
+// case-insensitive and that a word identical to the prefix (case-folded) is
+// never offered as its own expansion.
+func TestBuildDabbrevCandidates_PrefixMatchSemantics(t *testing.T) {
+	e := newTestEditor("foo Foo FOOBAR foobaz")
+	got := e.buildDabbrevCandidates("FOO", e.ActiveBuffer().Len(), e.ActiveBuffer())
+	for _, w := range got {
+		if strings.EqualFold(w, "foo") {
+			t.Errorf("word equal to the prefix should be excluded, got %v", got)
+		}
+	}
+	want := map[string]bool{"FOOBAR": true, "foobaz": true}
+	for _, w := range got {
+		if want[w] {
+			delete(want, w)
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("missing expected candidates: %v (got %v)", want, got)
+	}
+}
+
+// TestBuildDabbrevCandidates_CommandNameFallback covers candidate source #3:
+// registered command names matching the prefix are appended when no buffer
+// candidate already covers them.
+func TestBuildDabbrevCandidates_CommandNameFallback(t *testing.T) {
+	e := newTestEditor("forward-c")
+	got := e.buildDabbrevCandidates("forward-c", e.ActiveBuffer().Len(), e.ActiveBuffer())
+	found := false
+	for _, w := range got {
+		if w == "forward-char" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected \"forward-char\" command name among candidates, got %v", got)
+	}
+}
+
 func TestCov_DabbrevExpand_CycleBranch(t *testing.T) {
 	e := newTestEditor("foobar foobaz foo")
 	b := e.ActiveBuffer()

@@ -29,8 +29,42 @@ type lspConn struct {
 	openFiles map[string]int       // uri → last-sent modCount
 	lastSent  map[string]time.Time // uri → time of last didChange/didSave/didOpen send
 
+	// textScratch is a reusable UTF-8 encode buffer for document snapshots (see
+	// documentText).  It is deliberately per-connection state rather than a
+	// package-level global so two language servers cannot stomp on each other.
+	//
+	// INVARIANT: textScratch is only ever touched on the main (UI) goroutine.
+	// Every writer — lspSendDidChange, lspDidSave, lspDidOpen — is reached
+	// either directly from the event loop / a command, or from an lspAsync
+	// callback, which the event loop drains off e.lspCbs and runs on the main
+	// goroutine.  It is therefore unguarded by filesMu on purpose; do not read
+	// or write it from a client callback or a goroutine.
+	textScratch []byte
+
 	diagMu      sync.RWMutex
 	diagnostics map[string][]lsp.Diagnostic // uri → diagnostics
+}
+
+// documentText returns buf's full contents as a string for a text-sync payload.
+//
+// It encodes UTF-8 straight out of the gap buffer into conn.textScratch, which
+// is reused across calls, so the O(n) []rune materialisation plus separate
+// UTF-8 encode that buf.String() performs collapses into a single pass with no
+// allocation for the encode itself.  buffer.Buffer is not goroutine-safe, so
+// this necessarily still runs on the main goroutine — the point is that it is
+// now about half the work it used to be, which is what lspDidChangeDebounce was
+// protecting the event loop from.
+//
+// The returned value is a string, not the scratch slice: the payload is handed
+// to lsp.Client, which keeps params unmarshalled in its outbound queue and
+// json.Marshal's them later on its writer goroutine.  Handing over the reused
+// scratch slice would mean the next flush overwrites bytes that goroutine is
+// still reading — a data race that would ship a corrupted document to the
+// server.  The string conversion copies once, which buys back exclusive
+// ownership of the scratch buffer; correctness is worth the one copy here.
+func (conn *lspConn) documentText(buf *buffer.Buffer) string {
+	conn.textScratch = buf.AppendBytes(conn.textScratch[:0])
+	return string(conn.textScratch)
 }
 
 // lspDefPos is one entry on the definition jump stack (for M-,).
@@ -134,11 +168,16 @@ func (e *Editor) lspClose() {
 // lspDidChangeDebounce is the minimum interval between two
 // textDocument/didChange notifications for the same file sent via
 // lspMaybeDidChange.  Redraw() calls lspMaybeDidChange after every keystroke;
-// without this, a fast typist (or a keyboard macro) triggers an O(n)
-// buf.String() copy, a JSON marshal, and a full-document write down the LSP
-// pipe on every single character.  User-initiated requests whose result
-// depends on the server having current text right now — find-definition
-// (M-.), find-references (M-?), show-doc (C-c h) — must call
+// without this, a fast typist (or a keyboard macro) triggers an O(n) snapshot
+// of the document and a JSON-marshalled full-document didChange on every
+// single character.  (Neither the pipe write nor the json.Marshal happens here
+// any more: lsp.Client queues outbound messages unmarshalled and a writer
+// goroutine drains them, so a stalled language server cannot block the event
+// loop.  The O(n) document snapshot still runs on the main goroutine — see
+// lspConn.documentText, which makes it as cheap as it can be — so the debounce
+// still matters.)  User-initiated requests whose result depends on the server
+// having current text right now — find-definition (M-.), find-references
+// (M-?), show-doc (C-c h) — must call
 // lspFlushDidChange instead, which bypasses the debounce so a coalesced-away
 // edit is never missed.  Passive, best-effort paths that also fire on every
 // keystroke — eldoc-style hover (lspMaybeHover) and as-you-type completion
@@ -200,15 +239,34 @@ func (e *Editor) lspSendDidChange(buf *buffer.Buffer, force bool) {
 	conn.lastSent[uri] = time.Now()
 	conn.filesMu.Unlock()
 
-	_ = conn.client.Notify("textDocument/didChange", map[string]any{
+	// Notify only queues the message — the blocking pipe write and the
+	// json.Marshal both happen on the client's writer goroutine — so this is
+	// safe to call from Redraw on the main event loop even when the language
+	// server has stopped reading its stdin.  The one cost we still pay here is
+	// the O(n) document snapshot, which is why lspDidChangeDebounce exists;
+	// conn.documentText keeps it to a single UTF-8 encode pass out of the gap
+	// buffer into a reused scratch slice.
+	err := conn.client.Notify("textDocument/didChange", map[string]any{
 		"textDocument": map[string]any{
 			"uri":     uri,
 			"version": modCount,
 		},
 		"contentChanges": []map[string]any{
-			{"text": buf.String()},
+			{"text": conn.documentText(buf)},
 		},
 	})
+	if err != nil {
+		// The server is so far behind that the client dropped this
+		// notification (or the connection is gone).  Roll the bookkeeping back
+		// so we do not pretend the server has this version: the next edit — or
+		// the next forced flush before a request — resends the full text.
+		conn.filesMu.Lock()
+		if cur, stillOpen := conn.openFiles[uri]; stillOpen && cur == modCount {
+			conn.openFiles[uri] = lastMod
+			delete(conn.lastSent, uri)
+		}
+		conn.filesMu.Unlock()
+	}
 }
 
 // lspDidSave sends textDocument/didSave for buf.  Called from cmdSaveBuffer.
@@ -224,10 +282,15 @@ func (e *Editor) lspDidSave(buf *buffer.Buffer) {
 		return
 	}
 	uri := lsp.FileURI(buf.Filename())
-	_ = conn.client.Notify("textDocument/didSave", map[string]any{
+	err := conn.client.Notify("textDocument/didSave", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
-		"text":         buf.String(),
+		"text":         conn.documentText(buf),
 	})
+	if err != nil {
+		// Queued nowhere: leave the debounce state alone so the next
+		// didChange resends the full text the server never got.
+		return
+	}
 
 	conn.filesMu.Lock()
 	if _, open := conn.openFiles[uri]; open {
@@ -594,7 +657,7 @@ func (e *Editor) lspMaybeHover() {
 	// Run() after every Redraw() — i.e. on every keystroke that moves point,
 	// not just when the user explicitly asks for documentation. Forcing a
 	// flush here would defeat lspDidChangeDebounce entirely: a fast typist
-	// would pay a full buf.String() + json.Marshal + pipe write on every
+	// would pay a full document snapshot + json.Marshal + pipe write on every
 	// character (measured ~6 ms for a 50k-line file), which is exactly what
 	// the debounce exists to avoid. Redraw() already called lspMaybeDidChange
 	// for this same keystroke immediately before Run() calls us, so this is
@@ -735,14 +798,23 @@ func lspDidOpen(conn *lspConn, buf *buffer.Buffer) {
 	conn.filesMu.Unlock()
 
 	langID := buf.Mode()
-	_ = conn.client.Notify("textDocument/didOpen", map[string]any{
+	err := conn.client.Notify("textDocument/didOpen", map[string]any{
 		"textDocument": map[string]any{
 			"uri":        uri,
 			"languageId": langID,
 			"version":    buf.ModCount(),
-			"text":       buf.String(),
+			"text":       conn.documentText(buf),
 		},
 	})
+	if err != nil {
+		// didOpen never reached the queue, so the server does not know about
+		// this document.  Forget it again: sending didChange for an unopened
+		// document is a protocol error, and a later lspActivate call (e.g. on
+		// the next visit to the file) retries the open.
+		conn.filesMu.Lock()
+		delete(conn.openFiles, uri)
+		conn.filesMu.Unlock()
+	}
 }
 
 // findProjectRoot walks upward from dir looking for any of the marker files.

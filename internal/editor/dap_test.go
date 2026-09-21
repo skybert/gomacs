@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
@@ -103,13 +104,15 @@ func TestDapToggleBreakpoint_Remove(t *testing.T) {
 func TestDapLaunchArgs_TestFile(t *testing.T) {
 	dir := t.TempDir()
 	fname := filepath.Join(dir, "foo_test.go")
-	src := "package main\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {}\n"
+	src := "package main\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {\n\tx := 1\n\t_ = x\n}\n"
 	if err := os.WriteFile(fname, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	buf := buffer.NewWithContent(fname, src)
 	buf.SetFilename(fname)
 	buf.SetMode("go")
+	// Point inside TestFoo's body: that is the test debug-start must select.
+	buf.SetPoint(strings.Index(src, "x := 1"))
 
 	e := newDAPTestEditor("")
 	args, _, err := e.dapLaunchArgs(buf)
@@ -205,10 +208,10 @@ func sourceLeft(src *window.Window) int { return src.Left() + src.Width() + 1 }
 // ---------------------------------------------------------------------------
 
 func TestDapTestFuncAtPoint_Found(t *testing.T) {
-	src := "package main\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {\n}\n\nfunc TestBeta(t *testing.T) {\n}\n"
+	src := "package main\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {\n}\n\nfunc TestBeta(t *testing.T) {\n\tinBeta := 1\n}\n"
 	buf := buffer.NewWithContent("foo_test.go", src)
-	// Point at end of TestBeta body.
-	buf.SetPoint(buf.Len())
+	// Point inside TestBeta's body.
+	buf.SetPoint(strings.Index(src, "inBeta := 1"))
 
 	got := dapTestFuncAtPoint(buf)
 	if got != "TestBeta" {
@@ -221,6 +224,148 @@ func TestDapTestFuncAtPoint_Fallback(t *testing.T) {
 	got := dapTestFuncAtPoint(buf)
 	if got != "." {
 		t.Errorf("got %q, want \".\"", got)
+	}
+}
+
+// rangeAwareTestSrc is one file exercising every way point can sit inside or
+// outside a test function, including braces the range scan must not count
+// because they are quoted or commented out.
+var rangeAwareTestSrc = "package main\n" +
+	"\n" +
+	"import \"testing\"\n" +
+	"\n" +
+	"func TestAlpha(t *testing.T) {\n" +
+	"\tif s := \"}\"; s != \"}\" { // an unbalanced brace in a string\n" +
+	"\t\tt.Fatal(\"nope\")\n" +
+	"\t}\n" +
+	"\tbrace := '}' // and one in a rune literal\n" +
+	"\traw := `}}}`\n" +
+	"\t/* }}} in a block comment\n" +
+	"\t   spanning lines } */\n" +
+	"\tinAlpha := 1\n" +
+	"\t_, _, _ = brace, raw, inAlpha\n" +
+	"}\n" +
+	"\n" +
+	"var betweenTests = 1\n" +
+	"\n" +
+	"func TestBeta(t *testing.T) {\n" +
+	"\tinBeta := 1\n" +
+	"\t_ = inBeta\n" +
+	"}\n" +
+	"\n" +
+	"func helperAfterTests(t *testing.T) {\n" +
+	"\tinHelper := 1\n" +
+	"\t_ = inHelper\n" +
+	"}\n"
+
+// TestDapTestFuncAtPoint_OnlyInsideFunctionBody covers the spec's rule that the
+// test at point is only used when point really is inside it: "If the cursor is on
+// a class, or outside any function, the entire file is debugged."  Scanning
+// backwards for the nearest preceding declaration used to attribute a top-level
+// var, or a helper declared after a test, to that test.
+func TestDapTestFuncAtPoint_OnlyInsideFunctionBody(t *testing.T) {
+	tests := []struct {
+		name string
+		at   string // point goes at the first occurrence of this text ("" = end of buffer)
+		want string
+	}{
+		{"before any test", "import \"testing\"", "."},
+		{"on the declaration line", "func TestAlpha", "TestAlpha"},
+		{"brace inside a string", "s := \"}\"", "TestAlpha"},
+		{"brace inside a rune literal", "brace := '}'", "TestAlpha"},
+		{"brace inside a raw string", "raw := `", "TestAlpha"},
+		{"brace inside a block comment", "/* }}} ", "TestAlpha"},
+		{"after the quoted braces", "inAlpha := 1", "TestAlpha"},
+		{"on the closing brace", "}\n\nvar betweenTests", "TestAlpha"},
+		{"between two tests", "var betweenTests", "."},
+		{"inside the second test", "inBeta := 1", "TestBeta"},
+		{"inside a helper declared after a test", "inHelper := 1", "."},
+		{"end of buffer", "", "."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := buffer.NewWithContent("foo_test.go", rangeAwareTestSrc)
+			pt := buf.Len()
+			if tt.at != "" {
+				idx := strings.Index(rangeAwareTestSrc, tt.at)
+				if idx < 0 {
+					t.Fatalf("marker %q is not in the fixture", tt.at)
+				}
+				pt = utf8.RuneCountInString(rangeAwareTestSrc[:idx])
+			}
+			buf.SetPoint(pt)
+			if got := dapTestFuncAtPoint(buf); got != tt.want {
+				t.Errorf("point at %q: got %q, want %q", tt.at, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDapTestFuncAtPoint_MultibyteBeforePoint guards the byte/rune conversion:
+// regexp reports byte offsets while buffer positions are rune indices, so a
+// multi-byte rune before the declaration used to shift the range.
+func TestDapTestFuncAtPoint_MultibyteBeforePoint(t *testing.T) {
+	src := "package main\n\n// ★ højere ★ unicode\n\nfunc TestUnicode(t *testing.T) {\n\ts := \"π\"\n\t_ = s\n}\n\nvar after = 1\n"
+	buf := buffer.NewWithContent("foo_test.go", src)
+
+	buf.SetPoint(utf8.RuneCountInString(src[:strings.Index(src, "_ = s")]))
+	if got := dapTestFuncAtPoint(buf); got != "TestUnicode" {
+		t.Errorf("inside the body: got %q, want \"TestUnicode\"", got)
+	}
+	buf.SetPoint(utf8.RuneCountInString(src[:strings.Index(src, "var after")]))
+	if got := dapTestFuncAtPoint(buf); got != "." {
+		t.Errorf("after the body: got %q, want \".\"", got)
+	}
+}
+
+// TestDapTestFuncAtPoint_UnbalancedBraces covers the half-written test: the body
+// has no closing brace yet, and debugging it must still select it rather than
+// silently running the whole file.
+func TestDapTestFuncAtPoint_UnbalancedBraces(t *testing.T) {
+	src := "package main\n\nfunc TestHalfWritten(t *testing.T) {\n\tif true {\n\t\tx := 1\n"
+	buf := buffer.NewWithContent("foo_test.go", src)
+	buf.SetPoint(buf.Len())
+	if got := dapTestFuncAtPoint(buf); got != "TestHalfWritten" {
+		t.Errorf("got %q, want \"TestHalfWritten\"", got)
+	}
+}
+
+// TestGoBodyEnd covers the brace scanner on its own, including the literals and
+// comments whose braces it has to ignore.
+func TestGoBodyEnd(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want string // text the closing brace is expected to start
+		ok   bool
+	}{
+		{"simple body", "func f() {\n}\nafter", "}\nafter", true},
+		{"nested braces", "func f() {\n\tif x {\n\t}\n}\nafter", "}\nafter", true},
+		{"brace in string", "func f() {\n\ts := \"}\"\n}\nafter", "}\nafter", true},
+		{"brace in rune literal", "func f() {\n\tr := '}'\n}\nafter", "}\nafter", true},
+		{"escaped quote", "func f() {\n\ts := \"\\\"}\"\n}\nafter", "}\nafter", true},
+		{"brace in raw string", "func f() {\n\ts := `}` + `{`\n}\nafter", "}\nafter", true},
+		{"brace in line comment", "func f() {\n\t// }\n}\nafter", "}\nafter", true},
+		{"brace in block comment", "func f() {\n\t/* } */\n}\nafter", "}\nafter", true},
+		{"division is not a comment", "func f() {\n\tx := a / b\n}\nafter", "}\nafter", true},
+		{"unterminated string", "func f() {\n\ts := \"oops\n}\nafter", "}\nafter", true},
+		{"never closed", "func f() {\n\tif x {\n", "", false},
+		{"no body", "func f()", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runes := []rune(tt.src)
+			end, ok := goBodyEnd(runes, 0)
+			if ok != tt.ok {
+				t.Fatalf("ok = %v, want %v (end %d)", ok, tt.ok, end)
+			}
+			if !ok {
+				return
+			}
+			if got := string(runes[end:]); got != tt.want {
+				t.Errorf("closing brace at %q, want it at %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -889,7 +1034,7 @@ func TestCmdDebugStart_JavaWithoutJdtls(t *testing.T) {
 
 func TestDapStartAdapter_ProcessFailure(t *testing.T) {
 	info := &langModeInfo{modeName: "go", dapCmd: []string{"gomacs-no-such-adapter"}}
-	_, _, err := dapStartAdapter(info, dapLaunchRequest{runDir: t.TempDir()})
+	_, _, _, err := dapStartAdapter(info, dapLaunchRequest{runDir: t.TempDir()})
 	if err == nil {
 		t.Fatal("expected an error for a missing adapter binary")
 	}
@@ -900,7 +1045,7 @@ func TestDapStartAdapter_ProcessFailure(t *testing.T) {
 
 func TestDapStartAdapter_JdtlsWithoutConnection(t *testing.T) {
 	info := &langModeInfo{modeName: "java", dapKind: dapAdapterJdtls}
-	_, _, err := dapStartAdapter(info, dapLaunchRequest{runDir: t.TempDir()})
+	_, _, _, err := dapStartAdapter(info, dapLaunchRequest{runDir: t.TempDir()})
 	if err == nil {
 		t.Fatal("expected an error when there is no jdtls connection")
 	}
@@ -1373,7 +1518,7 @@ func TestDapStartAdapter_JdtlsSuccess(t *testing.T) {
 	defer cleanup()
 
 	info := langModeByName("java")
-	client, launch, err := dapStartAdapter(info, dapLaunchRequest{
+	client, launch, note, err := dapStartAdapter(info, dapLaunchRequest{
 		file:    "/src/Main.java",
 		runDir:  "/src",
 		lspConn: conn,
@@ -1384,6 +1529,9 @@ func TestDapStartAdapter_JdtlsSuccess(t *testing.T) {
 	defer client.Close()
 	if launch["mainClass"] != "com.example.Main" {
 		t.Errorf("launch args = %v, want the resolved main class", launch)
+	}
+	if note != "" {
+		t.Errorf("note = %q, want none when the project's main class was used", note)
 	}
 }
 
@@ -1398,7 +1546,7 @@ func TestDapStartAdapter_JdtlsClasspathFailureDoesNotStartAdapter(t *testing.T) 
 	defer cleanup()
 
 	info := langModeByName("java")
-	_, _, err := dapStartAdapter(info, dapLaunchRequest{file: "/src/Main.java", runDir: "/src", lspConn: conn})
+	_, _, _, err := dapStartAdapter(info, dapLaunchRequest{file: "/src/Main.java", runDir: "/src", lspConn: conn})
 	if err == nil {
 		t.Fatal("expected the classpath failure to abort the start")
 	}

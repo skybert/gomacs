@@ -9,6 +9,7 @@ import (
 	"github.com/gdamore/tcell/v3"
 	"github.com/skybert/gomacs/internal/buffer"
 	"github.com/skybert/gomacs/internal/terminal"
+	"github.com/skybert/gomacs/internal/window"
 )
 
 func TestDefaultBuildCommand_Make(t *testing.T) {
@@ -164,39 +165,6 @@ func TestRunBuild_NoErrors(t *testing.T) {
 	}
 }
 
-func TestGotoCompilationError_OpensFile(t *testing.T) {
-	e := newCompileTestEditor("")
-	dir := t.TempDir()
-	p := filepath.Join(dir, "x.txt")
-	if err := os.WriteFile(p, []byte("line1\nline2\nline3\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	e.compilationErrors = []compilationError{{File: p, Line: 2, Col: 1}}
-	e.compilationErrorIdx = -1
-
-	e.cmdNextError()
-	if e.ActiveBuffer().Filename() != p {
-		t.Fatalf("cmdNextError should open %q, got %q", p, e.ActiveBuffer().Filename())
-	}
-	line, _ := e.ActiveBuffer().LineCol(e.ActiveBuffer().Point())
-	if line != 2 {
-		t.Fatalf("point should be on line 2, got %d", line)
-	}
-
-	// Previous wraps around to the same single error.
-	e.cmdPreviousError()
-	if e.compilationErrorIdx != 0 {
-		t.Fatalf("expected idx 0 after wrap, got %d", e.compilationErrorIdx)
-	}
-}
-
-func TestNextError_NoErrors(t *testing.T) {
-	e := newCompileTestEditor("")
-	e.compilationErrors = nil
-	e.cmdNextError()     // should just message, not crash
-	e.cmdPreviousError() // same
-}
-
 func TestCompilationDispatch(t *testing.T) {
 	e := newCompileTestEditor("hello")
 	comp := buffer.NewWithContent("*compilation*", "out\n")
@@ -239,5 +207,63 @@ func TestShowCompilationWindow_SplitsSingleWindow(t *testing.T) {
 	e.showCompilationWindow(comp)
 	if len(e.windows) != 2 {
 		t.Fatalf("second call should not add a window, got %d", len(e.windows))
+	}
+}
+
+func TestShowCompilationWindow_TooSmallReplacesActiveWindowBuffer(t *testing.T) {
+	e := newCompileTestEditor("hello")
+	comp := buffer.NewWithContent("*compilation*", "out")
+	w := e.windows[0]
+	// Shrink the sole window below the split threshold (totalH < 6): the
+	// window should be too small to split, so showCompilationWindow must fall
+	// back to replacing the active window's buffer in place.
+	w.SetRegion(w.Top(), w.Left(), w.Width(), 5)
+
+	e.showCompilationWindow(comp)
+
+	if len(e.windows) != 1 {
+		t.Fatalf("expected no split (still 1 window), got %d", len(e.windows))
+	}
+	if e.activeWin.Buf() != comp {
+		t.Fatalf("expected active window buffer replaced with *compilation*, got %q", e.activeWin.Buf().Name())
+	}
+}
+
+func TestShowCompilationWindow_MultipleWindowsPicksLastNonActive(t *testing.T) {
+	e := newCompileTestEditor("hello")
+	comp := buffer.NewWithContent("*compilation*", "out")
+	other := buffer.NewWithContent("*other*", "other")
+	// e.activeWin is e.windows[0] (set up by newCapTestEditor); append a second,
+	// inactive window that showCompilationWindow should pick.
+	w2 := window.New(other, 12, 0, 80, 11)
+	e.windows = append(e.windows, w2)
+
+	e.showCompilationWindow(comp)
+
+	if w2.Buf() != comp {
+		t.Fatalf("expected last non-active window to show *compilation*, got %q", w2.Buf().Name())
+	}
+	if e.windows[0].Buf() == comp {
+		t.Fatal("active window's buffer should not have been replaced")
+	}
+}
+
+func TestShowCompilationWindow_MultipleWindowsSkipsActiveWindow(t *testing.T) {
+	e := newCompileTestEditor("hello")
+	comp := buffer.NewWithContent("*compilation*", "out")
+	other := buffer.NewWithContent("*other*", "other")
+	w2 := window.New(other, 12, 0, 80, 11)
+	e.windows = append(e.windows, w2)
+	// Make the second (last) window active instead: showCompilationWindow must
+	// skip it and fall back to the earlier, non-active window.
+	e.activeWin = w2
+
+	e.showCompilationWindow(comp)
+
+	if e.windows[0].Buf() != comp {
+		t.Fatalf("expected first (non-active) window to show *compilation*, got %q", e.windows[0].Buf().Name())
+	}
+	if w2.Buf() == comp {
+		t.Fatal("active window's buffer should not have been replaced")
 	}
 }
